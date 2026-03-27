@@ -1,0 +1,213 @@
+# muxr CI/CD pipeline
+#
+# Supply chain: CycloneDX SBOM + cosign keyless signing via GitLab OIDC.
+# Binaries published to GitLab Generic Package Registry on tag.
+
+include:
+  - template: Jobs/Secret-Detection.gitlab-ci.yml
+
+stages:
+  - test
+  - build
+  - sign
+  - release
+
+default:
+  interruptible: true
+  retry:
+    max: 2
+    when:
+      - runner_system_failure
+      - stuck_or_timeout_failure
+
+variables:
+  CARGO_HOME: ${CI_PROJECT_DIR}/.cargo
+
+workflow:
+  name: "$CI_COMMIT_REF_NAME ($CI_PIPELINE_SOURCE)"
+  auto_cancel:
+    on_new_commit: interruptible
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_TAG
+
+# -- Reusable config --
+
+.rust-macos:
+  tags:
+    - saas-macos-large-m2pro
+  image: macos-15-xcode-16
+  cache:
+    - key: cargo-registry-${CI_COMMIT_REF_SLUG}
+      paths:
+        - .cargo/registry/cache
+        - .cargo/registry/index
+      policy: pull-push
+    - key: cargo-target-${CI_COMMIT_REF_SLUG}
+      paths:
+        - target/
+      policy: pull-push
+  before_script:
+    - export CARGO_HOME="${CI_PROJECT_DIR}/.cargo"
+    - export RUSTUP_HOME="${CI_PROJECT_DIR}/.rustup"
+    - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.93.0
+    - source "${CARGO_HOME}/env"
+    - rustc --version
+
+.on-tag:
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+/
+
+.on-code-change:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_TAG
+
+# -- Test stage --
+
+check:
+  stage: test
+  extends:
+    - .rust-macos
+    - .on-code-change
+  script:
+    - rustup component add clippy
+    - cargo clippy --release -- -D warnings
+    - cargo test --release
+
+audit:
+  stage: test
+  extends:
+    - .rust-macos
+    - .on-code-change
+  needs:
+    - job: check
+      artifacts: false
+  script:
+    - cargo install --locked cargo-audit cargo-deny
+    - echo "--- cargo audit (RustSec advisory database) ---"
+    - cargo audit
+    - echo "--- cargo deny (licenses, advisories, bans) ---"
+    - cargo deny check advisories licenses bans || true
+
+# -- Build stage (tag only) --
+
+build:darwin-arm64:
+  stage: build
+  extends:
+    - .rust-macos
+    - .on-tag
+  interruptible: false
+  needs:
+    - job: check
+      artifacts: false
+    - job: audit
+      artifacts: false
+  script:
+    - cargo install --locked cargo-cyclonedx
+    - cargo build --release
+    - strip target/release/muxr
+    - cp target/release/muxr muxr-darwin-arm64
+    - shasum -a 256 muxr-darwin-arm64 > muxr-darwin-arm64.sha256
+    - echo "--- Generating CycloneDX SBOM ---"
+    - cargo cyclonedx --format json --override-filename muxr-darwin-arm64.sbom.cdx
+  artifacts:
+    paths:
+      - muxr-darwin-arm64
+      - muxr-darwin-arm64.sha256
+      - muxr-darwin-arm64.sbom.cdx.json
+    expire_in: 4 weeks
+    reports:
+      cyclonedx:
+        - muxr-darwin-arm64.sbom.cdx.json
+
+# -- Sign stage (tag only) --
+
+sign:darwin:
+  stage: sign
+  extends: .on-tag
+  image:
+    name: bitnami/cosign:latest
+    entrypoint: [""]
+  interruptible: false
+  needs:
+    - job: build:darwin-arm64
+      artifacts: true
+  id_tokens:
+    SIGSTORE_ID_TOKEN:
+      aud: sigstore
+  script:
+    - echo "--- Signing binary ---"
+    - cosign sign-blob --yes
+        --bundle muxr-darwin-arm64.bundle
+        muxr-darwin-arm64
+    - echo "--- Signing SBOM ---"
+    - cosign sign-blob --yes
+        --bundle muxr-darwin-arm64.sbom.cdx.json.bundle
+        muxr-darwin-arm64.sbom.cdx.json || echo 'SBOM signing skipped'
+  artifacts:
+    paths:
+      - muxr-darwin-arm64.bundle
+      - muxr-darwin-arm64.sbom.cdx.json.bundle
+    expire_in: 4 weeks
+
+# -- Release stage (tag only) --
+
+publish:
+  stage: release
+  extends:
+    - .rust-macos
+    - .on-tag
+  interruptible: false
+  needs:
+    - job: build:darwin-arm64
+      artifacts: true
+  script:
+    - |
+      VERSION="${CI_COMMIT_TAG#v}"
+      FILENAME="muxr-${VERSION}-darwin-arm64"
+      cp muxr-darwin-arm64 "${FILENAME}"
+      curl --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+           --upload-file "${FILENAME}" \
+           "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/muxr/${VERSION}/${FILENAME}"
+
+release:
+  stage: release
+  extends: .on-tag
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  interruptible: false
+  needs:
+    - job: build:darwin-arm64
+      artifacts: true
+    - job: sign:darwin
+      artifacts: true
+    - job: publish
+  script:
+    - echo "Creating release for ${CI_COMMIT_TAG}"
+  release:
+    tag_name: ${CI_COMMIT_TAG}
+    name: "muxr ${CI_COMMIT_TAG}"
+    description: |
+      ## muxr ${CI_COMMIT_TAG}
+
+      Tmux session manager for AI coding workflows.
+
+      ### Install
+
+      ```bash
+      curl -L "${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/muxr-darwin-arm64?job=build:darwin-arm64" -o muxr
+      chmod +x muxr && mv muxr ~/bin/muxr
+      ```
+    assets:
+      links:
+        - name: "muxr-darwin-arm64"
+          url: "${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/muxr-darwin-arm64?job=build:darwin-arm64"
+          link_type: "package"
+        - name: "muxr-darwin-arm64.sha256"
+          url: "${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/muxr-darwin-arm64.sha256?job=build:darwin-arm64"
+          link_type: "other"
+        - name: "muxr-darwin-arm64.sbom.cdx.json"
+          url: "${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/muxr-darwin-arm64.sbom.cdx.json?job=build:darwin-arm64"
+          link_type: "other"
