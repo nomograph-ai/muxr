@@ -23,7 +23,7 @@ struct Cli {
     claude: bool,
 
     /// Vertical name (e.g., work, personal, oss)
-    #[arg(trailing_var_arg = true, num_args = 0..)]
+    #[arg(num_args = 0..)]
     args: Vec<String>,
 }
 
@@ -47,7 +47,7 @@ enum Commands {
         claude: bool,
 
         /// Vertical and context (e.g., work api auth)
-        #[arg(trailing_var_arg = true, num_args = 1..)]
+        #[arg(num_args = 1..)]
         args: Vec<String>,
     },
     /// Rename the current session
