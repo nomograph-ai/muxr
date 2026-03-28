@@ -18,6 +18,10 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 
+    /// Use Claude Code instead of the default tool
+    #[arg(long)]
+    claude: bool,
+
     /// Vertical name (e.g., work, personal, oss)
     #[arg(trailing_var_arg = true, num_args = 0..)]
     args: Vec<String>,
@@ -38,6 +42,10 @@ enum Commands {
     TmuxStatus,
     /// Create a session in the background (don't attach)
     New {
+        /// Use Claude Code instead of the default tool
+        #[arg(long)]
+        claude: bool,
+
         /// Vertical and context (e.g., work api auth)
         #[arg(trailing_var_arg = true, num_args = 1..)]
         args: Vec<String>,
@@ -59,6 +67,14 @@ enum Commands {
     },
 }
 
+fn resolve_tool(claude_flag: bool, config: &Config) -> String {
+    if claude_flag {
+        "claude".to_string()
+    } else {
+        config.default_tool.clone()
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -71,7 +87,7 @@ fn main() -> Result<()> {
         }
         Some(Commands::Restore) => state::SavedState::restore(),
         Some(Commands::TmuxStatus) => cmd_tmux_status(),
-        Some(Commands::New { args }) => cmd_new(&args),
+        Some(Commands::New { claude, args }) => cmd_new(&args, claude),
         Some(Commands::Rename { name }) => cmd_rename(&name),
         Some(Commands::Kill { name }) => cmd_kill(&name),
         Some(Commands::Completions { shell }) => completions::generate(&shell),
@@ -79,7 +95,7 @@ fn main() -> Result<()> {
             if cli.args.is_empty() {
                 cmd_control_plane()
             } else {
-                cmd_open(&cli.args)
+                cmd_open(&cli.args, cli.claude)
             }
         }
     }
@@ -115,18 +131,17 @@ fn cmd_control_plane() -> Result<()> {
 }
 
 /// Open or attach to a session: muxr work api auth
-fn cmd_open(args: &[String]) -> Result<()> {
+fn cmd_open(args: &[String], claude: bool) -> Result<()> {
     let config = Config::load()?;
+    let tool = resolve_tool(claude, &config);
 
     let vertical = &args[0];
 
-    // Validate vertical exists
     if !config.verticals.contains_key(vertical) {
         let names = config.vertical_names().join(", ");
         anyhow::bail!("Unknown vertical: {vertical}\nKnown verticals: {names}");
     }
 
-    // Build session name
     let session = if args.len() >= 2 {
         let context = args[1..].join("/");
         format!("{vertical}/{context}")
@@ -134,15 +149,14 @@ fn cmd_open(args: &[String]) -> Result<()> {
         format!("{vertical}/default")
     };
 
-    // Resolve directory
     let dir = config.resolve_dir(vertical)?;
 
     if tmux::session_exists(&session) {
         eprintln!("Attaching to {session}");
         tmux::attach(&session)?;
     } else {
-        eprintln!("Creating {session} in {}", dir.display());
-        tmux::create_session(&session, &dir, &config.default_tool)?;
+        eprintln!("Creating {session} in {} ({})", dir.display(), tool);
+        tmux::create_session(&session, &dir, &tool)?;
         tmux::attach(&session)?;
     }
 
@@ -150,8 +164,9 @@ fn cmd_open(args: &[String]) -> Result<()> {
 }
 
 /// Create a session in the background without attaching.
-fn cmd_new(args: &[String]) -> Result<()> {
+fn cmd_new(args: &[String], claude: bool) -> Result<()> {
     let config = Config::load()?;
+    let tool = resolve_tool(claude, &config);
     let vertical = &args[0];
 
     if !config.verticals.contains_key(vertical) {
@@ -171,8 +186,8 @@ fn cmd_new(args: &[String]) -> Result<()> {
     if tmux::session_exists(&session) {
         eprintln!("{session} already exists");
     } else {
-        tmux::create_session(&session, &dir, &config.default_tool)?;
-        eprintln!("Created {session}");
+        tmux::create_session(&session, &dir, &tool)?;
+        eprintln!("Created {session} ({})", tool);
     }
 
     Ok(())
