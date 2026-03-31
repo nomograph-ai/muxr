@@ -19,13 +19,13 @@ pub fn session_exists(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Build the tool launch command, adding --name for claude sessions.
-/// Session names and IDs are shell-quoted to prevent accidental word splitting.
-pub fn tool_command(tool: &str, session_name: &str, resume_id: Option<&str>) -> String {
+/// Build the tool launch command.
+/// When resuming, passes the session ID shell-quoted to prevent word splitting.
+pub fn tool_command(tool: &str, resume_id: Option<&str>) -> String {
     if tool == "claude" {
         match resume_id {
             Some(id) => format!("claude --resume '{id}'"),
-            None => format!("claude --name '{session_name}'"),
+            None => "claude".to_string(),
         }
     } else {
         tool.to_string()

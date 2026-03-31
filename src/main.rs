@@ -154,7 +154,7 @@ fn cmd_open(args: &[String], tool_override: Option<&str>) -> Result<()> {
         eprintln!("Attaching to {session}");
         tmux::attach(&session)?;
     } else {
-        let tool_cmd = tmux::tool_command(&tool, &session, None);
+        let tool_cmd = tmux::tool_command(&tool, None);
         eprintln!("Creating {session} in {} ({})", dir.display(), tool);
         tmux::create_session(&session, &dir, &tool_cmd)?;
         tmux::attach(&session)?;
@@ -186,7 +186,7 @@ fn cmd_new(args: &[String], tool_override: Option<&str>) -> Result<()> {
     if tmux::session_exists(&session) {
         eprintln!("{session} already exists");
     } else {
-        let tool_cmd = tmux::tool_command(&tool, &session, None);
+        let tool_cmd = tmux::tool_command(&tool, None);
         tmux::create_session(&session, &dir, &tool_cmd)?;
         eprintln!("Created {session} ({})", tool);
     }

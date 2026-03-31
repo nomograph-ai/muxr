@@ -136,7 +136,7 @@ impl SavedState {
                 continue;
             }
 
-            let tool_cmd = tmux::tool_command(&s.tool, &s.name, s.session_id.as_deref());
+            let tool_cmd = tmux::tool_command(&s.tool, s.session_id.as_deref());
 
             tmux::create_session(&s.name, &dir, &tool_cmd)?;
             eprintln!("  {} -> {}", s.name, s.dir);
