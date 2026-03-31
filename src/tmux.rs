@@ -19,8 +19,21 @@ pub fn session_exists(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Build the tool launch command, adding --name for claude sessions.
+/// Session names and IDs are shell-quoted to prevent accidental word splitting.
+pub fn tool_command(tool: &str, session_name: &str, resume_id: Option<&str>) -> String {
+    if tool == "claude" {
+        match resume_id {
+            Some(id) => format!("claude --resume '{id}'"),
+            None => format!("claude --name '{session_name}'"),
+        }
+    } else {
+        tool.to_string()
+    }
+}
+
 /// Create a new tmux session (detached).
-pub fn create_session(name: &str, dir: &Path, tool: &str) -> Result<()> {
+pub fn create_session(name: &str, dir: &Path, tool_cmd: &str) -> Result<()> {
     let dir_str = dir.to_str().context("Invalid directory path")?;
 
     let status = Command::new("tmux")
@@ -34,7 +47,7 @@ pub fn create_session(name: &str, dir: &Path, tool: &str) -> Result<()> {
 
     // Send the tool command
     let status = Command::new("tmux")
-        .args(["send-keys", "-t", &target(name), tool, "Enter"])
+        .args(["send-keys", "-t", &target(name), tool_cmd, "Enter"])
         .status()
         .context("Failed to send keys to tmux session")?;
 
@@ -101,6 +114,22 @@ pub fn kill_session(name: &str) -> Result<()> {
         anyhow::bail!("tmux kill-session failed for {name}");
     }
     Ok(())
+}
+
+/// Get the PID of the first pane's process in a session.
+pub fn pane_pid(session: &str) -> Result<Option<u32>> {
+    let output = Command::new("tmux")
+        .args(["list-panes", "-t", &target(session), "-F", "#{pane_pid}"])
+        .output()
+        .context("Failed to get pane PID")?;
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let pid = stdout.lines().next().and_then(|l| l.trim().parse().ok());
+    Ok(pid)
 }
 
 /// Check if tmux server is running.

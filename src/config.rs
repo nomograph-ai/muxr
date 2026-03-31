@@ -17,7 +17,7 @@ pub struct Vertical {
 }
 
 fn default_tool() -> String {
-    "opencode".to_string()
+    "claude".to_string()
 }
 
 impl Config {

@@ -21,7 +21,7 @@ pub fn init() -> Result<()> {
 # Verticals define your project estates.
 # Each vertical maps to a directory and a status bar color.
 
-default_tool = "opencode"
+default_tool = "claude"
 
 # Add your verticals here. Examples:
 #
