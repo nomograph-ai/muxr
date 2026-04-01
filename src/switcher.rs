@@ -39,7 +39,7 @@ fn build_entries(config: &Config) -> Result<Vec<Entry>> {
     let sessions = tmux::list_sessions_detailed()?;
 
     // Build raw entries
-    let mut raw: Vec<Entry> = sessions
+    let raw: Vec<Entry> = sessions
         .into_iter()
         .map(|s| {
             let (vertical, context) = match s.name.split_once('/') {
@@ -61,23 +61,48 @@ fn build_entries(config: &Config) -> Result<Vec<Entry>> {
         })
         .collect();
 
-    // Sort: muxr control plane first, then by most recent activity
-    raw.sort_by(|a, b| {
-        let a_is_muxr = a.name == "muxr";
-        let b_is_muxr = b.name == "muxr";
-        match (a_is_muxr, b_is_muxr) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => b.activity.cmp(&a.activity), // most recent first
-        }
-    });
-
-    // Insert group separators between different verticals
-    let mut entries: Vec<Entry> = Vec::with_capacity(raw.len() * 2);
-    let mut last_vertical = String::new();
+    // Group by vertical, sort groups by most recent activity,
+    // sort sessions within each group by most recent activity.
+    // muxr control plane is always pinned to top (ungrouped).
+    let mut muxr_entry: Option<Entry> = None;
+    let mut groups: std::collections::HashMap<String, Vec<Entry>> =
+        std::collections::HashMap::new();
 
     for entry in raw {
-        if entry.vertical != last_vertical && !last_vertical.is_empty() {
+        if entry.name == "muxr" {
+            muxr_entry = Some(entry);
+        } else {
+            groups
+                .entry(entry.vertical.clone())
+                .or_default()
+                .push(entry);
+        }
+    }
+
+    // Sort sessions within each group by most recent activity
+    for group in groups.values_mut() {
+        group.sort_by(|a, b| b.activity.cmp(&a.activity));
+    }
+
+    // Sort groups by their most recent session's activity
+    let mut group_order: Vec<(String, u64)> = groups
+        .iter()
+        .map(|(name, entries)| {
+            let max_activity = entries.iter().map(|e| e.activity).max().unwrap_or(0);
+            (name.clone(), max_activity)
+        })
+        .collect();
+    group_order.sort_by(|a, b| b.1.cmp(&a.1));
+
+    // Build final list: muxr first, then groups with separators
+    let mut entries: Vec<Entry> = Vec::with_capacity(groups.values().map(|g| g.len()).sum::<usize>() + group_order.len() + 1);
+
+    if let Some(muxr) = muxr_entry {
+        entries.push(muxr);
+    }
+
+    for (group_name, _) in &group_order {
+        if !entries.is_empty() {
             entries.push(Entry {
                 vertical: String::new(),
                 context: String::new(),
@@ -88,8 +113,9 @@ fn build_entries(config: &Config) -> Result<Vec<Entry>> {
                 is_separator: true,
             });
         }
-        last_vertical = entry.vertical.clone();
-        entries.push(entry);
+        if let Some(group_entries) = groups.remove(group_name) {
+            entries.extend(group_entries);
+        }
     }
 
     Ok(entries)
@@ -356,10 +382,13 @@ fn draw_table(
             let e = &entries[idx];
 
             if e.is_separator {
-                return Row::new(vec![Cell::from(Line::from(Span::styled(
-                    "  ────────────────────────────────────────────",
-                    Style::default().fg(Color::Rgb(50, 50, 55)),
-                )))])
+                let sep_style = Style::default().fg(Color::Rgb(50, 50, 55));
+                return Row::new(vec![
+                    Cell::from(Span::styled("  ──────────────", sep_style)),
+                    Cell::from(Span::styled("────────────────────", sep_style)),
+                    Cell::from(Span::styled("────────", sep_style)),
+                    Cell::from(Span::styled("───────────", sep_style)),
+                ])
                 .height(1);
             }
 
