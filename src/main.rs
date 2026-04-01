@@ -328,8 +328,14 @@ fn cmd_ls() -> Result<()> {
 /// Interactive TUI session switcher.
 fn cmd_switch() -> Result<()> {
     match switcher::run()? {
-        Some(session) => tmux::attach(&session),
-        None => Ok(()),
+        switcher::Action::Switch(session) => tmux::attach(&session),
+        switcher::Action::Kill(session) => {
+            tmux::kill_session(&session)?;
+            eprintln!("Killed {session}");
+            // Re-enter the switcher after kill
+            cmd_switch()
+        }
+        switcher::Action::None => Ok(()),
     }
 }
 

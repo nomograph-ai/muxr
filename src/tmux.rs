@@ -104,6 +104,49 @@ pub fn list_sessions() -> Result<Vec<(String, String)>> {
     Ok(sessions)
 }
 
+/// Session info with activity timestamp.
+#[allow(dead_code)]
+pub struct SessionInfo {
+    pub name: String,
+    pub path: String,
+    pub activity: u64, // unix timestamp of last activity
+}
+
+/// List all tmux sessions with activity timestamps.
+pub fn list_sessions_detailed() -> Result<Vec<SessionInfo>> {
+    let output = Command::new("tmux")
+        .args([
+            "list-sessions",
+            "-F",
+            "#{session_name}|#{session_path}|#{session_activity}",
+        ])
+        .output()
+        .context("Failed to list tmux sessions")?;
+
+    if !output.status.success() {
+        return Ok(vec![]);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let sessions = stdout
+        .lines()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.splitn(3, '|').collect();
+            if parts.len() == 3 {
+                Some(SessionInfo {
+                    name: parts[0].to_string(),
+                    path: parts[1].to_string(),
+                    activity: parts[2].parse().unwrap_or(0),
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    Ok(sessions)
+}
+
 /// Kill a tmux session.
 pub fn kill_session(name: &str) -> Result<()> {
     let status = Command::new("tmux")
