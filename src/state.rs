@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use crate::config::Config;
+use crate::remote;
 use crate::tmux;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -18,6 +19,9 @@ pub struct SavedSession {
     pub tool: String,
     #[serde(default, alias = "opencode_session")]
     pub session_id: Option<String>,
+    /// If set, this is a remote proxy session (value is the remote name from config).
+    #[serde(default)]
+    pub remote: Option<String>,
 }
 
 /// List child PIDs of a given parent process.
@@ -74,8 +78,19 @@ impl SavedState {
             let tool = config.default_tool.clone();
             let session_id = discover_session_id(&name);
 
+            // Detect if this is a remote proxy session
+            let vertical = name.split('/').next().unwrap_or(&name);
+            let remote = if config.is_remote(vertical) {
+                Some(vertical.to_string())
+            } else {
+                None
+            };
+
             if let Some(ref id) = session_id {
                 eprintln!("  {name}: claude session {id}");
+            }
+            if remote.is_some() {
+                eprintln!("  {name}: remote proxy");
             }
 
             saved.push(SavedSession {
@@ -83,6 +98,7 @@ impl SavedState {
                 dir: path,
                 tool,
                 session_id,
+                remote,
             });
         }
 
@@ -122,6 +138,7 @@ impl SavedState {
 
         let content = std::fs::read_to_string(&path)?;
         let state: SavedState = serde_json::from_str(&content)?;
+        let config = Config::load().ok();
 
         let mut count = 0;
         for s in &state.sessions {
@@ -130,17 +147,45 @@ impl SavedState {
                 continue;
             }
 
-            let dir = PathBuf::from(&s.dir);
-            if !dir.exists() {
-                eprintln!("  {} -- directory {} not found, skipping", s.name, s.dir);
-                continue;
+            if let Some(ref remote_name) = s.remote {
+                // Remote proxy session -- reconnect via mosh/ssh
+                let remote = config
+                    .as_ref()
+                    .and_then(|c| c.remote(remote_name));
+
+                let Some(remote) = remote else {
+                    eprintln!("  {} -- remote '{}' not in config, skipping", s.name, remote_name);
+                    continue;
+                };
+
+                let context = s.name.split('/').skip(1).collect::<Vec<_>>().join("/");
+                let context = if context.is_empty() { "default" } else { &context };
+                let instance = remote.instance_name(context);
+
+                match remote::connect_command(remote, &instance, context) {
+                    Ok(connect_cmd) => {
+                        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
+                        tmux::create_session(&s.name, &home, &connect_cmd)?;
+                        eprintln!("  {} -> {} (remote)", s.name, instance);
+                        count += 1;
+                    }
+                    Err(e) => {
+                        eprintln!("  {} -- remote connect failed: {e}", s.name);
+                    }
+                }
+            } else {
+                // Local session
+                let dir = PathBuf::from(&s.dir);
+                if !dir.exists() {
+                    eprintln!("  {} -- directory {} not found, skipping", s.name, s.dir);
+                    continue;
+                }
+
+                let tool_cmd = tmux::tool_command(&s.tool, s.session_id.as_deref());
+                tmux::create_session(&s.name, &dir, &tool_cmd)?;
+                eprintln!("  {} -> {}", s.name, s.dir);
+                count += 1;
             }
-
-            let tool_cmd = tmux::tool_command(&s.tool, s.session_id.as_deref());
-
-            tmux::create_session(&s.name, &dir, &tool_cmd)?;
-            eprintln!("  {} -> {}", s.name, s.dir);
-            count += 1;
         }
 
         eprintln!("Restored {count} sessions.");

@@ -1,7 +1,9 @@
 mod completions;
 mod config;
 mod init;
+mod remote;
 mod state;
+mod switcher;
 mod tmux;
 
 use anyhow::{Context, Result};
@@ -60,6 +62,8 @@ enum Commands {
         /// Session name (e.g., work/default) or "all"
         name: String,
     },
+    /// Interactive session switcher (TUI)
+    Switch,
     /// Generate shell completions (zsh, bash, fish)
     Completions {
         /// Shell to generate completions for
@@ -86,6 +90,7 @@ fn main() -> Result<()> {
         }
         Some(Commands::Restore) => state::SavedState::restore(),
         Some(Commands::TmuxStatus) => cmd_tmux_status(),
+        Some(Commands::Switch) => cmd_switch(),
         Some(Commands::New { tool, args }) => cmd_new(&args, tool.as_deref()),
         Some(Commands::Rename { name }) => cmd_rename(&name),
         Some(Commands::Kill { name }) => cmd_kill(&name),
@@ -132,23 +137,28 @@ fn cmd_control_plane() -> Result<()> {
 /// Open or attach to a session: muxr work api auth
 fn cmd_open(args: &[String], tool_override: Option<&str>) -> Result<()> {
     let config = Config::load()?;
+    let name = &args[0];
+
+    // Route to remote handler if this is a remote vertical
+    if config.is_remote(name) {
+        return cmd_open_remote(&config, name, args);
+    }
+
     let tool = resolve_tool(tool_override, &config);
 
-    let vertical = &args[0];
-
-    if !config.verticals.contains_key(vertical) {
-        let names = config.vertical_names().join(", ");
-        anyhow::bail!("Unknown vertical: {vertical}\nKnown verticals: {names}");
+    if !config.verticals.contains_key(name) {
+        let names = config.all_names().join(", ");
+        anyhow::bail!("Unknown vertical or remote: {name}\nKnown: {names}");
     }
 
     let session = if args.len() >= 2 {
         let context = args[1..].join("/");
-        format!("{vertical}/{context}")
+        format!("{name}/{context}")
     } else {
-        format!("{vertical}/default")
+        format!("{name}/default")
     };
 
-    let dir = config.resolve_dir(vertical)?;
+    let dir = config.resolve_dir(name)?;
 
     if tmux::session_exists(&session) {
         eprintln!("Attaching to {session}");
@@ -163,32 +173,100 @@ fn cmd_open(args: &[String], tool_override: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Open or attach to a remote proxy session: muxr lab bootc
+fn cmd_open_remote(config: &Config, remote_name: &str, args: &[String]) -> Result<()> {
+    let remote = config
+        .remote(remote_name)
+        .context("Remote not found in config")?;
+
+    let context = if args.len() >= 2 {
+        args[1..].join("/")
+    } else {
+        "default".to_string()
+    };
+
+    // "muxr lab ls" lists remote instances and their sessions
+    if context == "ls" {
+        return cmd_remote_ls(remote, remote_name);
+    }
+
+    let session = format!("{remote_name}/{context}");
+
+    let instance = remote.instance_name(&context);
+
+    if tmux::session_exists(&session) {
+        eprintln!("Attaching to {session} (remote)");
+        tmux::attach(&session)?;
+    } else {
+        let connect_cmd = remote::connect_command(remote, &instance, &context)?;
+        eprintln!(
+            "Creating {session} -> {instance} via {}",
+            remote.connect
+        );
+        let home = dirs::home_dir().context("No home directory")?;
+        tmux::create_session(&session, &home, &connect_cmd)?;
+        tmux::attach(&session)?;
+    }
+
+    Ok(())
+}
+
+/// List running instances and their remote tmux sessions.
+fn cmd_remote_ls(remote: &config::Remote, remote_name: &str) -> Result<()> {
+    let instances = remote::list_instances(remote)?;
+    if instances.is_empty() {
+        println!("No running instances for {remote_name}");
+        return Ok(());
+    }
+
+    for instance in &instances {
+        println!("  {instance}:");
+        match remote::list_remote_sessions(remote, instance) {
+            Ok(sessions) if !sessions.is_empty() => {
+                for sname in sessions {
+                    println!("    {remote_name}/{sname}");
+                }
+            }
+            _ => println!("    (no tmux sessions)"),
+        }
+    }
+    Ok(())
+}
+
 /// Create a session in the background without attaching.
 fn cmd_new(args: &[String], tool_override: Option<&str>) -> Result<()> {
     let config = Config::load()?;
-    let tool = resolve_tool(tool_override, &config);
-    let vertical = &args[0];
+    let name = &args[0];
 
-    if !config.verticals.contains_key(vertical) {
-        let names = config.vertical_names().join(", ");
-        anyhow::bail!("Unknown vertical: {vertical}\nKnown verticals: {names}");
-    }
-
-    let session = if args.len() >= 2 {
-        let context = args[1..].join("/");
-        format!("{vertical}/{context}")
+    let context = if args.len() >= 2 {
+        args[1..].join("/")
     } else {
-        format!("{vertical}/default")
+        "default".to_string()
     };
 
-    let dir = config.resolve_dir(vertical)?;
+    let session = format!("{name}/{context}");
 
     if tmux::session_exists(&session) {
         eprintln!("{session} already exists");
-    } else {
+        return Ok(());
+    }
+
+    if config.is_remote(name) {
+        let remote = config.remote(name).context("Remote not found")?;
+        let instance = remote.instance_name(&context);
+        let connect_cmd = remote::connect_command(remote, &instance, &context)?;
+        let home = dirs::home_dir().context("No home directory")?;
+        tmux::create_session(&session, &home, &connect_cmd)?;
+        eprintln!("Created {session} -> {instance} (remote)");
+    } else if config.verticals.contains_key(name) {
+        let tool = resolve_tool(tool_override, &config);
+        let dir = config.resolve_dir(name)?;
         let tool_cmd = tmux::tool_command(&tool, None);
         tmux::create_session(&session, &dir, &tool_cmd)?;
         eprintln!("Created {session} ({})", tool);
+    } else {
+        let names = config.all_names().join(", ");
+        anyhow::bail!("Unknown vertical or remote: {name}\nKnown: {names}");
     }
 
     Ok(())
@@ -225,15 +303,34 @@ fn cmd_kill(name: &str) -> Result<()> {
 }
 
 fn cmd_ls() -> Result<()> {
+    let config = Config::load().ok();
     let sessions = tmux::list_sessions()?;
     if sessions.is_empty() {
         eprintln!("No active tmux sessions.");
     } else {
         for (name, path) in &sessions {
-            println!("  {name}  ({path})");
+            let vertical = name.split('/').next().unwrap_or(name);
+            let is_remote = config
+                .as_ref()
+                .map(|c| c.is_remote(vertical))
+                .unwrap_or(false);
+
+            if is_remote {
+                println!("  {name}  (remote)");
+            } else {
+                println!("  {name}  ({path})");
+            }
         }
     }
     Ok(())
+}
+
+/// Interactive TUI session switcher.
+fn cmd_switch() -> Result<()> {
+    match switcher::run()? {
+        Some(session) => tmux::attach(&session),
+        None => Ok(()),
+    }
 }
 
 /// Generate tmux status-left format string from config verticals.
