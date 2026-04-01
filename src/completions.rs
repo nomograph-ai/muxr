@@ -12,9 +12,9 @@ pub fn generate(shell: &str) -> Result<()> {
 }
 
 fn generate_zsh() -> Result<()> {
-    let verticals = Config::load()
+    let all_names = Config::load()
         .map(|c| {
-            c.vertical_names()
+            c.all_names()
                 .iter()
                 .map(|s| s.to_string())
                 .collect::<Vec<_>>()
@@ -22,7 +22,7 @@ fn generate_zsh() -> Result<()> {
         .unwrap_or_default();
     let sessions = tmux::list_sessions().unwrap_or_default();
 
-    let vertical_list = verticals.join(" ");
+    let vertical_list = all_names.join(" ");
     let session_list: String = sessions
         .iter()
         .map(|(name, _)| name.as_str())
@@ -40,6 +40,7 @@ _muxr() {{
         'ls:List active tmux sessions'
         'save:Snapshot sessions before reboot'
         'restore:Recreate sessions after reboot'
+        'switch:Interactive session switcher'
         'tmux-status:Generate tmux status-left'
         'completions:Generate shell completions'
     )
@@ -80,7 +81,7 @@ _muxr "$@"
 fn generate_bash() -> Result<()> {
     let verticals = Config::load()
         .map(|c| {
-            c.vertical_names()
+            c.all_names()
                 .iter()
                 .map(|s| s.to_string())
                 .collect::<Vec<_>>()
@@ -137,7 +138,7 @@ complete -F _muxr_completions muxr
 fn generate_fish() -> Result<()> {
     let verticals = Config::load()
         .map(|c| {
-            c.vertical_names()
+            c.all_names()
                 .iter()
                 .map(|s| s.to_string())
                 .collect::<Vec<_>>()
@@ -154,6 +155,7 @@ fn generate_fish() -> Result<()> {
         ("ls", "List active tmux sessions"),
         ("save", "Snapshot sessions before reboot"),
         ("restore", "Recreate sessions after reboot"),
+        ("switch", "Interactive session switcher"),
         ("completions", "Generate shell completions"),
     ] {
         println!("complete -c muxr -n '__fish_use_subcommand' -a '{cmd}' -d '{desc}'");

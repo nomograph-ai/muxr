@@ -8,6 +8,8 @@ pub struct Config {
     #[serde(default = "default_tool")]
     pub default_tool: String,
     pub verticals: HashMap<String, Vertical>,
+    #[serde(default)]
+    pub remotes: HashMap<String, Remote>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -16,8 +18,36 @@ pub struct Vertical {
     pub color: String,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+pub struct Remote {
+    pub project: String,
+    pub zone: String,
+    pub user: String,
+    pub color: String,
+    #[serde(default = "default_connect")]
+    pub connect: String,
+    #[serde(default)]
+    pub instance_prefix: Option<String>,
+}
+
 fn default_tool() -> String {
     "claude".to_string()
+}
+
+fn default_connect() -> String {
+    "mosh".to_string()
+}
+
+impl Remote {
+    /// Derive a GCE instance name from the context.
+    /// Replaces `/` with `-` so nested contexts produce valid instance names.
+    pub fn instance_name(&self, context: &str) -> String {
+        let slug = context.replace('/', "-");
+        match &self.instance_prefix {
+            Some(prefix) => format!("{prefix}{slug}"),
+            None => slug,
+        }
+    }
 }
 
 impl Config {
@@ -33,6 +63,16 @@ impl Config {
             .with_context(|| format!("Failed to read {}", path.display()))?;
         let config: Config = toml::from_str(&content)
             .with_context(|| format!("Failed to parse {}", path.display()))?;
+
+        // Validate no name collisions between verticals and remotes
+        for name in config.remotes.keys() {
+            if config.verticals.contains_key(name) {
+                anyhow::bail!(
+                    "Name collision: '{name}' is defined as both a vertical and a remote"
+                );
+            }
+        }
+
         Ok(config)
     }
 
@@ -57,16 +97,32 @@ impl Config {
         Ok(PathBuf::from(expanded.as_ref()))
     }
 
-    pub fn vertical_names(&self) -> Vec<&str> {
-        let mut names: Vec<&str> = self.verticals.keys().map(|s| s.as_str()).collect();
+    /// All known names (verticals + remotes) for validation and completions.
+    pub fn all_names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self
+            .verticals
+            .keys()
+            .chain(self.remotes.keys())
+            .map(|s| s.as_str())
+            .collect();
         names.sort();
+        names.dedup();
         names
     }
 
-    pub fn color_for(&self, vertical: &str) -> &str {
+    pub fn is_remote(&self, name: &str) -> bool {
+        self.remotes.contains_key(name)
+    }
+
+    pub fn remote(&self, name: &str) -> Option<&Remote> {
+        self.remotes.get(name)
+    }
+
+    pub fn color_for(&self, name: &str) -> &str {
         self.verticals
-            .get(vertical)
+            .get(name)
             .map(|v| v.color.as_str())
+            .or_else(|| self.remotes.get(name).map(|r| r.color.as_str()))
             .unwrap_or("#8a7f83")
     }
 }
