@@ -12,16 +12,16 @@ use std::io;
 use crate::config::Config;
 use crate::tmux;
 
-/// A session entry for the switcher UI.
 struct Entry {
     vertical: String,
     context: String,
-    session_type: &'static str, // "local" or "remote"
-    name: String,               // full session name for tmux attach
+    session_type: &'static str,
+    name: String,
     color: Color,
+    activity: u64,
+    is_separator: bool, // true = visual group separator, not selectable
 }
 
-/// Parse a hex color string (#RRGGBB) into a ratatui Color.
 fn parse_hex_color(hex: &str) -> Color {
     let hex = hex.trim_start_matches('#');
     if hex.len() != 6 {
@@ -33,53 +33,124 @@ fn parse_hex_color(hex: &str) -> Color {
     Color::Rgb(r, g, b)
 }
 
-/// Build the entry list from live tmux sessions + config.
+/// Build entries sorted by activity (most recent first), with muxr control plane pinned to top.
+/// Inserts separator rows between vertical groups.
 fn build_entries(config: &Config) -> Result<Vec<Entry>> {
-    let sessions = tmux::list_sessions()?;
-    let mut entries = Vec::new();
+    let sessions = tmux::list_sessions_detailed()?;
 
-    for (name, _path) in sessions {
-        let (vertical, context) = match name.split_once('/') {
-            Some((v, c)) => (v.to_string(), c.to_string()),
-            None => (name.clone(), String::new()),
-        };
+    // Build raw entries
+    let mut raw: Vec<Entry> = sessions
+        .into_iter()
+        .map(|s| {
+            let (vertical, context) = match s.name.split_once('/') {
+                Some((v, c)) => (v.to_string(), c.to_string()),
+                None => (s.name.clone(), String::new()),
+            };
+            let is_remote = config.is_remote(&vertical);
+            let color = parse_hex_color(config.color_for(&vertical));
 
-        let is_remote = config.is_remote(&vertical);
-        let color_hex = config.color_for(&vertical);
-        let color = parse_hex_color(color_hex);
+            Entry {
+                vertical,
+                context,
+                session_type: if is_remote { "remote" } else { "local" },
+                name: s.name,
+                color,
+                activity: s.activity,
+                is_separator: false,
+            }
+        })
+        .collect();
 
-        entries.push(Entry {
-            vertical,
-            context,
-            session_type: if is_remote { "remote" } else { "local" },
-            name,
-            color,
-        });
+    // Sort: muxr control plane first, then by most recent activity
+    raw.sort_by(|a, b| {
+        let a_is_muxr = a.name == "muxr";
+        let b_is_muxr = b.name == "muxr";
+        match (a_is_muxr, b_is_muxr) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => b.activity.cmp(&a.activity), // most recent first
+        }
+    });
+
+    // Insert group separators between different verticals
+    let mut entries: Vec<Entry> = Vec::with_capacity(raw.len() * 2);
+    let mut last_vertical = String::new();
+
+    for entry in raw {
+        if entry.vertical != last_vertical && !last_vertical.is_empty() {
+            entries.push(Entry {
+                vertical: String::new(),
+                context: String::new(),
+                session_type: "",
+                name: String::new(),
+                color: Color::DarkGray,
+                activity: 0,
+                is_separator: true,
+            });
+        }
+        last_vertical = entry.vertical.clone();
+        entries.push(entry);
     }
 
     Ok(entries)
 }
 
-/// Filter entries by a query string (fuzzy: matches anywhere in name).
+/// Filter entries, preserving separators between matched groups.
 fn filter_entries(entries: &[Entry], query: &str) -> Vec<usize> {
     if query.is_empty() {
         return (0..entries.len()).collect();
     }
     let q = query.to_lowercase();
-    entries
+
+    // First pass: find matching real entries
+    let matched: Vec<usize> = entries
         .iter()
         .enumerate()
         .filter(|(_, e)| {
-            e.name.to_lowercase().contains(&q)
-                || e.vertical.to_lowercase().contains(&q)
-                || e.context.to_lowercase().contains(&q)
+            !e.is_separator
+                && (e.name.to_lowercase().contains(&q)
+                    || e.vertical.to_lowercase().contains(&q)
+                    || e.context.to_lowercase().contains(&q))
         })
         .map(|(i, _)| i)
-        .collect()
+        .collect();
+
+    // When filtering, skip separators -- just show matched entries flat
+    matched
 }
 
-/// Run the interactive switcher. Returns the session name to switch to, or None.
-pub fn run() -> Result<Option<String>> {
+/// Format a unix timestamp as relative time (e.g., "2m", "1h", "3d").
+fn format_age(activity: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    if activity == 0 || activity > now {
+        return String::new();
+    }
+
+    let age = now - activity;
+    if age < 60 {
+        format!("{age}s")
+    } else if age < 3600 {
+        format!("{}m", age / 60)
+    } else if age < 86400 {
+        format!("{}h", age / 3600)
+    } else {
+        format!("{}d", age / 86400)
+    }
+}
+
+/// Action the switcher returns to main.
+pub enum Action {
+    Switch(String),
+    Kill(String),
+    None,
+}
+
+/// Run the interactive switcher.
+pub fn run() -> Result<Action> {
     let config = Config::load()?;
     let entries = build_entries(&config)?;
 
@@ -87,7 +158,6 @@ pub fn run() -> Result<Option<String>> {
         anyhow::bail!("No active tmux sessions");
     }
 
-    // Get current session so we can highlight it
     let current = std::process::Command::new("tmux")
         .args(["display-message", "-p", "#{session_name}"])
         .output()
@@ -106,19 +176,27 @@ pub fn run() -> Result<Option<String>> {
     let mut query = String::new();
     let mut filtering = false;
     let mut filtered = filter_entries(&entries, &query);
-    table_state.select(Some(0));
+    let mut confirm_kill: Option<usize> = None; // index into entries if confirming
+
+    // Select first non-separator
+    select_nearest_real(&entries, &filtered, &mut table_state, 0);
 
     let result = loop {
         terminal.draw(|f| {
             let area = f.area();
-            let chunks = Layout::vertical([
-                Constraint::Min(3),
-                Constraint::Length(3),
-            ])
-            .split(area);
+            let chunks =
+                Layout::vertical([Constraint::Min(3), Constraint::Length(3)]).split(area);
 
-            draw_table(f, chunks[0], &entries, &filtered, &current, &mut table_state);
-            draw_filter(f, chunks[1], &query, filtering);
+            draw_table(
+                f,
+                chunks[0],
+                &entries,
+                &filtered,
+                &current,
+                &mut table_state,
+                confirm_kill,
+            );
+            draw_footer(f, chunks[1], &query, filtering, confirm_kill.is_some());
         })?;
 
         if let Event::Key(key) = event::read()? {
@@ -126,61 +204,62 @@ pub fn run() -> Result<Option<String>> {
                 continue;
             }
 
-            // Navigation keys always work regardless of mode
+            // Kill confirmation mode
+            if let Some(kill_idx) = confirm_kill {
+                match key.code {
+                    KeyCode::Char('y') | KeyCode::Enter => {
+                        let name = entries[kill_idx].name.clone();
+                        // Restore terminal before killing
+                        terminal::disable_raw_mode()?;
+                        crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+                        return Ok(Action::Kill(name));
+                    }
+                    _ => {
+                        confirm_kill = None;
+                        continue;
+                    }
+                }
+            }
+
             match key.code {
                 KeyCode::Esc if filtering => {
                     query.clear();
                     filtering = false;
                     filtered = filter_entries(&entries, &query);
-                    table_state.select(Some(0));
-                    continue;
+                    select_nearest_real(&entries, &filtered, &mut table_state, 0);
                 }
                 KeyCode::Esc | KeyCode::Char('q') if !filtering => {
-                    break None;
+                    break Action::None;
                 }
                 KeyCode::Enter => {
                     if let Some(selected) = table_state.selected()
                         && let Some(&idx) = filtered.get(selected)
+                        && !entries[idx].is_separator
                     {
-                        break Some(entries[idx].name.clone());
+                        break Action::Switch(entries[idx].name.clone());
                     }
-                    break None;
+                }
+                KeyCode::Char('d') if !filtering => {
+                    if let Some(selected) = table_state.selected()
+                        && let Some(&idx) = filtered.get(selected)
+                        && !entries[idx].is_separator
+                        && entries[idx].name != current
+                        && entries[idx].name != "muxr"
+                    {
+                        confirm_kill = Some(idx);
+                    }
                 }
                 KeyCode::Up => {
-                    let i = table_state.selected().unwrap_or(0);
-                    let next = if i == 0 {
-                        filtered.len().saturating_sub(1)
-                    } else {
-                        i - 1
-                    };
-                    table_state.select(Some(next));
+                    move_selection(&entries, &filtered, &mut table_state, -1);
                 }
                 KeyCode::Down => {
-                    let i = table_state.selected().unwrap_or(0);
-                    let next = if i >= filtered.len().saturating_sub(1) {
-                        0
-                    } else {
-                        i + 1
-                    };
-                    table_state.select(Some(next));
+                    move_selection(&entries, &filtered, &mut table_state, 1);
                 }
                 KeyCode::Char('k') if !filtering => {
-                    let i = table_state.selected().unwrap_or(0);
-                    let next = if i == 0 {
-                        filtered.len().saturating_sub(1)
-                    } else {
-                        i - 1
-                    };
-                    table_state.select(Some(next));
+                    move_selection(&entries, &filtered, &mut table_state, -1);
                 }
                 KeyCode::Char('j') if !filtering => {
-                    let i = table_state.selected().unwrap_or(0);
-                    let next = if i >= filtered.len().saturating_sub(1) {
-                        0
-                    } else {
-                        i + 1
-                    };
-                    table_state.select(Some(next));
+                    move_selection(&entries, &filtered, &mut table_state, 1);
                 }
                 KeyCode::Char('/') if !filtering => {
                     filtering = true;
@@ -188,7 +267,7 @@ pub fn run() -> Result<Option<String>> {
                 KeyCode::Char(c) if filtering => {
                     query.push(c);
                     filtered = filter_entries(&entries, &query);
-                    table_state.select(Some(0));
+                    select_nearest_real(&entries, &filtered, &mut table_state, 0);
                 }
                 KeyCode::Backspace if filtering => {
                     query.pop();
@@ -196,18 +275,62 @@ pub fn run() -> Result<Option<String>> {
                         filtering = false;
                     }
                     filtered = filter_entries(&entries, &query);
-                    table_state.select(Some(0));
+                    select_nearest_real(&entries, &filtered, &mut table_state, 0);
                 }
                 _ => {}
             }
         }
     };
 
-    // Restore terminal
     terminal::disable_raw_mode()?;
     crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
 
     Ok(result)
+}
+
+/// Move selection by delta, skipping separator rows.
+fn move_selection(
+    entries: &[Entry],
+    filtered: &[usize],
+    state: &mut TableState,
+    delta: i32,
+) {
+    if filtered.is_empty() {
+        return;
+    }
+    let current = state.selected().unwrap_or(0) as i32;
+    let len = filtered.len() as i32;
+    let mut next = (current + delta).rem_euclid(len);
+
+    // Skip separators
+    for _ in 0..len {
+        if let Some(&idx) = filtered.get(next as usize)
+            && !entries[idx].is_separator
+        {
+            break;
+        }
+        next = (next + delta).rem_euclid(len);
+    }
+
+    state.select(Some(next as usize));
+}
+
+/// Select the nearest non-separator entry at or after `start`.
+fn select_nearest_real(
+    entries: &[Entry],
+    filtered: &[usize],
+    state: &mut TableState,
+    start: usize,
+) {
+    for i in start..filtered.len() {
+        if let Some(&idx) = filtered.get(i)
+            && !entries[idx].is_separator
+        {
+            state.select(Some(i));
+            return;
+        }
+    }
+    state.select(Some(0));
 }
 
 fn draw_table(
@@ -217,11 +340,13 @@ fn draw_table(
     filtered: &[usize],
     current: &str,
     state: &mut TableState,
+    confirm_kill: Option<usize>,
 ) {
     let header = Row::new(vec![
         Cell::from("  Vertical").style(Style::default().fg(Color::DarkGray)),
         Cell::from("Context").style(Style::default().fg(Color::DarkGray)),
         Cell::from("Type").style(Style::default().fg(Color::DarkGray)),
+        Cell::from("  Age").style(Style::default().fg(Color::DarkGray)),
     ])
     .height(1);
 
@@ -229,22 +354,46 @@ fn draw_table(
         .iter()
         .map(|&idx| {
             let e = &entries[idx];
+
+            if e.is_separator {
+                return Row::new(vec![Cell::from(Line::from(Span::styled(
+                    "  ────────────────────────────────────────────",
+                    Style::default().fg(Color::Rgb(50, 50, 55)),
+                )))])
+                .height(1);
+            }
+
             let is_current = e.name == current;
+            let is_kill_target = confirm_kill == Some(idx);
 
             let marker = if is_current { "● " } else { "  " };
-            let vertical_style = Style::default().fg(e.color);
-            let context_style = if is_current {
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD)
+
+            let (vertical_style, context_style, type_style, age_style) = if is_kill_target {
+                let kill_style = Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
+                (kill_style, kill_style, kill_style, kill_style)
             } else {
-                Style::default().fg(Color::White)
+                let vs = Style::default().fg(e.color);
+                let cs = if is_current {
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+                let ts = Style::default().fg(if e.session_type == "remote" {
+                    Color::Cyan
+                } else {
+                    Color::DarkGray
+                });
+                let age_s = Style::default().fg(Color::Rgb(90, 90, 100));
+                (vs, cs, ts, age_s)
             };
-            let type_style = Style::default().fg(if e.session_type == "remote" {
-                Color::Cyan
+
+            let age_text = if is_kill_target {
+                "kill? y/n".to_string()
             } else {
-                Color::DarkGray
-            });
+                format!("  {}", format_age(e.activity))
+            };
 
             Row::new(vec![
                 Cell::from(Line::from(vec![
@@ -253,6 +402,7 @@ fn draw_table(
                 ])),
                 Cell::from(Span::styled(e.context.clone(), context_style)),
                 Cell::from(Span::styled(e.session_type, type_style)),
+                Cell::from(Span::styled(age_text, age_style)),
             ])
         })
         .collect();
@@ -261,6 +411,7 @@ fn draw_table(
         Constraint::Length(16),
         Constraint::Min(20),
         Constraint::Length(8),
+        Constraint::Length(11),
     ];
 
     let table = Table::new(rows, widths)
@@ -270,7 +421,11 @@ fn draw_table(
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::DarkGray))
                 .title(" muxr ")
-                .title_style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                .title_style(
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
         )
         .row_highlight_style(
             Style::default()
@@ -281,9 +436,16 @@ fn draw_table(
     f.render_stateful_widget(table, area, state);
 }
 
-fn draw_filter(f: &mut ratatui::Frame, area: Rect, query: &str, filtering: bool) {
+fn draw_footer(f: &mut ratatui::Frame, area: Rect, query: &str, filtering: bool, killing: bool) {
     let dim = Style::default().fg(Color::DarkGray);
-    let text = if filtering || !query.is_empty() {
+    let text = if killing {
+        Line::from(vec![
+            Span::styled("  y", Style::default().fg(Color::Red)),
+            Span::styled(" confirm kill  ", dim),
+            Span::styled("any", dim),
+            Span::styled(" cancel", dim),
+        ])
+    } else if filtering || !query.is_empty() {
         Line::from(vec![
             Span::styled("  /", Style::default().fg(Color::Yellow)),
             Span::styled(query, Style::default().fg(Color::White)),
@@ -296,9 +458,11 @@ fn draw_filter(f: &mut ratatui::Frame, area: Rect, query: &str, filtering: bool)
             Span::styled("  /", dim),
             Span::styled("filter  ", dim),
             Span::styled("j/k", dim),
-            Span::styled(" navigate  ", dim),
+            Span::styled(" move  ", dim),
             Span::styled("enter", dim),
             Span::styled(" select  ", dim),
+            Span::styled("d", dim),
+            Span::styled(" kill  ", dim),
             Span::styled("q", dim),
             Span::styled(" quit", dim),
         ])
