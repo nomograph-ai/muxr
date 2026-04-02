@@ -8,13 +8,17 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://gitlab.com/dunn.dev/muxr/-/blob/main/LICENSE)
 
 **Tmux session manager for AI coding workflows.** Named sessions,
-vertical-aware directories, save/restore across reboots, opencode
-and claude code integration.
+vertical-aware directories, save/restore across reboots. Works with
+any terminal tool (claude, opencode, vim, shell).
 
 ## Install
 
 ```bash
+# From crates.io
 cargo install muxr
+
+# Pre-built binaries (macOS arm64, Linux amd64)
+# See https://gitlab.com/dunn.dev/muxr/-/releases
 ```
 
 ## Quick start
@@ -55,7 +59,7 @@ muxr ls
 `~/.config/muxr/config.toml`:
 
 ```toml
-default_tool = "opencode"
+default_tool = "claude"  # or "opencode", "vim", "shell"
 
 [verticals.work]
 dir = "~/projects/work"
