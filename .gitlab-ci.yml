@@ -99,8 +99,6 @@ build:linux-amd64:
   extends: .on-tag
   image: rust:1.93-bookworm
   interruptible: false
-  tags:
-    - saas-linux-xlarge-amd64
   cache:
     - key: cargo-linux-${CI_COMMIT_REF_SLUG}
       paths:
