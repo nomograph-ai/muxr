@@ -13,6 +13,8 @@ stages:
   - release
 
 default:
+  tags:
+    - storr
   interruptible: true
   retry:
     max: 2
