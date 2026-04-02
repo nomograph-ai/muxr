@@ -250,7 +250,7 @@ publish:crates:
     - job: check
       artifacts: false
   script:
-    - cargo publish --token "${CARGO_REGISTRY_TOKEN}"
+    - cargo publish --allow-dirty
 
 release:
   stage: release
