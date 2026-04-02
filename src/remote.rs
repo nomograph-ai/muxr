@@ -53,11 +53,16 @@ pub fn resolve_ip(remote: &Remote, instance: &str) -> Result<String> {
 }
 
 /// Build the connection command string for a remote session.
-/// This gets sent as keys to the local proxy tmux session.
+/// Wraps the SSH/mosh command in a reconnect loop that:
+/// - Exits cleanly on exit code 0 (user typed `exit` or clean detach)
+/// - Reconnects on non-zero exit (connection failure) with backoff
+/// - Invalidates IP cache before retrying (handles IP changes)
+/// - Gives up after 20 consecutive failures
 pub fn connect_command(remote: &Remote, instance: &str, context: &str) -> Result<String> {
     let ip = resolve_ip(remote, instance)?;
+    let cache_path = format!("/tmp/muxr-ip-{instance}");
 
-    let cmd = match remote.connect.as_str() {
+    let inner_cmd = match remote.connect.as_str() {
         "mosh" => {
             format!(
                 "mosh --ssh='ssh -o StrictHostKeyChecking=no' {}@{} -- tmux new-session -A -s {}",
@@ -71,6 +76,11 @@ pub fn connect_command(remote: &Remote, instance: &str, context: &str) -> Result
             )
         }
     };
+
+    // Wrap in reconnect loop
+    let cmd = format!(
+        r#"fails=0; delay=3; while true; do {inner_cmd}; rc=$?; if [ $rc -eq 0 ]; then break; fi; fails=$((fails+1)); if [ $fails -ge 20 ]; then echo "muxr: 20 consecutive failures, giving up."; break; fi; rm -f {cache_path}; echo "muxr: connection lost (rc=$rc). Reconnecting in ${{delay}}s... (attempt $fails/20)"; sleep $delay; delay=$((delay<30 ? delay*2 : 30)); done"#
+    );
 
     Ok(cmd)
 }
