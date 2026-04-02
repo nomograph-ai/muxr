@@ -1,3 +1,5 @@
+![muxr hero](hero.png)
+
 # muxr
 
 [![pipeline status](https://gitlab.com/andunn/muxr/badges/main/pipeline.svg)](https://gitlab.com/andunn/muxr/-/pipelines)
