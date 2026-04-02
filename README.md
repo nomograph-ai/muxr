@@ -2,9 +2,10 @@
 
 # muxr
 
-[![pipeline status](https://gitlab.com/andunn/muxr/badges/main/pipeline.svg)](https://gitlab.com/andunn/muxr/-/pipelines)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://gitlab.com/andunn/muxr/-/blob/main/LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.93%2B-orange.svg)](https://www.rust-lang.org)
+[![Built with GitLab](https://img.shields.io/badge/Built%20with-GitLab-orange?logo=gitlab)](https://gitlab.com/dunn.dev/muxr)
+[![pipeline status](https://gitlab.com/dunn.dev/muxr/badges/main/pipeline.svg)](https://gitlab.com/dunn.dev/muxr/-/pipelines)
+[![crates.io](https://img.shields.io/crates/v/muxr.svg)](https://crates.io/crates/muxr)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://gitlab.com/dunn.dev/muxr/-/blob/main/LICENSE)
 
 **Tmux session manager for AI coding workflows.** Named sessions,
 vertical-aware directories, save/restore across reboots, opencode
@@ -13,7 +14,7 @@ and claude code integration.
 ## Install
 
 ```bash
-cargo install --git https://gitlab.com/andunn/muxr
+cargo install muxr
 ```
 
 ## Quick start
