@@ -198,6 +198,11 @@ fn cmd_open_remote(config: &Config, remote_name: &str, args: &[String]) -> Resul
         eprintln!("Attaching to {session} (remote)");
         tmux::attach(&session)?;
     } else {
+        // Bootstrap Claude config on first connect
+        if let Err(e) = remote::bootstrap_claude_config(remote, &instance) {
+            eprintln!("  Bootstrap warning: {e}");
+        }
+
         let connect_cmd = remote::connect_command(remote, &instance, &context)?;
         eprintln!(
             "Creating {session} -> {instance} via {}",
@@ -254,6 +259,9 @@ fn cmd_new(args: &[String], tool_override: Option<&str>) -> Result<()> {
     if config.is_remote(name) {
         let remote = config.remote(name).context("Remote not found")?;
         let instance = remote.instance_name(&context);
+        if let Err(e) = remote::bootstrap_claude_config(remote, &instance) {
+            eprintln!("  Bootstrap warning: {e}");
+        }
         let connect_cmd = remote::connect_command(remote, &instance, &context)?;
         let home = dirs::home_dir().context("No home directory")?;
         tmux::create_session(&session, &home, &connect_cmd)?;

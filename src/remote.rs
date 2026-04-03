@@ -85,6 +85,74 @@ pub fn connect_command(remote: &Remote, instance: &str, context: &str) -> Result
     Ok(cmd)
 }
 
+/// Bootstrap Claude Code config on a remote instance.
+/// Checks if ~/.claude/settings.json exists; if not, pushes a baseline config.
+/// This ensures AI coding tools have consistent settings on fresh lab VMs.
+pub fn bootstrap_claude_config(remote: &Remote, instance: &str) -> Result<()> {
+    let check = Command::new("gcloud")
+        .args([
+            "compute",
+            "ssh",
+            &format!("{}@{}", remote.user, instance),
+            "--project",
+            &remote.project,
+            "--zone",
+            &remote.zone,
+            "--command",
+            "test -f ~/.claude/settings.json && echo exists || echo missing",
+        ])
+        .output()
+        .context("Failed to check remote Claude config")?;
+
+    let stdout = String::from_utf8_lossy(&check.stdout);
+    if stdout.trim() == "exists" {
+        return Ok(());
+    }
+
+    eprintln!("  Bootstrapping Claude Code config...");
+
+    // Baseline config for remote sessions
+    let config_json = r#"{
+  "model": "opus[1m]",
+  "effortLevel": "high",
+  "env": {
+    "CLAUDE_CODE_NO_FLICKER": "1",
+    "CLAUDE_ENABLE_STREAM_WATCHDOG": "1",
+    "CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY": "20",
+    "API_TIMEOUT_MS": "900000",
+    "CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1",
+    "CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR": "1"
+  }
+}"#;
+
+    let setup_cmd = format!(
+        "mkdir -p ~/.claude && cat > ~/.claude/settings.json << 'MUXR_EOF'\n{config_json}\nMUXR_EOF"
+    );
+
+    let status = Command::new("gcloud")
+        .args([
+            "compute",
+            "ssh",
+            &format!("{}@{}", remote.user, instance),
+            "--project",
+            &remote.project,
+            "--zone",
+            &remote.zone,
+            "--command",
+            &setup_cmd,
+        ])
+        .status()
+        .context("Failed to bootstrap Claude config")?;
+
+    if status.success() {
+        eprintln!("  Claude config ready");
+    } else {
+        eprintln!("  Warning: Claude config bootstrap failed (non-fatal)");
+    }
+
+    Ok(())
+}
+
 /// List remote tmux sessions by SSHing to the instance.
 pub fn list_remote_sessions(remote: &Remote, instance: &str) -> Result<Vec<String>> {
     let output = Command::new("gcloud")
