@@ -1,4 +1,4 @@
-![muxr hero](hero.png)
+![muxr hero](hero.svg)
 
 # muxr
 
