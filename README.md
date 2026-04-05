@@ -2,10 +2,10 @@
 
 # muxr
 
-[![Built with GitLab](https://img.shields.io/badge/Built%20with-GitLab-orange?logo=gitlab)](https://gitlab.com/dunn.dev/muxr)
-[![pipeline status](https://gitlab.com/dunn.dev/muxr/badges/main/pipeline.svg)](https://gitlab.com/dunn.dev/muxr/-/pipelines)
+[![Built with GitLab](https://img.shields.io/badge/Built_with-GitLab-FC6D26?logo=gitlab)](https://gitlab.com/dunn.dev/muxr)
+[![pipeline](https://gitlab.com/dunn.dev/muxr/badges/main/pipeline.svg)](https://gitlab.com/dunn.dev/muxr/-/pipelines)
 [![crates.io](https://img.shields.io/crates/v/muxr.svg)](https://crates.io/crates/muxr)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://gitlab.com/dunn.dev/muxr/-/blob/main/LICENSE)
+[![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 **Tmux session manager for AI coding workflows.** Named sessions,
 vertical-aware directories, save/restore across reboots, remote proxy
@@ -167,3 +167,7 @@ recreate them after a reboot -- including reconnecting remote sessions.
 ## License
 
 MIT
+
+---
+
+Built in the Den by Tanuki and Andrew Dunn, 2026.
