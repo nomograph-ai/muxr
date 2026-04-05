@@ -3,6 +3,9 @@
     <marker id="a" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><polygon points="0,0 7,3.5 0,7" fill="#2c2417"/></marker>
   </defs>
 
+  <!-- Outer frame -- controls the visual boundary on any background -->
+  <rect x="0" y="0" width="1200" height="630" rx="0" fill="none" stroke="#2c2417" stroke-width="3"/>
+
   <!-- Title block -->
   <text x="600" y="44" text-anchor="middle" fill="#2c2417" font-family="monospace" font-size="30" font-weight="800">muxr</text>
   <text x="600" y="66" text-anchor="middle" fill="#6b5d4f" font-family="monospace" font-size="13">tmux session manager for AI coding workflows</text>
