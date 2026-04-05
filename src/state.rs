@@ -5,7 +5,7 @@ use std::process::Command;
 
 use crate::config::Config;
 use crate::remote;
-use crate::tmux;
+use crate::tmux::{self, Tmux};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SavedState {
@@ -58,8 +58,8 @@ fn read_claude_session_id(pid: u32) -> Option<String> {
 /// Discover the active Claude session ID for a tmux session.
 ///
 /// Chain: tmux pane PID (shell) -> child PIDs -> find one with a Claude session file -> sessionId
-fn discover_session_id(tmux_session: &str) -> Option<String> {
-    let shell_pid = tmux::pane_pid(tmux_session).ok()??;
+fn discover_session_id(tmux: &Tmux, tmux_session: &str) -> Option<String> {
+    let shell_pid = tmux.pane_pid(tmux_session).ok()??;
     for pid in child_pids(shell_pid) {
         if let Some(id) = read_claude_session_id(pid) {
             return Some(id);
@@ -70,13 +70,13 @@ fn discover_session_id(tmux_session: &str) -> Option<String> {
 
 impl SavedState {
     /// Snapshot all current tmux sessions to the state file.
-    pub fn save(config: &Config) -> Result<()> {
-        let sessions = tmux::list_sessions()?;
+    pub fn save(config: &Config, tmux: &Tmux) -> Result<()> {
+        let sessions = tmux.list_sessions()?;
         let mut saved = Vec::new();
 
         for (name, path) in sessions {
             let tool = config.default_tool.clone();
-            let session_id = discover_session_id(&name);
+            let session_id = discover_session_id(tmux, &name);
 
             // Detect if this is a remote proxy session
             let vertical = name.split('/').next().unwrap_or(&name);
@@ -127,7 +127,7 @@ impl SavedState {
     }
 
     /// Restore tmux sessions from the state file.
-    pub fn restore() -> Result<()> {
+    pub fn restore(tmux: &Tmux) -> Result<()> {
         let path = Config::state_path()?;
         if !path.exists() {
             anyhow::bail!(
@@ -142,7 +142,7 @@ impl SavedState {
 
         let mut count = 0;
         for s in &state.sessions {
-            if tmux::session_exists(&s.name) {
+            if tmux.session_exists(&s.name) {
                 eprintln!("  {} -- already exists, skipping", s.name);
                 continue;
             }
@@ -165,7 +165,7 @@ impl SavedState {
                 match remote::connect_command(remote, &instance, context) {
                     Ok(connect_cmd) => {
                         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
-                        tmux::create_session(&s.name, &home, &connect_cmd)?;
+                        tmux.create_session(&s.name, &home, &connect_cmd)?;
                         eprintln!("  {} -> {} (remote)", s.name, instance);
                         count += 1;
                     }
@@ -181,8 +181,8 @@ impl SavedState {
                     continue;
                 }
 
-                let tool_cmd = tmux::tool_command(&s.tool, s.session_id.as_deref());
-                tmux::create_session(&s.name, &dir, &tool_cmd)?;
+                let tool_cmd = tmux::tool_command(&s.tool, s.session_id.as_deref(), Some(&s.name));
+                tmux.create_session(&s.name, &dir, &tool_cmd)?;
                 eprintln!("  {} -> {}", s.name, s.dir);
                 count += 1;
             }

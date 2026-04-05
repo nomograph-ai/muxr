@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::tmux;
+use crate::tmux::Tmux;
 use anyhow::Result;
 
 pub fn generate(shell: &str) -> Result<()> {
@@ -20,7 +20,7 @@ fn generate_zsh() -> Result<()> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let sessions = tmux::list_sessions().unwrap_or_default();
+    let sessions = Tmux::new(None).list_sessions().unwrap_or_default();
 
     let vertical_list = all_names.join(" ");
     let session_list: String = sessions
@@ -87,7 +87,7 @@ fn generate_bash() -> Result<()> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let sessions = tmux::list_sessions().unwrap_or_default();
+    let sessions = Tmux::new(None).list_sessions().unwrap_or_default();
 
     let vertical_list = verticals.join(" ");
 

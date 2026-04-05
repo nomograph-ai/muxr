@@ -9,16 +9,17 @@ use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState};
 use ratatui::Terminal;
 use std::io;
 
+use crate::claude_status::{self, SessionHealth};
 use crate::config::Config;
-use crate::tmux;
+use crate::tmux::Tmux;
 
 struct Entry {
     vertical: String,
     context: String,
-    session_type: &'static str,
     name: String,
     color: Color,
     activity: u64,
+    health: Option<SessionHealth>,
     is_separator: bool, // true = visual group separator, not selectable
 }
 
@@ -35,8 +36,8 @@ fn parse_hex_color(hex: &str) -> Color {
 
 /// Build entries sorted by activity (most recent first), with muxr control plane pinned to top.
 /// Inserts separator rows between vertical groups.
-fn build_entries(config: &Config) -> Result<Vec<Entry>> {
-    let sessions = tmux::list_sessions_detailed()?;
+fn build_entries(config: &Config, tmux: &Tmux) -> Result<Vec<Entry>> {
+    let sessions = tmux.list_sessions_detailed()?;
 
     // Build raw entries
     let raw: Vec<Entry> = sessions
@@ -46,16 +47,16 @@ fn build_entries(config: &Config) -> Result<Vec<Entry>> {
                 Some((v, c)) => (v.to_string(), c.to_string()),
                 None => (s.name.clone(), String::new()),
             };
-            let is_remote = config.is_remote(&vertical);
             let color = parse_hex_color(config.color_for(&vertical));
+            let health = claude_status::read_health(&s.name);
 
             Entry {
                 vertical,
                 context,
-                session_type: if is_remote { "remote" } else { "local" },
                 name: s.name,
                 color,
                 activity: s.activity,
+                health,
                 is_separator: false,
             }
         })
@@ -106,10 +107,10 @@ fn build_entries(config: &Config) -> Result<Vec<Entry>> {
             entries.push(Entry {
                 vertical: String::new(),
                 context: String::new(),
-                session_type: "",
                 name: String::new(),
                 color: Color::DarkGray,
                 activity: 0,
+                health: None,
                 is_separator: true,
             });
         }
@@ -176,19 +177,16 @@ pub enum Action {
 }
 
 /// Run the interactive switcher.
-pub fn run() -> Result<Action> {
+pub fn run(tmux: &Tmux) -> Result<Action> {
     let config = Config::load()?;
-    let entries = build_entries(&config)?;
+    let entries = build_entries(&config, tmux)?;
 
     if entries.is_empty() {
         anyhow::bail!("No active tmux sessions");
     }
 
-    let current = std::process::Command::new("tmux")
-        .args(["display-message", "-p", "#{session_name}"])
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    let current = tmux
+        .display_message("#{session_name}")
         .unwrap_or_default();
 
     terminal::enable_raw_mode().context("Failed to enable raw mode")?;
@@ -359,6 +357,36 @@ fn select_nearest_real(
     state.select(Some(0));
 }
 
+/// Build a context bar as ratatui Spans (8 chars wide).
+fn health_bar(pct: u32) -> Vec<Span<'static>> {
+    let width = 8usize;
+    let filled = (pct as usize * width / 100).min(width);
+    let empty = width - filled;
+
+    let bar_color = if pct >= 80 {
+        Color::Red
+    } else if pct >= 50 {
+        Color::Yellow
+    } else {
+        Color::Green
+    };
+
+    let mut spans = Vec::with_capacity(2);
+    if filled > 0 {
+        spans.push(Span::styled(
+            "\u{2588}".repeat(filled),
+            Style::default().fg(bar_color),
+        ));
+    }
+    if empty > 0 {
+        spans.push(Span::styled(
+            "\u{2592}".repeat(empty),
+            Style::default().fg(Color::Rgb(60, 60, 65)),
+        ));
+    }
+    spans
+}
+
 fn draw_table(
     f: &mut ratatui::Frame,
     area: Rect,
@@ -368,11 +396,16 @@ fn draw_table(
     state: &mut TableState,
     confirm_kill: Option<usize>,
 ) {
+    let dim = Style::default().fg(Color::DarkGray);
+
     let header = Row::new(vec![
-        Cell::from("  Vertical").style(Style::default().fg(Color::DarkGray)),
-        Cell::from("Context").style(Style::default().fg(Color::DarkGray)),
-        Cell::from("Type").style(Style::default().fg(Color::DarkGray)),
-        Cell::from("  Age").style(Style::default().fg(Color::DarkGray)),
+        Cell::from("  Session").style(dim),
+        Cell::from("Context").style(dim),
+        Cell::from("        ").style(dim),
+        Cell::from("     ").style(dim),
+        Cell::from("Cache").style(dim),
+        Cell::from("  Cost").style(dim),
+        Cell::from("  Age").style(dim),
     ])
     .height(1);
 
@@ -382,12 +415,15 @@ fn draw_table(
             let e = &entries[idx];
 
             if e.is_separator {
-                let sep_style = Style::default().fg(Color::Rgb(50, 50, 55));
+                let sep = Style::default().fg(Color::Rgb(50, 50, 55));
                 return Row::new(vec![
-                    Cell::from(Span::styled("  ──────────────", sep_style)),
-                    Cell::from(Span::styled("────────────────────", sep_style)),
-                    Cell::from(Span::styled("────────", sep_style)),
-                    Cell::from(Span::styled("───────────", sep_style)),
+                    Cell::from(Span::styled("────────────────", sep)),
+                    Cell::from(Span::styled("──────────────────", sep)),
+                    Cell::from(Span::styled("────────", sep)),
+                    Cell::from(Span::styled("─────", sep)),
+                    Cell::from(Span::styled("─────────", sep)),
+                    Cell::from(Span::styled("───────", sep)),
+                    Cell::from(Span::styled("──────", sep)),
                 ])
                 .height(1);
             }
@@ -397,50 +433,98 @@ fn draw_table(
 
             let marker = if is_current { "● " } else { "  " };
 
-            let (vertical_style, context_style, type_style, age_style) = if is_kill_target {
-                let kill_style = Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
-                (kill_style, kill_style, kill_style, kill_style)
+            let kill_style = Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
+            let vs = if is_kill_target {
+                kill_style
             } else {
-                let vs = Style::default().fg(e.color);
-                let cs = if is_current {
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::White)
-                };
-                let ts = Style::default().fg(if e.session_type == "remote" {
-                    Color::Cyan
-                } else {
-                    Color::DarkGray
-                });
-                let age_s = Style::default().fg(Color::Rgb(90, 90, 100));
-                (vs, cs, ts, age_s)
+                Style::default().fg(e.color)
+            };
+            let cs = if is_kill_target {
+                kill_style
+            } else if is_current {
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            let info_style = if is_kill_target {
+                kill_style
+            } else {
+                Style::default().fg(Color::Rgb(90, 90, 100))
             };
 
-            let age_text = if is_kill_target {
-                "kill? y/n".to_string()
+            // Health columns
+            let (bar_cell, pct_cell, cache_cell, cost_cell) = if is_kill_target {
+                (
+                    Cell::from(Span::styled("kill?   ", kill_style)),
+                    Cell::from(Span::styled("y/n  ", kill_style)),
+                    Cell::from(Span::styled("         ", kill_style)),
+                    Cell::from(Span::styled("       ", kill_style)),
+                )
+            } else if let Some(ref h) = e.health {
+                let bar_spans = health_bar(h.context_pct);
+                let pct_text = if h.exceeds_200k {
+                    format!("{:>3}% 1M", h.context_pct)
+                } else {
+                    format!("{:>3}%   ", h.context_pct)
+                };
+                let pct_color = if h.context_pct >= 80 {
+                    Color::Red
+                } else if h.context_pct >= 50 {
+                    Color::Yellow
+                } else {
+                    Color::White
+                };
+                let cache_text = match h.cache_pct {
+                    Some(c) => format!("  {:>3}%   ", c),
+                    None => "   --    ".to_string(),
+                };
+                let cost_text = if h.cost_usd > 0.0 {
+                    format!(" ${:.2}", h.cost_usd)
+                } else {
+                    " $0.00".to_string()
+                };
+                (
+                    Cell::from(Line::from(bar_spans)),
+                    Cell::from(Span::styled(pct_text, Style::default().fg(pct_color))),
+                    Cell::from(Span::styled(cache_text, info_style)),
+                    Cell::from(Span::styled(cost_text, info_style)),
+                )
             } else {
-                format!("  {}", format_age(e.activity))
+                (
+                    Cell::from(Span::styled("        ", info_style)),
+                    Cell::from(Span::styled("       ", info_style)),
+                    Cell::from(Span::styled("   --    ", info_style)),
+                    Cell::from(Span::styled("  idle", info_style)),
+                )
             };
+
+            let age_text = format!("  {}", format_age(e.activity));
 
             Row::new(vec![
                 Cell::from(Line::from(vec![
-                    Span::styled(marker, vertical_style),
-                    Span::styled(e.vertical.clone(), vertical_style),
+                    Span::styled(marker, vs),
+                    Span::styled(e.vertical.clone(), vs),
                 ])),
-                Cell::from(Span::styled(e.context.clone(), context_style)),
-                Cell::from(Span::styled(e.session_type, type_style)),
-                Cell::from(Span::styled(age_text, age_style)),
+                Cell::from(Span::styled(e.context.clone(), cs)),
+                bar_cell,
+                pct_cell,
+                cache_cell,
+                cost_cell,
+                Cell::from(Span::styled(age_text, info_style)),
             ])
         })
         .collect();
 
     let widths = [
-        Constraint::Length(16),
-        Constraint::Min(20),
-        Constraint::Length(8),
-        Constraint::Length(11),
+        Constraint::Length(16),  // session (marker + vertical)
+        Constraint::Min(12),    // context
+        Constraint::Length(8),  // bar
+        Constraint::Length(7),  // pct (+ 1M badge)
+        Constraint::Length(9),  // cache
+        Constraint::Length(7),  // cost
+        Constraint::Length(6),  // age
     ];
 
     let table = Table::new(rows, widths)

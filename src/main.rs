@@ -1,3 +1,4 @@
+mod claude_status;
 mod completions;
 mod config;
 mod init;
@@ -9,6 +10,7 @@ mod tmux;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use config::Config;
+use tmux::Tmux;
 
 #[derive(Parser)]
 #[command(
@@ -23,6 +25,10 @@ struct Cli {
     /// Override the default tool (e.g., --tool opencode)
     #[arg(long)]
     tool: Option<String>,
+
+    /// Tmux server name for socket isolation (env: MUXR_TMUX_SERVER)
+    #[arg(long, env = "MUXR_TMUX_SERVER")]
+    server: Option<String>,
 
     /// Vertical name (e.g., work, personal, oss)
     #[arg(num_args = 0..)]
@@ -42,6 +48,9 @@ enum Commands {
     /// Generate tmux status-left config from verticals
     #[command(name = "tmux-status")]
     TmuxStatus,
+    /// Claude Code statusline (reads JSON from stdin, outputs ANSI)
+    #[command(name = "claude-status")]
+    ClaudeStatus,
     /// Create a session in the background (don't attach)
     New {
         /// Override the default tool (e.g., --tool opencode)
@@ -80,68 +89,56 @@ fn resolve_tool(tool_override: Option<&str>, config: &Config) -> String {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let tmux = Tmux::new(cli.server);
 
     match cli.command {
         Some(Commands::Init) => init::init(),
-        Some(Commands::Ls) => cmd_ls(),
+        Some(Commands::Ls) => cmd_ls(&tmux),
         Some(Commands::Save) => {
             let config = Config::load()?;
-            state::SavedState::save(&config)
+            state::SavedState::save(&config, &tmux)
         }
-        Some(Commands::Restore) => state::SavedState::restore(),
-        Some(Commands::TmuxStatus) => cmd_tmux_status(),
-        Some(Commands::Switch) => cmd_switch(),
-        Some(Commands::New { tool, args }) => cmd_new(&args, tool.as_deref()),
-        Some(Commands::Rename { name }) => cmd_rename(&name),
-        Some(Commands::Kill { name }) => cmd_kill(&name),
+        Some(Commands::Restore) => state::SavedState::restore(&tmux),
+        Some(Commands::TmuxStatus) => cmd_tmux_status(&tmux),
+        Some(Commands::ClaudeStatus) => claude_status::run(&tmux),
+        Some(Commands::Switch) => cmd_switch(&tmux),
+        Some(Commands::New { tool, args }) => cmd_new(&tmux, &args, tool.as_deref()),
+        Some(Commands::Rename { name }) => cmd_rename(&tmux, &name),
+        Some(Commands::Kill { name }) => cmd_kill(&tmux, &name),
         Some(Commands::Completions { shell }) => completions::generate(&shell),
         None => {
             if cli.args.is_empty() {
-                cmd_control_plane()
+                cmd_control_plane(&tmux)
             } else {
-                cmd_open(&cli.args, cli.tool.as_deref())
+                cmd_open(&tmux, &cli.args, cli.tool.as_deref())
             }
         }
     }
 }
 
 /// Start or attach to the muxr control plane shell.
-fn cmd_control_plane() -> Result<()> {
+fn cmd_control_plane(tmux: &Tmux) -> Result<()> {
     let session = "muxr";
     let home = dirs::home_dir().context("Could not determine home directory")?;
 
-    if tmux::session_exists(session) {
-        tmux::attach(session)?;
+    if tmux.session_exists(session) {
+        tmux.attach(session)?;
     } else {
-        // Create with a bare shell (no tool), just the home directory
-        let status = std::process::Command::new("tmux")
-            .args([
-                "new-session",
-                "-d",
-                "-s",
-                session,
-                "-c",
-                home.to_str().unwrap_or("~"),
-            ])
-            .status()
-            .context("Failed to create muxr control plane")?;
-        if !status.success() {
-            anyhow::bail!("Failed to create muxr session");
-        }
-        tmux::attach(session)?;
+        tmux.create_session(session, &home, "")?;
+        tmux.attach(session)?;
     }
 
     Ok(())
 }
 
 /// Open or attach to a session: muxr work api auth
-fn cmd_open(args: &[String], tool_override: Option<&str>) -> Result<()> {
+fn cmd_open(tmux: &Tmux, args: &[String], tool_override: Option<&str>) -> Result<()> {
     let config = Config::load()?;
     let name = &args[0];
 
     // Route to remote handler if this is a remote vertical
     if config.is_remote(name) {
-        return cmd_open_remote(&config, name, args);
+        return cmd_open_remote(tmux, &config, name, args);
     }
 
     let tool = resolve_tool(tool_override, &config);
@@ -160,21 +157,26 @@ fn cmd_open(args: &[String], tool_override: Option<&str>) -> Result<()> {
 
     let dir = config.resolve_dir(name)?;
 
-    if tmux::session_exists(&session) {
+    if tmux.session_exists(&session) {
         eprintln!("Attaching to {session}");
-        tmux::attach(&session)?;
+        tmux.attach(&session)?;
     } else {
-        let tool_cmd = tmux::tool_command(&tool, None);
+        let tool_cmd = tmux::tool_command(&tool, None, Some(&session));
         eprintln!("Creating {session} in {} ({})", dir.display(), tool);
-        tmux::create_session(&session, &dir, &tool_cmd)?;
-        tmux::attach(&session)?;
+        tmux.create_session(&session, &dir, &tool_cmd)?;
+        tmux.attach(&session)?;
     }
 
     Ok(())
 }
 
 /// Open or attach to a remote proxy session: muxr lab bootc
-fn cmd_open_remote(config: &Config, remote_name: &str, args: &[String]) -> Result<()> {
+fn cmd_open_remote(
+    tmux: &Tmux,
+    config: &Config,
+    remote_name: &str,
+    args: &[String],
+) -> Result<()> {
     let remote = config
         .remote(remote_name)
         .context("Remote not found in config")?;
@@ -194,9 +196,9 @@ fn cmd_open_remote(config: &Config, remote_name: &str, args: &[String]) -> Resul
 
     let instance = remote.instance_name(&context);
 
-    if tmux::session_exists(&session) {
+    if tmux.session_exists(&session) {
         eprintln!("Attaching to {session} (remote)");
-        tmux::attach(&session)?;
+        tmux.attach(&session)?;
     } else {
         // Bootstrap Claude config on first connect
         if let Err(e) = remote::bootstrap_claude_config(remote, &instance) {
@@ -209,8 +211,8 @@ fn cmd_open_remote(config: &Config, remote_name: &str, args: &[String]) -> Resul
             remote.connect
         );
         let home = dirs::home_dir().context("No home directory")?;
-        tmux::create_session(&session, &home, &connect_cmd)?;
-        tmux::attach(&session)?;
+        tmux.create_session(&session, &home, &connect_cmd)?;
+        tmux.attach(&session)?;
     }
 
     Ok(())
@@ -239,7 +241,7 @@ fn cmd_remote_ls(remote: &config::Remote, remote_name: &str) -> Result<()> {
 }
 
 /// Create a session in the background without attaching.
-fn cmd_new(args: &[String], tool_override: Option<&str>) -> Result<()> {
+fn cmd_new(tmux: &Tmux, args: &[String], tool_override: Option<&str>) -> Result<()> {
     let config = Config::load()?;
     let name = &args[0];
 
@@ -251,7 +253,7 @@ fn cmd_new(args: &[String], tool_override: Option<&str>) -> Result<()> {
 
     let session = format!("{name}/{context}");
 
-    if tmux::session_exists(&session) {
+    if tmux.session_exists(&session) {
         eprintln!("{session} already exists");
         return Ok(());
     }
@@ -264,13 +266,13 @@ fn cmd_new(args: &[String], tool_override: Option<&str>) -> Result<()> {
         }
         let connect_cmd = remote::connect_command(remote, &instance, &context)?;
         let home = dirs::home_dir().context("No home directory")?;
-        tmux::create_session(&session, &home, &connect_cmd)?;
+        tmux.create_session(&session, &home, &connect_cmd)?;
         eprintln!("Created {session} -> {instance} (remote)");
     } else if config.verticals.contains_key(name) {
         let tool = resolve_tool(tool_override, &config);
         let dir = config.resolve_dir(name)?;
-        let tool_cmd = tmux::tool_command(&tool, None);
-        tmux::create_session(&session, &dir, &tool_cmd)?;
+        let tool_cmd = tmux::tool_command(&tool, None, Some(&session));
+        tmux.create_session(&session, &dir, &tool_cmd)?;
         eprintln!("Created {session} ({})", tool);
     } else {
         let names = config.all_names().join(", ");
@@ -281,28 +283,22 @@ fn cmd_new(args: &[String], tool_override: Option<&str>) -> Result<()> {
 }
 
 /// Rename the current tmux session.
-fn cmd_rename(name: &str) -> Result<()> {
-    let status = std::process::Command::new("tmux")
-        .args(["rename-session", name])
-        .status()
-        .context("Failed to rename session")?;
-    if !status.success() {
-        anyhow::bail!("tmux rename-session failed");
-    }
+fn cmd_rename(tmux: &Tmux, name: &str) -> Result<()> {
+    tmux.rename_session(name)?;
     eprintln!("Renamed to {name}");
     Ok(())
 }
 
 /// Kill a session or all sessions.
-fn cmd_kill(name: &str) -> Result<()> {
+fn cmd_kill(tmux: &Tmux, name: &str) -> Result<()> {
     if name == "all" {
-        let sessions = tmux::list_sessions()?;
+        let sessions = tmux.list_sessions()?;
         for (sname, _) in &sessions {
-            tmux::kill_session(sname)?;
+            tmux.kill_session(sname)?;
             eprintln!("Killed {sname}");
         }
-    } else if tmux::session_exists(name) {
-        tmux::kill_session(name)?;
+    } else if tmux.session_exists(name) {
+        tmux.kill_session(name)?;
         eprintln!("Killed {name}");
     } else {
         eprintln!("Session not found: {name}");
@@ -310,9 +306,9 @@ fn cmd_kill(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_ls() -> Result<()> {
+fn cmd_ls(tmux: &Tmux) -> Result<()> {
     let config = Config::load().ok();
-    let sessions = tmux::list_sessions()?;
+    let sessions = tmux.list_sessions()?;
     if sessions.is_empty() {
         eprintln!("No active tmux sessions.");
     } else {
@@ -334,14 +330,14 @@ fn cmd_ls() -> Result<()> {
 }
 
 /// Interactive TUI session switcher.
-fn cmd_switch() -> Result<()> {
-    match switcher::run()? {
-        switcher::Action::Switch(session) => tmux::attach(&session),
+fn cmd_switch(tmux: &Tmux) -> Result<()> {
+    match switcher::run(tmux)? {
+        switcher::Action::Switch(session) => tmux.attach(&session),
         switcher::Action::Kill(session) => {
-            tmux::kill_session(&session)?;
+            tmux.kill_session(&session)?;
             eprintln!("Killed {session}");
             // Re-enter the switcher after kill
-            cmd_switch()
+            cmd_switch(tmux)
         }
         switcher::Action::None => Ok(()),
     }
@@ -349,14 +345,8 @@ fn cmd_switch() -> Result<()> {
 
 /// Generate tmux status-left format string from config verticals.
 /// Used by tmux.conf: set -g status-left "#(muxr tmux-status)"
-fn cmd_tmux_status() -> Result<()> {
-    // This is called by tmux to get the status-left string.
-    // We read the current tmux session name and color it by vertical.
-    let output = std::process::Command::new("tmux")
-        .args(["display-message", "-p", "#{session_name}"])
-        .output()?;
-
-    let session_name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+fn cmd_tmux_status(tmux: &Tmux) -> Result<()> {
+    let session_name = tmux.display_message("#{session_name}")?;
 
     let vertical = session_name.split('/').next().unwrap_or(&session_name);
 
