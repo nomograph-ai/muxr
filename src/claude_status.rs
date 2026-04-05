@@ -280,18 +280,18 @@ pub fn run(tmux: &Tmux) -> Result<()> {
         &status.workspace.project_dir
     };
 
-    if !project_dir.is_empty() {
-        if let Some(git) = git_info(project_dir) {
-            line1.push_str("  ");
-            line1.push_str(CYAN);
-            line1.push_str(&git.branch);
+    if !project_dir.is_empty()
+        && let Some(git) = git_info(project_dir)
+    {
+        line1.push_str("  ");
+        line1.push_str(CYAN);
+        line1.push_str(&git.branch);
+        line1.push_str(RST);
+        if git.dirty {
+            line1.push(' ');
+            line1.push_str(YELLOW);
+            line1.push('*');
             line1.push_str(RST);
-            if git.dirty {
-                line1.push(' ');
-                line1.push_str(YELLOW);
-                line1.push('*');
-                line1.push_str(RST);
-            }
         }
     }
 
@@ -308,25 +308,25 @@ pub fn run(tmux: &Tmux) -> Result<()> {
     }
 
     // Worktree badge
-    if let Some(ref wt) = status.worktree {
-        if !wt.name.is_empty() {
-            line1.push_str("  ");
-            line1.push_str(MAGENTA);
-            line1.push_str("wt:");
-            line1.push_str(&wt.name);
-            line1.push_str(RST);
-        }
+    if let Some(ref wt) = status.worktree
+        && !wt.name.is_empty()
+    {
+        line1.push_str("  ");
+        line1.push_str(MAGENTA);
+        line1.push_str("wt:");
+        line1.push_str(&wt.name);
+        line1.push_str(RST);
     }
 
     // Agent badge
-    if let Some(ref agent) = status.agent {
-        if !agent.name.is_empty() {
-            line1.push_str("  ");
-            line1.push_str(DIM);
-            line1.push_str("agent:");
-            line1.push_str(&agent.name);
-            line1.push_str(RST);
-        }
+    if let Some(ref agent) = status.agent
+        && !agent.name.is_empty()
+    {
+        line1.push_str("  ");
+        line1.push_str(DIM);
+        line1.push_str("agent:");
+        line1.push_str(&agent.name);
+        line1.push_str(RST);
     }
 
     // -- Line 2: model + context bar + cache + cost + duration + rate limits --
@@ -421,7 +421,7 @@ pub fn run(tmux: &Tmux) -> Result<()> {
 fn hex_to_ansi(hex: &str) -> String {
     let hex = hex.trim_start_matches('#');
     if hex.len() != 6 {
-        return format!("\x1b[37m"); // fallback white
+        return "\x1b[37m".to_string(); // fallback white
     }
     let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(255);
     let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(255);

@@ -224,6 +224,7 @@ impl Tmux {
 /// Session info with activity timestamp.
 pub struct SessionInfo {
     pub name: String,
+    #[allow(dead_code)]
     pub path: String,
     pub activity: u64,
 }
