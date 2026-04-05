@@ -36,10 +36,8 @@ workflow:
 
 # -- Reusable config --
 
-.rust-macos:
-  tags:
-    - saas-macos-large-m2pro
-  image: macos-15-xcode-16
+.rust:
+  image: rust:1.93-bookworm
   cache:
     - key: cargo-registry-${CI_COMMIT_REF_SLUG}
       paths:
@@ -48,6 +46,18 @@ workflow:
       policy: pull-push
     - key: cargo-target-${CI_COMMIT_REF_SLUG}
       paths:
+        - target/
+      policy: pull-push
+
+.rust-macos:
+  tags:
+    - saas-macos-medium-m1
+  image: macos-15-xcode-16
+  cache:
+    - key: cargo-macos-${CI_COMMIT_REF_SLUG}
+      paths:
+        - .cargo/registry/cache
+        - .cargo/registry/index
         - target/
       policy: pull-push
   before_script:
@@ -72,7 +82,7 @@ workflow:
 check:
   stage: test
   extends:
-    - .rust-macos
+    - .rust
     - .on-code-change
   script:
     - rustup component add clippy
@@ -82,7 +92,7 @@ check:
 audit:
   stage: test
   extends:
-    - .rust-macos
+    - .rust
     - .on-code-change
   needs:
     - job: check
@@ -98,16 +108,10 @@ audit:
 
 build:linux-amd64:
   stage: build
-  extends: .on-tag
-  image: rust:1.93-bookworm
+  extends:
+    - .rust
+    - .on-tag
   interruptible: false
-  cache:
-    - key: cargo-linux-${CI_COMMIT_REF_SLUG}
-      paths:
-        - .cargo/registry/cache
-        - .cargo/registry/index
-        - target/
-      policy: pull-push
   needs:
     - job: check
       artifacts: false
@@ -118,13 +122,13 @@ build:linux-amd64:
     - cargo build --release
     - strip target/release/muxr
     - cp target/release/muxr muxr-linux-amd64
-    - sha256sum muxr-linux-amd64 > muxr-linux-amd64.sha256
+    - sha256sum muxr-linux-amd64 > checksums-linux.txt
     - echo "--- Generating CycloneDX SBOM ---"
     - cargo cyclonedx --format json --override-filename muxr-linux-amd64.sbom.cdx
   artifacts:
     paths:
       - muxr-linux-amd64
-      - muxr-linux-amd64.sha256
+      - checksums-linux.txt
       - muxr-linux-amd64.sbom.cdx.json
     expire_in: 4 weeks
     reports:
@@ -147,13 +151,13 @@ build:darwin-arm64:
     - cargo build --release
     - strip target/release/muxr
     - cp target/release/muxr muxr-darwin-arm64
-    - shasum -a 256 muxr-darwin-arm64 > muxr-darwin-arm64.sha256
+    - shasum -a 256 muxr-darwin-arm64 > checksums-darwin.txt
     - echo "--- Generating CycloneDX SBOM ---"
     - cargo cyclonedx --format json --override-filename muxr-darwin-arm64.sbom.cdx
   artifacts:
     paths:
       - muxr-darwin-arm64
-      - muxr-darwin-arm64.sha256
+      - checksums-darwin.txt
       - muxr-darwin-arm64.sbom.cdx.json
     expire_in: 4 weeks
     reports:
@@ -269,7 +273,9 @@ release:
     - job: publish:binaries
     - job: publish:crates
   script:
-    - echo "Creating release for ${CI_COMMIT_TAG}"
+    - |
+      cat checksums-*.txt > checksums.txt 2>/dev/null || true
+      cat checksums.txt
   release:
     tag_name: ${CI_COMMIT_TAG}
     name: "muxr ${CI_COMMIT_TAG}"
@@ -297,14 +303,11 @@ release:
         - name: "muxr-linux-amd64"
           url: "${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/muxr-linux-amd64?job=build:linux-amd64"
           link_type: "package"
-        - name: "muxr-linux-amd64.sha256"
-          url: "${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/muxr-linux-amd64.sha256?job=build:linux-amd64"
-          link_type: "other"
         - name: "muxr-darwin-arm64"
           url: "${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/muxr-darwin-arm64?job=build:darwin-arm64"
           link_type: "package"
-        - name: "muxr-darwin-arm64.sha256"
-          url: "${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/muxr-darwin-arm64.sha256?job=build:darwin-arm64"
+        - name: "checksums.txt"
+          url: "${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/checksums.txt?job=release"
           link_type: "other"
         - name: "SBOM (linux-amd64)"
           url: "${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/muxr-linux-amd64.sbom.cdx.json?job=build:linux-amd64"
