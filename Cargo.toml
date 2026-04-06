@@ -1,6 +1,6 @@
 [package]
 name = "muxr"
-version = "0.6.1"
+version = "0.6.2"
 edition = "2024"
 description = "Tmux session manager for AI coding workflows"
 repository = "https://gitlab.com/dunn.dev/muxr"
