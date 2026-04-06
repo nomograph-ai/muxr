@@ -1,23 +1,18 @@
-<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
-  <!-- Background + outer frame -->
-  <rect x="0" y="0" width="512" height="512" fill="#faf6ed"/>
-  <rect x="40" y="40" width="432" height="432" rx="0" fill="none" stroke="#2c2417" stroke-width="5"/>
-
-  <!-- Header bar -->
-  <rect x="40" y="40" width="432" height="80" rx="0" fill="#2c2417"/>
-  <text x="256" y="94" text-anchor="middle" fill="#faf6ed" font-family="monospace" font-size="52" font-weight="800">muxr</text>
-
-  <!-- Three thick vertical lines (the verticals) -->
-  <line x1="140" y1="170" x2="140" y2="390" stroke="#2c2417" stroke-width="6"/>
-  <line x1="256" y1="170" x2="256" y2="390" stroke="#2c2417" stroke-width="6"/>
-  <line x1="372" y1="170" x2="372" y2="390" stroke="#2c2417" stroke-width="3" stroke-dasharray="12,8"/>
-
-  <!-- Dots at top of each vertical -->
-  <circle cx="140" cy="170" r="12" fill="#2c2417"/>
-  <circle cx="256" cy="170" r="12" fill="#2c2417"/>
-  <circle cx="372" cy="170" r="12" fill="none" stroke="#2c2417" stroke-width="3"/>
-
-  <!-- Switching arc across bottom -->
-  <path d="M 140 390 Q 140 440 256 440 Q 372 440 372 390" fill="none" stroke="#2c2417" stroke-width="6"/>
-  <polygon points="246,448 256,424 266,448" fill="#2c2417"/>
+<svg viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg" font-family="'Courier New', monospace">
+  <rect x="0" y="0" width="256" height="256" fill="#faf6ed"/>
+  <rect x="20" y="20" width="216" height="216" fill="none" stroke="#2c2417" stroke-width="4"/>
+  <rect x="28" y="28" width="200" height="36" fill="#2c2417"/>
+  <text x="128" y="53" text-anchor="middle" font-size="20" fill="#faf6ed" font-weight="bold">muxr</text>
+  <!-- Three verticals (tmux sessions) -->
+  <line x1="90" y1="85" x2="90" y2="190" stroke="#2c2417" stroke-width="5"/>
+  <line x1="128" y1="85" x2="128" y2="190" stroke="#2c2417" stroke-width="5"/>
+  <line x1="166" y1="85" x2="166" y2="190" stroke="#2c2417" stroke-width="3" stroke-dasharray="8,5"/>
+  <!-- Dots at top -->
+  <circle cx="90" cy="85" r="7" fill="#2c2417"/>
+  <circle cx="128" cy="85" r="7" fill="#2c2417"/>
+  <circle cx="166" cy="85" r="7" fill="none" stroke="#2c2417" stroke-width="2.5"/>
+  <!-- Switching arc -->
+  <path d="M90 190 Q90 210 128 210 Q166 210 166 190" fill="none" stroke="#2c2417" stroke-width="4"/>
+  <polygon points="124,213 128,204 132,213" fill="#2c2417"/>
+  <line x1="60" y1="224" x2="196" y2="224" stroke="#c4b99a" stroke-width="2"/>
 </svg>
