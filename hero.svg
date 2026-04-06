@@ -1,183 +1,113 @@
-<svg viewBox="0 0 1200 630" xmlns="http://www.w3.org/2000/svg">
+<svg viewBox="0 0 1200 430" xmlns="http://www.w3.org/2000/svg">
   <defs>
     <marker id="a" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><polygon points="0,0 7,3.5 0,7" fill="#2c2417"/></marker>
   </defs>
+  <rect x="0" y="0" width="1200" height="430" fill="#faf6ed" stroke="#2c2417" stroke-width="3"/>
 
-  <!-- Background + outer frame -->
-  <rect x="0" y="0" width="1200" height="630" rx="0" fill="#faf6ed" stroke="#2c2417" stroke-width="3"/>
+  <rect x="0" y="0" width="1200" height="36" fill="#2c2417"/>
+  <text x="16" y="24" font-family="'IBM Plex Mono', monospace" font-size="14" fill="#faf6ed" font-weight="bold">muxr -- tmux session manager</text>
+  <text x="1184" y="24" font-family="'IBM Plex Mono', monospace" font-size="11" fill="#c4b99a" text-anchor="end">one command to open -- one keybind to switch</text>
 
-  <!-- Title block -->
-  <text x="600" y="44" text-anchor="middle" fill="#2c2417" font-family="monospace" font-size="30" font-weight="800">muxr</text>
-  <text x="600" y="66" text-anchor="middle" fill="#6b5d4f" font-family="monospace" font-size="13">tmux session manager for AI coding workflows</text>
-  <line x1="200" y1="80" x2="1000" y2="80" stroke="#c4b99a" stroke-width="0.5"/>
+  <!-- Left: Config -->
+  <rect x="40" y="56" width="260" height="280" fill="none" stroke="#2c2417" stroke-width="1.5"/>
+  <rect x="40" y="56" width="260" height="24" fill="#2c2417"/>
+  <text x="170" y="72" font-family="'IBM Plex Mono', monospace" font-size="10" fill="#faf6ed" text-anchor="middle" font-weight="bold">config.toml</text>
 
-  <!-- ============================================================
-       INPUT
-       ============================================================ -->
-  <rect x="40" y="100" width="260" height="240" rx="0" fill="none" stroke="#2c2417" stroke-width="1.5"/>
-  <text x="170" y="120" text-anchor="middle" fill="#2c2417" font-family="monospace" font-size="10" font-weight="700" letter-spacing="0.1em">INPUT</text>
-  <line x1="40" y1="128" x2="300" y2="128" stroke="#2c2417" stroke-width="0.5"/>
+  <text x="56" y="100" font-family="'IBM Plex Mono', monospace" font-size="9" fill="#2c2417" font-weight="bold">verticals</text>
+  <text x="56" y="116" font-family="'IBM Plex Mono', monospace" font-size="9" fill="#6b5d4f">  work/  api, auth, frontend</text>
+  <text x="56" y="132" font-family="'IBM Plex Mono', monospace" font-size="9" fill="#6b5d4f">  personal/  blog, tools</text>
+  <line x1="56" y1="142" x2="284" y2="142" stroke="#c4b99a" stroke-width="0.8"/>
+  <text x="56" y="160" font-family="'IBM Plex Mono', monospace" font-size="9" fill="#2c2417" font-weight="bold">remotes</text>
+  <text x="56" y="176" font-family="'IBM Plex Mono', monospace" font-size="9" fill="#6b5d4f">  remote-A  SSH, auto-reconnect</text>
+  <text x="56" y="192" font-family="'IBM Plex Mono', monospace" font-size="9" fill="#6b5d4f">  remote-B  SSH, auto-reconnect</text>
+  <line x1="56" y1="202" x2="284" y2="202" stroke="#c4b99a" stroke-width="0.8"/>
+  <text x="56" y="220" font-family="'IBM Plex Mono', monospace" font-size="9" fill="#2c2417" font-weight="bold">tool per session</text>
+  <text x="56" y="236" font-family="'IBM Plex Mono', monospace" font-size="9" fill="#6b5d4f">  claude, vim, shell</text>
+  <line x1="56" y1="246" x2="284" y2="246" stroke="#c4b99a" stroke-width="0.8"/>
+  <text x="56" y="264" font-family="'IBM Plex Mono', monospace" font-size="9" fill="#2c2417" font-weight="bold">session naming</text>
+  <text x="56" y="280" font-family="'IBM Plex Mono', monospace" font-size="9" fill="#6b5d4f">  vertical / context</text>
+  <text x="170" y="322" font-family="'IBM Plex Mono', monospace" font-size="9" fill="#6b5d4f" text-anchor="middle">one config file, everything</text>
 
-  <!-- Local verticals -->
-  <text x="55" y="150" fill="#2c2417" font-family="monospace" font-size="9" font-weight="700">LOCAL VERTICALS</text>
-  <line x1="55" y1="155" x2="155" y2="155" stroke="#2c2417" stroke-width="0.5"/>
+  <!-- Arrow -->
+  <line x1="300" y1="196" x2="370" y2="196" stroke="#2c2417" stroke-width="1.5" marker-end="url(#a)"/>
 
-  <text x="55" y="176" fill="#2c2417" font-family="monospace" font-size="11" font-weight="600">work/</text>
-  <text x="120" y="176" fill="#6b5d4f" font-family="monospace" font-size="10">api, auth, frontend</text>
+  <!-- Center: muxr commands -->
+  <rect x="380" y="56" width="200" height="280" fill="none" stroke="#2c2417" stroke-width="2.5"/>
+  <rect x="380" y="56" width="200" height="28" fill="#2c2417"/>
+  <text x="480" y="74" font-family="'IBM Plex Mono', monospace" font-size="12" fill="#faf6ed" text-anchor="middle" font-weight="bold">muxr</text>
 
-  <text x="55" y="198" fill="#2c2417" font-family="monospace" font-size="11" font-weight="600">personal/</text>
-  <text x="140" y="198" fill="#6b5d4f" font-family="monospace" font-size="10">blog, tools</text>
+  <text x="396" y="104" font-family="'IBM Plex Mono', monospace" font-size="10" fill="#2c2417" font-weight="bold">open</text>
+  <text x="396" y="120" font-family="'IBM Plex Mono', monospace" font-size="9" fill="#6b5d4f">  new-session + cd + tool</text>
+  <text x="396" y="144" font-family="'IBM Plex Mono', monospace" font-size="10" fill="#2c2417" font-weight="bold">switch</text>
+  <text x="396" y="160" font-family="'IBM Plex Mono', monospace" font-size="9" fill="#6b5d4f">  fuzzy filter, attach</text>
+  <text x="396" y="184" font-family="'IBM Plex Mono', monospace" font-size="10" fill="#2c2417" font-weight="bold">save / restore</text>
+  <text x="396" y="200" font-family="'IBM Plex Mono', monospace" font-size="9" fill="#6b5d4f">  survives reboots</text>
+  <text x="396" y="224" font-family="'IBM Plex Mono', monospace" font-size="10" fill="#2c2417" font-weight="bold">claude-status</text>
+  <text x="396" y="240" font-family="'IBM Plex Mono', monospace" font-size="9" fill="#6b5d4f">  tmux statusline</text>
+  <text x="480" y="320" font-family="'IBM Plex Mono', monospace" font-size="9" fill="#6b5d4f" text-anchor="middle">server isolation</text>
 
-  <!-- Remote hosts -->
-  <text x="55" y="232" fill="#2c2417" font-family="monospace" font-size="9" font-weight="700">REMOTE HOSTS</text>
-  <line x1="55" y1="237" x2="140" y2="237" stroke="#2c2417" stroke-width="0.5"/>
+  <!-- Arrows -->
+  <line x1="580" y1="110" x2="650" y2="100" stroke="#2c2417" stroke-width="1.5" marker-end="url(#a)"/>
+  <line x1="580" y1="155" x2="650" y2="155" stroke="#2c2417" stroke-width="1.5" marker-end="url(#a)"/>
+  <line x1="580" y1="200" x2="650" y2="230" stroke="#2c2417" stroke-width="1.5" stroke-dasharray="5,3" marker-end="url(#a)"/>
 
-  <text x="55" y="258" fill="#2c2417" font-family="monospace" font-size="11" font-weight="600">remote-A</text>
-  <text x="145" y="258" fill="#6b5d4f" font-family="monospace" font-size="10">SSH, auto-reconnect</text>
+  <!-- Right: Sessions + TUI -->
+  <rect x="660" y="56" width="500" height="280" fill="none" stroke="#2c2417" stroke-width="1.5"/>
+  <rect x="660" y="56" width="500" height="24" fill="#2c2417"/>
+  <text x="910" y="72" font-family="'IBM Plex Mono', monospace" font-size="10" fill="#faf6ed" text-anchor="middle" font-weight="bold">RUNNING SESSIONS</text>
 
-  <text x="55" y="280" fill="#2c2417" font-family="monospace" font-size="11" font-weight="600">remote-B</text>
-  <text x="145" y="280" fill="#6b5d4f" font-family="monospace" font-size="10">SSH, auto-reconnect</text>
+  <text x="676" y="98" font-family="'IBM Plex Mono', monospace" font-size="8" fill="#6b5d4f">SESSION</text>
+  <text x="830" y="98" font-family="'IBM Plex Mono', monospace" font-size="8" fill="#6b5d4f">TOOL</text>
+  <text x="910" y="98" font-family="'IBM Plex Mono', monospace" font-size="8" fill="#6b5d4f">DIR</text>
+  <line x1="676" y1="104" x2="1000" y2="104" stroke="#c4b99a" stroke-width="0.8"/>
 
-  <text x="55" y="318" fill="#6b5d4f" font-family="monospace" font-size="9" font-style="italic">tool per session: claude, vim, shell</text>
+  <rect x="676" y="108" width="320" height="20" fill="none" stroke="#2c2417" stroke-width="1"/>
+  <text x="686" y="122" font-family="'IBM Plex Mono', monospace" font-size="9" fill="#2c2417" font-weight="bold">work/api</text>
+  <text x="830" y="122" font-family="'IBM Plex Mono', monospace" font-size="9" fill="#6b5d4f">claude</text>
+  <text x="910" y="122" font-family="'IBM Plex Mono', monospace" font-size="9" fill="#6b5d4f">~/work</text>
 
-  <!-- Arrow: input -> muxr -->
-  <line x1="300" y1="220" x2="393" y2="220" stroke="#2c2417" stroke-width="1.5" marker-end="url(#a)"/>
+  <rect x="676" y="132" width="320" height="20" fill="none" stroke="#2c2417" stroke-width="1"/>
+  <text x="686" y="146" font-family="'IBM Plex Mono', monospace" font-size="9" fill="#2c2417" font-weight="bold">work/auth</text>
+  <text x="830" y="146" font-family="'IBM Plex Mono', monospace" font-size="9" fill="#6b5d4f">claude</text>
+  <text x="910" y="146" font-family="'IBM Plex Mono', monospace" font-size="9" fill="#6b5d4f">~/work</text>
 
-  <!-- ============================================================
-       CORE: muxr
-       ============================================================ -->
-  <rect x="398" y="100" width="250" height="240" rx="0" fill="none" stroke="#2c2417" stroke-width="2.5"/>
-  <rect x="398" y="100" width="250" height="26" rx="0" fill="#2c2417"/>
-  <text x="523" y="118" text-anchor="middle" fill="#faf6ed" font-family="monospace" font-size="14" font-weight="800">muxr</text>
+  <rect x="676" y="156" width="320" height="20" fill="none" stroke="#2c2417" stroke-width="1"/>
+  <text x="686" y="170" font-family="'IBM Plex Mono', monospace" font-size="9" fill="#2c2417" font-weight="bold">personal/blog</text>
+  <text x="830" y="170" font-family="'IBM Plex Mono', monospace" font-size="9" fill="#6b5d4f">vim</text>
+  <text x="910" y="170" font-family="'IBM Plex Mono', monospace" font-size="9" fill="#6b5d4f">~/personal</text>
 
-  <text x="415" y="150" fill="#2c2417" font-family="monospace" font-size="11" font-weight="700">1. config.toml</text>
-  <text x="430" y="166" fill="#6b5d4f" font-family="monospace" font-size="9">verticals, remotes, default tool</text>
-  <line x1="410" y1="176" x2="636" y2="176" stroke="#c4b99a" stroke-width="0.5"/>
+  <line x1="676" y1="184" x2="996" y2="184" stroke="#c4b99a" stroke-width="0.5" stroke-dasharray="3,3"/>
 
-  <text x="415" y="194" fill="#2c2417" font-family="monospace" font-size="11" font-weight="700">2. session naming</text>
-  <text x="430" y="210" fill="#6b5d4f" font-family="monospace" font-size="9">vertical / context [/ sub]</text>
-  <line x1="410" y1="220" x2="636" y2="220" stroke="#c4b99a" stroke-width="0.5"/>
+  <rect x="676" y="190" width="320" height="20" fill="none" stroke="#2c2417" stroke-width="1" stroke-dasharray="5,3"/>
+  <text x="686" y="204" font-family="'IBM Plex Mono', monospace" font-size="9" fill="#2c2417">remote-A/session</text>
+  <text x="830" y="204" font-family="'IBM Plex Mono', monospace" font-size="9" fill="#6b5d4f">SSH</text>
 
-  <text x="415" y="238" fill="#2c2417" font-family="monospace" font-size="11" font-weight="700">3. tmux session</text>
-  <text x="430" y="254" fill="#6b5d4f" font-family="monospace" font-size="9">new-session + cd + tool launch</text>
-  <line x1="410" y1="264" x2="636" y2="264" stroke="#c4b99a" stroke-width="0.5"/>
+  <rect x="676" y="214" width="320" height="20" fill="none" stroke="#2c2417" stroke-width="1" stroke-dasharray="5,3"/>
+  <text x="686" y="228" font-family="'IBM Plex Mono', monospace" font-size="9" fill="#2c2417">remote-B/session</text>
+  <text x="830" y="228" font-family="'IBM Plex Mono', monospace" font-size="9" fill="#6b5d4f">SSH</text>
 
-  <text x="415" y="282" fill="#2c2417" font-family="monospace" font-size="11" font-weight="700">4. state persistence</text>
-  <text x="430" y="298" fill="#6b5d4f" font-family="monospace" font-size="9">save to JSON, restore after reboot</text>
-  <line x1="410" y1="308" x2="636" y2="308" stroke="#c4b99a" stroke-width="0.5"/>
+  <!-- TUI -->
+  <line x1="1010" y1="86" x2="1010" y2="330" stroke="#c4b99a" stroke-width="0.5" stroke-dasharray="3,3"/>
+  <rect x="1020" y="86" width="130" height="240" fill="none" stroke="#2c2417" stroke-width="1.5"/>
+  <rect x="1020" y="86" width="130" height="20" fill="#2c2417"/>
+  <text x="1085" y="100" font-family="'IBM Plex Mono', monospace" font-size="9" fill="#faf6ed" text-anchor="middle" font-weight="bold">muxr switch</text>
+  <text x="1032" y="124" font-family="'IBM Plex Mono', monospace" font-size="9" fill="#2c2417" font-weight="bold">&gt; work/api</text>
+  <text x="1032" y="142" font-family="'IBM Plex Mono', monospace" font-size="9" fill="#6b5d4f">  work/auth</text>
+  <text x="1032" y="160" font-family="'IBM Plex Mono', monospace" font-size="9" fill="#6b5d4f">  personal/blog</text>
+  <line x1="1025" y1="168" x2="1145" y2="168" stroke="#c4b99a" stroke-width="0.5" stroke-dasharray="3,3"/>
+  <text x="1032" y="186" font-family="'IBM Plex Mono', monospace" font-size="9" fill="#6b5d4f">  remote-A</text>
+  <text x="1032" y="204" font-family="'IBM Plex Mono', monospace" font-size="9" fill="#6b5d4f">  remote-B</text>
+  <line x1="1025" y1="216" x2="1145" y2="216" stroke="#2c2417" stroke-width="0.5"/>
+  <text x="1032" y="234" font-family="'IBM Plex Mono', monospace" font-size="8" fill="#6b5d4f">j/k  navigate</text>
+  <text x="1032" y="248" font-family="'IBM Plex Mono', monospace" font-size="8" fill="#6b5d4f">Enter  attach</text>
+  <text x="1032" y="262" font-family="'IBM Plex Mono', monospace" font-size="8" fill="#6b5d4f">d    kill</text>
+  <text x="1032" y="276" font-family="'IBM Plex Mono', monospace" font-size="8" fill="#6b5d4f">/    filter</text>
 
-  <text x="415" y="326" fill="#2c2417" font-family="monospace" font-size="11" font-weight="700">5. TUI switcher</text>
-  <text x="430" y="335" fill="#6b5d4f" font-family="monospace" font-size="9">fuzzy filter, kill, switch</text>
-
-  <!-- Arrows: muxr -> output -->
-  <line x1="648" y1="160" x2="733" y2="148" stroke="#2c2417" stroke-width="1.5" marker-end="url(#a)"/>
-  <line x1="648" y1="200" x2="733" y2="192" stroke="#2c2417" stroke-width="1.5" marker-end="url(#a)"/>
-  <line x1="648" y1="240" x2="733" y2="240" stroke="#2c2417" stroke-width="1.5" marker-end="url(#a)"/>
-  <line x1="648" y1="290" x2="733" y2="340" stroke="#2c2417" stroke-width="1.5" stroke-dasharray="5,3" marker-end="url(#a)"/>
-
-  <!-- ============================================================
-       OUTPUT: RUNNING SESSIONS
-       ============================================================ -->
-  <rect x="738" y="100" width="422" height="310" rx="0" fill="none" stroke="#2c2417" stroke-width="1.5"/>
-  <text x="870" y="120" text-anchor="middle" fill="#2c2417" font-family="monospace" font-size="10" font-weight="700" letter-spacing="0.1em">RUNNING SESSIONS</text>
-  <line x1="738" y1="128" x2="1160" y2="128" stroke="#2c2417" stroke-width="0.5"/>
-
-  <!-- Local sessions -->
-  <text x="755" y="148" fill="#2c2417" font-family="monospace" font-size="9" font-weight="700">LOCAL</text>
-  <line x1="755" y1="153" x2="790" y2="153" stroke="#2c2417" stroke-width="0.5"/>
-
-  <!-- Column headers -->
-  <text x="765" y="168" fill="#6b5d4f" font-family="monospace" font-size="8">SESSION</text>
-  <text x="880" y="168" fill="#6b5d4f" font-family="monospace" font-size="8">TOOL</text>
-  <text x="930" y="168" fill="#6b5d4f" font-family="monospace" font-size="8">DIR</text>
-
-  <rect x="755" y="174" width="240" height="26" rx="0" fill="none" stroke="#2c2417" stroke-width="1"/>
-  <text x="765" y="191" fill="#2c2417" font-family="monospace" font-size="10" font-weight="700">work/api</text>
-  <text x="880" y="191" fill="#6b5d4f" font-family="monospace" font-size="10">claude</text>
-  <text x="930" y="191" fill="#6b5d4f" font-family="monospace" font-size="10">~/work</text>
-
-  <rect x="755" y="204" width="240" height="26" rx="0" fill="none" stroke="#2c2417" stroke-width="1"/>
-  <text x="765" y="221" fill="#2c2417" font-family="monospace" font-size="10" font-weight="700">work/auth</text>
-  <text x="880" y="221" fill="#6b5d4f" font-family="monospace" font-size="10">claude</text>
-  <text x="930" y="221" fill="#6b5d4f" font-family="monospace" font-size="10">~/work</text>
-
-  <rect x="755" y="234" width="240" height="26" rx="0" fill="none" stroke="#2c2417" stroke-width="1"/>
-  <text x="765" y="251" fill="#2c2417" font-family="monospace" font-size="10" font-weight="700">personal/blog</text>
-  <text x="880" y="251" fill="#6b5d4f" font-family="monospace" font-size="10">vim</text>
-  <text x="930" y="251" fill="#6b5d4f" font-family="monospace" font-size="10">~/personal</text>
-
-  <!-- Remote sessions -->
-  <text x="755" y="286" fill="#2c2417" font-family="monospace" font-size="9" font-weight="700">REMOTE</text>
-  <line x1="755" y1="291" x2="800" y2="291" stroke="#2c2417" stroke-width="0.5"/>
-
-  <text x="765" y="305" fill="#6b5d4f" font-family="monospace" font-size="8">SESSION</text>
-  <text x="910" y="305" fill="#6b5d4f" font-family="monospace" font-size="8">VIA</text>
-
-  <rect x="755" y="311" width="240" height="26" rx="0" fill="none" stroke="#2c2417" stroke-width="1" stroke-dasharray="5,3"/>
-  <text x="765" y="328" fill="#2c2417" font-family="monospace" font-size="10" font-weight="700">remote-A/session</text>
-  <text x="910" y="328" fill="#6b5d4f" font-family="monospace" font-size="10">SSH proxy</text>
-
-  <rect x="755" y="341" width="240" height="26" rx="0" fill="none" stroke="#2c2417" stroke-width="1" stroke-dasharray="5,3"/>
-  <text x="765" y="358" fill="#2c2417" font-family="monospace" font-size="10" font-weight="700">remote-B/session</text>
-  <text x="910" y="358" fill="#6b5d4f" font-family="monospace" font-size="10">SSH proxy</text>
-
-  <!-- TUI switcher -->
-  <line x1="1005" y1="135" x2="1005" y2="405" stroke="#c4b99a" stroke-width="0.5" stroke-dasharray="3,3"/>
-
-  <rect x="1015" y="135" width="140" height="270" rx="0" fill="none" stroke="#2c2417" stroke-width="1.5"/>
-  <rect x="1015" y="135" width="140" height="22" rx="0" fill="#2c2417"/>
-  <text x="1085" y="151" text-anchor="middle" fill="#faf6ed" font-family="monospace" font-size="10" font-weight="700">muxr switch</text>
-
-  <text x="1030" y="178" fill="#2c2417" font-family="monospace" font-size="10" font-weight="700">&gt; work/api</text>
-  <text x="1030" y="198" fill="#6b5d4f" font-family="monospace" font-size="10">  work/auth</text>
-  <text x="1030" y="218" fill="#6b5d4f" font-family="monospace" font-size="10">  personal/blog</text>
-  <line x1="1020" y1="228" x2="1150" y2="228" stroke="#c4b99a" stroke-width="0.5" stroke-dasharray="3,3"/>
-  <text x="1030" y="248" fill="#6b5d4f" font-family="monospace" font-size="10">  remote-A</text>
-  <text x="1030" y="268" fill="#6b5d4f" font-family="monospace" font-size="10">  remote-B</text>
-
-  <line x1="1020" y1="284" x2="1150" y2="284" stroke="#2c2417" stroke-width="0.5"/>
-  <text x="1030" y="304" fill="#6b5d4f" font-family="monospace" font-size="9">j/k  navigate</text>
-  <text x="1030" y="320" fill="#6b5d4f" font-family="monospace" font-size="9">Enter  attach</text>
-  <text x="1030" y="336" fill="#6b5d4f" font-family="monospace" font-size="9">d    kill</text>
-  <text x="1030" y="352" fill="#6b5d4f" font-family="monospace" font-size="9">/    filter</text>
-  <text x="1030" y="368" fill="#6b5d4f" font-family="monospace" font-size="9">q    quit</text>
-
-  <!-- ============================================================
-       BOTTOM: Capabilities
-       ============================================================ -->
-  <line x1="40" y1="435" x2="1160" y2="435" stroke="#2c2417" stroke-width="1.5"/>
-
-  <text x="130" y="468" text-anchor="middle" fill="#2c2417" font-family="monospace" font-size="13" font-weight="700">save / restore</text>
-  <text x="130" y="488" text-anchor="middle" fill="#6b5d4f" font-family="monospace" font-size="11">survives reboots</text>
-
-  <line x1="240" y1="450" x2="240" y2="498" stroke="#c4b99a" stroke-width="0.5"/>
-
-  <text x="360" y="468" text-anchor="middle" fill="#2c2417" font-family="monospace" font-size="13" font-weight="700">tmux status</text>
-  <text x="360" y="488" text-anchor="middle" fill="#6b5d4f" font-family="monospace" font-size="11">vertical colors</text>
-
-  <line x1="470" y1="450" x2="470" y2="498" stroke="#c4b99a" stroke-width="0.5"/>
-
-  <text x="590" y="468" text-anchor="middle" fill="#2c2417" font-family="monospace" font-size="13" font-weight="700">remote proxy</text>
-  <text x="590" y="488" text-anchor="middle" fill="#6b5d4f" font-family="monospace" font-size="11">SSH + reconnect</text>
-
-  <line x1="700" y1="450" x2="700" y2="498" stroke="#c4b99a" stroke-width="0.5"/>
-
-  <text x="820" y="468" text-anchor="middle" fill="#2c2417" font-family="monospace" font-size="13" font-weight="700">completions</text>
-  <text x="820" y="488" text-anchor="middle" fill="#6b5d4f" font-family="monospace" font-size="11">zsh, bash, fish</text>
-
-  <line x1="930" y1="450" x2="930" y2="498" stroke="#c4b99a" stroke-width="0.5"/>
-
-  <text x="1050" y="468" text-anchor="middle" fill="#2c2417" font-family="monospace" font-size="13" font-weight="700">one config file</text>
-  <text x="1050" y="488" text-anchor="middle" fill="#6b5d4f" font-family="monospace" font-size="11">everything in config.toml</text>
-
-  <line x1="40" y1="505" x2="1160" y2="505" stroke="#2c2417" stroke-width="1.5"/>
-
-  <!-- Tagline -->
-  <text x="600" y="545" text-anchor="middle" fill="#6b5d4f" font-family="monospace" font-size="13" font-style="italic">One command to open. One keybind to switch. Survives reboots.</text>
-
-  <!-- Footer: Built with GitLab + tanuki -->
-  <text x="536" y="600" text-anchor="middle" fill="#2c2417" font-family="monospace" font-size="12" font-weight="600">Built with GitLab</text>
-  <g transform="translate(600, 584) scale(0.05)">
+  <!-- Footer -->
+  <line x1="40" y1="360" x2="1160" y2="360" stroke="#c4b99a" stroke-width="1"/>
+  <text x="600" y="380" font-family="'IBM Plex Mono', monospace" font-size="10" fill="#6b5d4f" text-anchor="middle">one command to open -- one keybind to switch -- survives reboots</text>
+  <text x="590" y="408" text-anchor="middle" fill="#2c2417" font-family="'IBM Plex Mono', monospace" font-size="9" font-weight="600">Built with GitLab</text>
+  <g transform="translate(634, 397) scale(0.045)">
     <path d="M282.83,170.73l-.27-.69-26.14-68.22a6.81,6.81,0,0,0-2.69-3.24,7,7,0,0,0-8,.43,7,7,0,0,0-2.32,3.52l-17.65,54H154.29l-17.65-54A6.86,6.86,0,0,0,134.32,99a7,7,0,0,0-8-.43,6.87,6.87,0,0,0-2.69,3.24L97.44,170l-.26.69a48.54,48.54,0,0,0,16.1,56.1l.09.07.24.17,39.82,29.82,19.7,14.91,12,9.06a8.07,8.07,0,0,0,9.76,0l12-9.06,19.7-14.91,40.06-30,.1-.08A48.56,48.56,0,0,0,282.83,170.73Z" fill="#E24329"/>
     <path d="M282.83,170.73l-.27-.69a88.3,88.3,0,0,0-35.15,15.8L190,229.25c19.55,14.79,36.57,27.64,36.57,27.64l40.06-30,.1-.08A48.56,48.56,0,0,0,282.83,170.73Z" fill="#FC6D26"/>
     <path d="M153.43,256.89l19.7,14.91,12,9.06a8.07,8.07,0,0,0,9.76,0l12-9.06,19.7-14.91S209.55,244,190,229.25C170.45,244,153.43,256.89,153.43,256.89Z" fill="#FCA326"/>
