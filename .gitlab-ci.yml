@@ -38,7 +38,7 @@ workflow:
 # -- Reusable config --
 
 .rust:
-  image: rust:1.93-bookworm
+  image: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/rust:1.93-bookworm
   cache:
     - key: cargo-registry-${CI_COMMIT_REF_SLUG}
       paths:
@@ -171,7 +171,7 @@ sign:linux:
   stage: sign
   extends: .on-tag
   image:
-    name: bitnami/cosign:latest
+    name: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/bitnami/cosign:latest
     entrypoint: [""]
   interruptible: false
   needs:
@@ -199,7 +199,7 @@ sign:darwin:
   stage: sign
   extends: .on-tag
   image:
-    name: bitnami/cosign:latest
+    name: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/bitnami/cosign:latest
     entrypoint: [""]
   interruptible: false
   needs:
@@ -228,7 +228,7 @@ sign:darwin:
 publish:
   stage: publish
   extends: .on-tag
-  image: alpine:latest
+  image: ${CI_DEPENDENCY_PROXY_GROUP_IMAGE_PREFIX}/alpine:latest
   interruptible: false
   needs:
     - job: build:darwin-arm64
