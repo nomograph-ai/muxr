@@ -161,8 +161,9 @@ fn cmd_open(tmux: &Tmux, args: &[String], tool_override: Option<&str>) -> Result
         eprintln!("Attaching to {session}");
         tmux.attach(&session)?;
     } else {
-        let tool_cmd = tmux::tool_command(&tool, None, Some(&session));
         eprintln!("Creating {session} in {} ({})", dir.display(), tool);
+        config.run_pre_create_hooks(&dir);
+        let tool_cmd = tmux::tool_command(&tool, None, Some(&session));
         tmux.create_session(&session, &dir, &tool_cmd)?;
         tmux.attach(&session)?;
     }
@@ -271,6 +272,7 @@ fn cmd_new(tmux: &Tmux, args: &[String], tool_override: Option<&str>) -> Result<
     } else if config.verticals.contains_key(name) {
         let tool = resolve_tool(tool_override, &config);
         let dir = config.resolve_dir(name)?;
+        config.run_pre_create_hooks(&dir);
         let tool_cmd = tmux::tool_command(&tool, None, Some(&session));
         tmux.create_session(&session, &dir, &tool_cmd)?;
         eprintln!("Created {session} ({})", tool);

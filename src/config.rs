@@ -10,6 +10,19 @@ pub struct Config {
     pub verticals: HashMap<String, Vertical>,
     #[serde(default)]
     pub remotes: HashMap<String, Remote>,
+    #[serde(default)]
+    pub hooks: Hooks,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct Hooks {
+    /// Commands to run before creating a new session.
+    #[serde(default)]
+    pub pre_create: Vec<String>,
+    /// Extra PATH entries for hook commands. Supports ~ expansion.
+    /// Prepended to the default system PATH.
+    #[serde(default)]
+    pub path: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -116,6 +129,46 @@ impl Config {
 
     pub fn remote(&self, name: &str) -> Option<&Remote> {
         self.remotes.get(name)
+    }
+
+    /// Run pre_create hooks in a directory. Hooks run with the shims PATH
+    /// so mise-managed tools are available. Failures are warnings, not fatal.
+    pub fn run_pre_create_hooks(&self, dir: &std::path::Path) {
+        if self.hooks.pre_create.is_empty() {
+            return;
+        }
+        let path = self.hooks_path();
+        for cmd in &self.hooks.pre_create {
+            eprintln!("  hook: {cmd}");
+            let result = std::process::Command::new("sh")
+                .args(["-c", cmd])
+                .current_dir(dir)
+                .env("PATH", &path)
+                .status();
+            match result {
+                Ok(s) if !s.success() => eprintln!("  hook warning: {cmd} exited {s}"),
+                Err(e) => eprintln!("  hook warning: {cmd} failed: {e}"),
+                _ => {}
+            }
+        }
+    }
+
+    /// Build PATH for hook execution. Uses configured paths if set,
+    /// otherwise falls back to system PATH.
+    fn hooks_path(&self) -> String {
+        let system = "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+        if self.hooks.path.is_empty() {
+            // Inherit current PATH, fall back to system
+            std::env::var("PATH").unwrap_or_else(|_| system.to_string())
+        } else {
+            let expanded: Vec<String> = self
+                .hooks
+                .path
+                .iter()
+                .map(|p| shellexpand::tilde(p).to_string())
+                .collect();
+            format!("{}:{}", expanded.join(":"), system)
+        }
     }
 
     pub fn color_for(&self, name: &str) -> &str {
