@@ -10,6 +10,7 @@ stages:
   - test
   - build
   - sign
+  - publish
   - release
 
 default:
@@ -222,39 +223,39 @@ sign:darwin:
       - muxr-darwin-arm64.sbom.cdx.json.bundle
     expire_in: 4 weeks
 
-# -- Release stage (tag only) --
+# -- Publish to Package Registry (tag only) --
 
-publish:binaries:
-  stage: release
+publish:
+  stage: publish
   extends: .on-tag
-  image: curlimages/curl:latest
+  image: alpine:latest
   interruptible: false
   needs:
     - job: build:darwin-arm64
       artifacts: true
     - job: build:linux-amd64
       artifacts: true
+  before_script:
+    - apk add --no-cache curl
   script:
     - |
-      VERSION="${CI_COMMIT_TAG#v}"
-      for ARCH in darwin-arm64 linux-amd64; do
-        FILENAME="muxr-${VERSION}-${ARCH}"
-        cp "muxr-${ARCH}" "${FILENAME}"
-        curl --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
-             --upload-file "${FILENAME}" \
-             "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/muxr/${VERSION}/${FILENAME}"
+      cat checksums-*.txt > checksums.txt 2>/dev/null || true
+      cat checksums.txt
+    - |
+      for binary in muxr-darwin-arm64 muxr-linux-amd64; do
+        if [ -f "${binary}" ]; then
+          echo "Uploading ${binary}..."
+          curl --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+               --upload-file ${binary} \
+               "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/muxr/${CI_COMMIT_TAG}/${binary}"
+        fi
       done
+    - |
+      curl --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+           --upload-file checksums.txt \
+           "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/muxr/${CI_COMMIT_TAG}/checksums.txt"
 
-publish:crates:
-  stage: release
-  extends: .on-tag
-  image: rust:1.93-bookworm
-  interruptible: false
-  needs:
-    - job: check
-      artifacts: false
-  script:
-    - cargo publish --allow-dirty
+# -- Release (tag only) --
 
 release:
   stage: release
@@ -270,12 +271,9 @@ release:
       artifacts: true
     - job: sign:linux
       artifacts: true
-    - job: publish:binaries
-    - job: publish:crates
+    - job: publish
   script:
-    - |
-      cat checksums-*.txt > checksums.txt 2>/dev/null || true
-      cat checksums.txt
+    - echo "Creating release for ${CI_COMMIT_TAG}"
   release:
     tag_name: ${CI_COMMIT_TAG}
     name: "muxr ${CI_COMMIT_TAG}"
@@ -284,34 +282,48 @@ release:
 
       Tmux session manager for AI coding workflows.
 
-      ### Install
+      ### Install (mise)
+
+      ```toml
+      [tools."http:muxr"]
+      version = "${CI_COMMIT_TAG#v}"
+
+      [tools."http:muxr".platforms]
+      macos-arm64 = { url = "https://gitlab.com/api/v4/projects/${CI_PROJECT_ID}/packages/generic/muxr/${CI_COMMIT_TAG}/muxr-darwin-arm64", bin = "muxr" }
+      linux-x64 = { url = "https://gitlab.com/api/v4/projects/${CI_PROJECT_ID}/packages/generic/muxr/${CI_COMMIT_TAG}/muxr-linux-amd64", bin = "muxr" }
+      ```
+
+      ### Install (manual)
 
       ```bash
-      # From crates.io
-      cargo install muxr
+      # macOS (Apple Silicon)
+      curl -L "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/muxr/${CI_COMMIT_TAG}/muxr-darwin-arm64" -o muxr
+      chmod +x muxr
 
-      # Pre-built binary (Linux)
-      curl -L "${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/muxr-linux-amd64?job=build:linux-amd64" -o muxr
-      chmod +x muxr && mv muxr ~/.local/bin/muxr
-
-      # Pre-built binary (macOS Apple Silicon)
-      curl -L "${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/muxr-darwin-arm64?job=build:darwin-arm64" -o muxr
-      chmod +x muxr && mv muxr ~/bin/muxr
+      # Linux (amd64)
+      curl -L "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/muxr/${CI_COMMIT_TAG}/muxr-linux-amd64" -o muxr
+      chmod +x muxr
       ```
     assets:
       links:
-        - name: "muxr-linux-amd64"
-          url: "${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/muxr-linux-amd64?job=build:linux-amd64"
-          link_type: "package"
-        - name: "muxr-darwin-arm64"
-          url: "${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/muxr-darwin-arm64?job=build:darwin-arm64"
-          link_type: "package"
-        - name: "checksums.txt"
-          url: "${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/checksums.txt?job=release"
-          link_type: "other"
-        - name: "SBOM (linux-amd64)"
-          url: "${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/muxr-linux-amd64.sbom.cdx.json?job=build:linux-amd64"
-          link_type: "other"
-        - name: "SBOM (darwin-arm64)"
+        - name: muxr-darwin-arm64
+          url: ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/muxr/${CI_COMMIT_TAG}/muxr-darwin-arm64
+          link_type: package
+        - name: muxr-linux-amd64
+          url: ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/muxr/${CI_COMMIT_TAG}/muxr-linux-amd64
+          link_type: package
+        - name: checksums.txt
+          url: ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/muxr/${CI_COMMIT_TAG}/checksums.txt
+          link_type: other
+        - name: muxr-darwin-arm64.bundle
+          url: "${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/muxr-darwin-arm64.bundle?job=sign:darwin"
+          link_type: other
+        - name: muxr-linux-amd64.bundle
+          url: "${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/muxr-linux-amd64.bundle?job=sign:linux"
+          link_type: other
+        - name: muxr-darwin-arm64.sbom.cdx.json
           url: "${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/muxr-darwin-arm64.sbom.cdx.json?job=build:darwin-arm64"
-          link_type: "other"
+          link_type: other
+        - name: muxr-linux-amd64.sbom.cdx.json
+          url: "${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/muxr-linux-amd64.sbom.cdx.json?job=build:linux-amd64"
+          link_type: other
