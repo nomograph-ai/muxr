@@ -2,8 +2,8 @@
 
 # muxr
 
-[![Built with GitLab](https://img.shields.io/badge/Built_with-GitLab-FC6D26?logo=gitlab)](https://gitlab.com/dunn.dev/muxr)
-[![pipeline](https://gitlab.com/dunn.dev/muxr/badges/main/pipeline.svg)](https://gitlab.com/dunn.dev/muxr/-/pipelines)
+[![Built with GitLab](https://img.shields.io/badge/Built_with-GitLab-FC6D26?logo=gitlab)](https://gitlab.com/nomograph/muxr)
+[![pipeline](https://gitlab.com/nomograph/muxr/badges/main/pipeline.svg)](https://gitlab.com/nomograph/muxr/-/pipelines)
 [![crates.io](https://img.shields.io/crates/v/muxr.svg)](https://crates.io/crates/muxr)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
@@ -28,7 +28,7 @@ cargo install muxr
 ```
 
 Pre-built binaries for macOS arm64 and Linux amd64 are available in
-[releases](https://gitlab.com/dunn.dev/muxr/-/releases).
+[releases](https://gitlab.com/nomograph/muxr/-/releases).
 
 ## Quick start
 
