@@ -2,10 +2,10 @@
 
 # muxr
 
-[![Built with GitLab](https://img.shields.io/badge/Built_with-GitLab-FC6D26?logo=gitlab)](https://gitlab.com/nomograph/muxr)
 [![pipeline](https://gitlab.com/nomograph/muxr/badges/main/pipeline.svg)](https://gitlab.com/nomograph/muxr/-/pipelines)
-[![crates.io](https://img.shields.io/crates/v/muxr.svg)](https://crates.io/crates/muxr)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+![built with GitLab](https://img.shields.io/badge/built_with-GitLab-FC6D26?logo=gitlab)
+[![crates.io](https://img.shields.io/crates/v/muxr.svg)](https://crates.io/crates/muxr)
 
 Tmux session manager for AI coding workflows. One command to open a
 session, one keybind to switch between them, survives reboots.
