@@ -155,7 +155,7 @@ struct AgentInfo {
     name: String,
 }
 
-// -- Git info via libgit2 --
+// -- Git info via CLI --
 
 struct GitInfo {
     branch: String,
@@ -163,21 +163,20 @@ struct GitInfo {
 }
 
 fn git_info(project_dir: &str) -> Option<GitInfo> {
-    let repo = git2::Repository::open(project_dir).ok()?;
-    let head = repo.head().ok()?;
-    let branch = head
-        .shorthand()
-        .unwrap_or("HEAD")
-        .to_string();
+    let branch = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(project_dir)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())?;
 
-    // Check for any changes (staged or unstaged)
-    let mut opts = git2::StatusOptions::new();
-    opts.include_untracked(true)
-        .recurse_untracked_dirs(false);
-
-    let dirty = repo
-        .statuses(Some(&mut opts))
-        .map(|s| !s.is_empty())
+    let dirty = std::process::Command::new("git")
+        .args(["status", "--porcelain", "-u"])
+        .current_dir(project_dir)
+        .output()
+        .ok()
+        .map(|o| !o.stdout.is_empty())
         .unwrap_or(false);
 
     Some(GitInfo { branch, dirty })
