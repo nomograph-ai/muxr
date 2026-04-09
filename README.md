@@ -5,7 +5,7 @@
 [![pipeline](https://gitlab.com/nomograph/muxr/badges/main/pipeline.svg)](https://gitlab.com/nomograph/muxr/-/pipelines)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![built with GitLab](https://img.shields.io/badge/built_with-GitLab-FC6D26?logo=gitlab)](https://gitlab.com/nomograph/muxr)
-[![crates.io](https://img.shields.io/crates/v/muxr.svg)](https://crates.io/crates/muxr)
+[![crates.io](https://img.shields.io/crates/v/nomograph-muxr.svg)](https://crates.io/crates/nomograph-muxr)
 
 Tmux session manager for AI coding workflows. One command to open a
 session, one keybind to switch between them, survives reboots.
@@ -24,7 +24,7 @@ run. `muxr save` snapshots everything. `muxr restore` brings it back.
 ## Install
 
 ```bash
-cargo install muxr
+cargo install nomograph-muxr
 ```
 
 Pre-built binaries for macOS arm64 and Linux amd64 are available in

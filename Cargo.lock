@@ -502,7 +502,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "muxr"
+name = "nomograph-muxr"
 version = "0.6.3"
 dependencies = [
  "anyhow",
