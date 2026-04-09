@@ -4,7 +4,7 @@
 
 [![pipeline](https://gitlab.com/nomograph/muxr/badges/main/pipeline.svg)](https://gitlab.com/nomograph/muxr/-/pipelines)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-![built with GitLab](https://img.shields.io/badge/built_with-GitLab-FC6D26?logo=gitlab)
+[![built with GitLab](https://img.shields.io/badge/built_with-GitLab-FC6D26?logo=gitlab)](https://gitlab.com/nomograph/muxr)
 [![crates.io](https://img.shields.io/crates/v/muxr.svg)](https://crates.io/crates/muxr)
 
 Tmux session manager for AI coding workflows. One command to open a
@@ -18,7 +18,7 @@ You open tabs, cd around, lose track of what is where. When you
 reboot, everything is gone.
 
 muxr organizes tmux sessions into verticals (local directory trees) and
-remotes (SSH hosts). Each session knows where it lives and what tool to
+remotes (GCE instances). Each session knows where it lives and what tool to
 run. `muxr save` snapshots everything. `muxr restore` brings it back.
 
 ## Install
@@ -57,14 +57,18 @@ dir = "~/projects/personal"
 color = "#9ece6a"
 
 [remotes.lab]
-host = "remote-a.example.com"
+project = "my-gce-project"
+zone = "us-central1-a"
 user = "deploy"
 color = "#d29922"
-connect = "ssh"
+# connect = "mosh"       # default; set to "ssh" for gcloud compute ssh
+# instance_prefix = ""   # optional prefix for GCE instance names
 ```
 
-Verticals are local directory trees. Remotes are SSH hosts. Each gets a
-color that shows up in the TUI switcher and the tmux status bar.
+Verticals are local directory trees. Remotes are GCE instances resolved
+via `gcloud`. Each gets a color that shows up in the TUI switcher and
+the tmux status bar. Remotes require the
+[gcloud CLI](https://cloud.google.com/sdk/docs/install).
 
 ## How sessions work
 
@@ -104,16 +108,17 @@ bind s display-popup -E -w '80%' -h '80%' "muxr switch"
 
 ## Remote sessions
 
-Remote sessions create a local tmux proxy that SSHes to the host and
-attaches to the remote tmux. They appear in `muxr ls` and the switcher
-alongside local sessions.
+Remote sessions create a local tmux proxy that connects to a GCE
+instance and attaches to the remote tmux. The default connect method is
+mosh; set `connect = "ssh"` for gcloud compute ssh. Sessions appear in
+`muxr ls` and the switcher alongside local sessions.
 
 ```bash
-muxr lab trustchain             # SSH to remote, attach tmux
+muxr lab trustchain             # connect to remote, attach tmux
 muxr lab ls                     # list remote sessions
 ```
 
-Connections auto-reconnect on SSH drops with exponential backoff.
+Connections auto-reconnect on drops with exponential backoff.
 
 ## Save and restore
 
@@ -123,7 +128,7 @@ muxr restore                    # recreate after reboot
 ```
 
 Restore recreates local sessions with the correct directory and tool.
-Remote sessions re-establish SSH connections.
+Remote sessions re-establish connections.
 
 ## Commands
 
