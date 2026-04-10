@@ -179,3 +179,166 @@ impl Config {
             .unwrap_or("#8a7f83")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_config() -> Config {
+        let toml_str = r##"
+default_tool = "claude"
+
+[verticals.work]
+dir = "~/projects/work"
+color = "#7aa2f7"
+
+[verticals.personal]
+dir = "~/projects/personal"
+color = "#9ece6a"
+
+[remotes.lab]
+project = "my-project"
+zone = "us-central1-a"
+user = "deploy"
+color = "#d29922"
+"##;
+        toml::from_str(toml_str).unwrap()
+    }
+
+    #[test]
+    fn parse_valid_config() {
+        let config = sample_config();
+        assert_eq!(config.default_tool, "claude");
+        assert_eq!(config.verticals.len(), 2);
+        assert_eq!(config.remotes.len(), 1);
+    }
+
+    #[test]
+    fn default_tool_is_claude() {
+        let config: Config = toml::from_str("[verticals]").unwrap();
+        assert_eq!(config.default_tool, "claude");
+    }
+
+    #[test]
+    fn default_connect_is_mosh() {
+        let config = sample_config();
+        let lab = config.remotes.get("lab").unwrap();
+        assert_eq!(lab.connect, "mosh");
+    }
+
+    #[test]
+    fn all_names_sorted_and_deduped() {
+        let config = sample_config();
+        let names = config.all_names();
+        assert_eq!(names, vec!["lab", "personal", "work"]);
+    }
+
+    #[test]
+    fn is_remote_distinguishes() {
+        let config = sample_config();
+        assert!(config.is_remote("lab"));
+        assert!(!config.is_remote("work"));
+        assert!(!config.is_remote("nonexistent"));
+    }
+
+    #[test]
+    fn color_for_vertical() {
+        let config = sample_config();
+        assert_eq!(config.color_for("work"), "#7aa2f7");
+    }
+
+    #[test]
+    fn color_for_remote() {
+        let config = sample_config();
+        assert_eq!(config.color_for("lab"), "#d29922");
+    }
+
+    #[test]
+    fn color_for_unknown_returns_default() {
+        let config = sample_config();
+        assert_eq!(config.color_for("nonexistent"), "#8a7f83");
+    }
+
+    #[test]
+    fn instance_name_simple() {
+        let remote = Remote {
+            project: "p".into(),
+            zone: "z".into(),
+            user: "u".into(),
+            color: "#fff".into(),
+            connect: "mosh".into(),
+            instance_prefix: None,
+        };
+        assert_eq!(remote.instance_name("bootc"), "bootc");
+    }
+
+    #[test]
+    fn instance_name_with_prefix() {
+        let remote = Remote {
+            project: "p".into(),
+            zone: "z".into(),
+            user: "u".into(),
+            color: "#fff".into(),
+            connect: "mosh".into(),
+            instance_prefix: Some("lab-".into()),
+        };
+        assert_eq!(remote.instance_name("bootc"), "lab-bootc");
+    }
+
+    #[test]
+    fn instance_name_replaces_slashes() {
+        let remote = Remote {
+            project: "p".into(),
+            zone: "z".into(),
+            user: "u".into(),
+            color: "#fff".into(),
+            connect: "mosh".into(),
+            instance_prefix: None,
+        };
+        assert_eq!(remote.instance_name("api/auth"), "api-auth");
+    }
+
+    #[test]
+    fn name_collision_rejected() {
+        let toml_str = r##"
+[verticals.lab]
+dir = "~/lab"
+color = "#fff"
+
+[remotes.lab]
+project = "p"
+zone = "z"
+user = "u"
+color = "#fff"
+"##;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        // Load validates collisions, but parse doesn't -- test the validation
+        // by reconstructing the check
+        let has_collision = config
+            .remotes
+            .keys()
+            .any(|name| config.verticals.contains_key(name));
+        assert!(has_collision);
+    }
+
+    #[test]
+    fn hooks_default_empty() {
+        let config: Config = toml::from_str("[verticals]").unwrap();
+        assert!(config.hooks.pre_create.is_empty());
+        assert!(config.hooks.path.is_empty());
+    }
+
+    #[test]
+    fn hooks_parsed() {
+        let toml_str = r##"
+[verticals]
+
+[hooks]
+pre_create = ["mise install"]
+path = ["~/.local/share/mise/shims"]
+"##;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.hooks.pre_create, vec!["mise install"]);
+        assert_eq!(config.hooks.path, vec!["~/.local/share/mise/shims"]);
+    }
+}

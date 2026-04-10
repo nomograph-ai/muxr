@@ -246,3 +246,48 @@ pub fn tool_command(tool: &str, resume_id: Option<&str>, session_name: Option<&s
         tool.to_string()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn target_wraps_with_equals_colon() {
+        assert_eq!(Tmux::target("work/api"), "=work/api:");
+        assert_eq!(Tmux::target("muxr"), "=muxr:");
+    }
+
+    #[test]
+    fn tool_command_claude_bare() {
+        assert_eq!(tool_command("claude", None, None), "claude");
+    }
+
+    #[test]
+    fn tool_command_claude_with_name() {
+        assert_eq!(
+            tool_command("claude", None, Some("work/api")),
+            "claude --name 'work/api'"
+        );
+    }
+
+    #[test]
+    fn tool_command_claude_with_resume() {
+        assert_eq!(
+            tool_command("claude", Some("abc-123"), None),
+            "claude --resume 'abc-123'"
+        );
+    }
+
+    #[test]
+    fn tool_command_claude_with_name_and_resume() {
+        assert_eq!(
+            tool_command("claude", Some("abc-123"), Some("work/api")),
+            "claude --name 'work/api' --resume 'abc-123'"
+        );
+    }
+
+    #[test]
+    fn tool_command_non_claude_ignores_args() {
+        assert_eq!(tool_command("opencode", Some("id"), Some("name")), "opencode");
+    }
+}

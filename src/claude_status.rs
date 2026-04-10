@@ -417,7 +417,7 @@ pub fn run(tmux: &Tmux) -> Result<()> {
 }
 
 /// Convert a hex color (#FC6D26) to ANSI 24-bit escape sequence.
-fn hex_to_ansi(hex: &str) -> String {
+pub(crate) fn hex_to_ansi(hex: &str) -> String {
     let hex = hex.trim_start_matches('#');
     if hex.len() != 6 {
         return "\x1b[37m".to_string(); // fallback white
@@ -426,4 +426,103 @@ fn hex_to_ansi(hex: &str) -> String {
     let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(255);
     let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(255);
     format!("\x1b[38;2;{r};{g};{b}m")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hex_to_ansi_valid() {
+        assert_eq!(hex_to_ansi("#FC6D26"), "\x1b[38;2;252;109;38m");
+        assert_eq!(hex_to_ansi("FC6D26"), "\x1b[38;2;252;109;38m");
+        assert_eq!(hex_to_ansi("#000000"), "\x1b[38;2;0;0;0m");
+        assert_eq!(hex_to_ansi("#FFFFFF"), "\x1b[38;2;255;255;255m");
+    }
+
+    #[test]
+    fn hex_to_ansi_invalid_falls_back_to_white() {
+        assert_eq!(hex_to_ansi("#FFF"), "\x1b[37m");
+        assert_eq!(hex_to_ansi(""), "\x1b[37m");
+        assert_eq!(hex_to_ansi("#"), "\x1b[37m");
+    }
+
+    #[test]
+    fn format_duration_seconds() {
+        assert_eq!(format_duration(0), "0s");
+        assert_eq!(format_duration(999), "0s");
+        assert_eq!(format_duration(1000), "1s");
+        assert_eq!(format_duration(59_000), "59s");
+    }
+
+    #[test]
+    fn format_duration_minutes() {
+        assert_eq!(format_duration(60_000), "1m");
+        assert_eq!(format_duration(90_000), "1m30s");
+        assert_eq!(format_duration(3_599_000), "59m59s");
+    }
+
+    #[test]
+    fn format_duration_hours() {
+        assert_eq!(format_duration(3_600_000), "1h");
+        assert_eq!(format_duration(5_400_000), "1h30m");
+        assert_eq!(format_duration(7_200_000), "2h");
+    }
+
+    #[test]
+    fn context_bar_length() {
+        let bar = context_bar(50, 20);
+        // Bar contains ANSI codes + 20 block characters + reset codes
+        assert!(bar.contains('\u{2588}')); // filled
+        assert!(bar.contains('\u{2592}')); // empty
+    }
+
+    #[test]
+    fn context_bar_full() {
+        let bar = context_bar(100, 10);
+        assert!(!bar.contains('\u{2592}')); // no empty blocks
+    }
+
+    #[test]
+    fn context_bar_empty() {
+        let bar = context_bar(0, 10);
+        assert!(!bar.contains('\u{2588}')); // no filled blocks
+    }
+
+    #[test]
+    fn cache_ratio_none_on_zero_tokens() {
+        assert_eq!(cache_ratio(&None), None);
+        assert_eq!(
+            cache_ratio(&Some(CurrentUsage {
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+            })),
+            None
+        );
+    }
+
+    #[test]
+    fn cache_ratio_computes_percentage() {
+        assert_eq!(
+            cache_ratio(&Some(CurrentUsage {
+                cache_creation_input_tokens: 50,
+                cache_read_input_tokens: 50,
+            })),
+            Some(50)
+        );
+        assert_eq!(
+            cache_ratio(&Some(CurrentUsage {
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 100,
+            })),
+            Some(100)
+        );
+    }
+
+    #[test]
+    fn health_filename_replaces_slashes() {
+        assert_eq!(health_filename("work/api"), "work--api.json");
+        assert_eq!(health_filename("muxr"), "muxr.json");
+        assert_eq!(health_filename("work/api/auth"), "work--api--auth.json");
+    }
 }

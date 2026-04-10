@@ -549,6 +549,127 @@ fn draw_table(
     f.render_stateful_widget(table, area, state);
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_hex_color_valid() {
+        assert_eq!(parse_hex_color("#7aa2f7"), Color::Rgb(122, 162, 247));
+        assert_eq!(parse_hex_color("#000000"), Color::Rgb(0, 0, 0));
+        assert_eq!(parse_hex_color("#FFFFFF"), Color::Rgb(255, 255, 255));
+    }
+
+    #[test]
+    fn parse_hex_color_without_hash() {
+        assert_eq!(parse_hex_color("7aa2f7"), Color::Rgb(122, 162, 247));
+    }
+
+    #[test]
+    fn parse_hex_color_invalid_falls_back() {
+        assert_eq!(parse_hex_color("#FFF"), Color::Gray);
+        assert_eq!(parse_hex_color(""), Color::Gray);
+    }
+
+    #[test]
+    fn format_age_seconds() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert_eq!(format_age(now - 30), "30s");
+    }
+
+    #[test]
+    fn format_age_minutes() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert_eq!(format_age(now - 120), "2m");
+    }
+
+    #[test]
+    fn format_age_hours() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert_eq!(format_age(now - 7200), "2h");
+    }
+
+    #[test]
+    fn format_age_days() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert_eq!(format_age(now - 172800), "2d");
+    }
+
+    #[test]
+    fn format_age_zero_returns_empty() {
+        assert_eq!(format_age(0), "");
+    }
+
+    fn make_entry(name: &str, vertical: &str, context: &str, separator: bool) -> Entry {
+        Entry {
+            vertical: vertical.to_string(),
+            context: context.to_string(),
+            name: name.to_string(),
+            color: Color::Gray,
+            activity: 0,
+            health: None,
+            is_separator: separator,
+        }
+    }
+
+    #[test]
+    fn filter_entries_empty_query_returns_all() {
+        let entries = vec![
+            make_entry("work/api", "work", "api", false),
+            make_entry("", "", "", true),
+            make_entry("personal/blog", "personal", "blog", false),
+        ];
+        assert_eq!(filter_entries(&entries, ""), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn filter_entries_matches_name() {
+        let entries = vec![
+            make_entry("work/api", "work", "api", false),
+            make_entry("personal/blog", "personal", "blog", false),
+        ];
+        assert_eq!(filter_entries(&entries, "api"), vec![0]);
+    }
+
+    #[test]
+    fn filter_entries_matches_vertical() {
+        let entries = vec![
+            make_entry("work/api", "work", "api", false),
+            make_entry("work/auth", "work", "auth", false),
+            make_entry("personal/blog", "personal", "blog", false),
+        ];
+        assert_eq!(filter_entries(&entries, "work"), vec![0, 1]);
+    }
+
+    #[test]
+    fn filter_entries_skips_separators() {
+        let entries = vec![
+            make_entry("work/api", "work", "api", false),
+            make_entry("", "", "", true),
+            make_entry("personal/blog", "personal", "blog", false),
+        ];
+        assert_eq!(filter_entries(&entries, "blog"), vec![2]);
+    }
+
+    #[test]
+    fn filter_entries_case_insensitive() {
+        let entries = vec![make_entry("Work/API", "Work", "API", false)];
+        assert_eq!(filter_entries(&entries, "api"), vec![0]);
+    }
+}
+
 fn draw_footer(f: &mut ratatui::Frame, area: Rect, query: &str, filtering: bool, killing: bool) {
     let dim = Style::default().fg(Color::DarkGray);
     let text = if killing {

@@ -89,6 +89,23 @@ fn resolve_tool(tool_override: Option<&str>, config: &Config) -> String {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_tool_uses_override() {
+        let config: Config = toml::from_str("[verticals]").unwrap();
+        assert_eq!(resolve_tool(Some("opencode"), &config), "opencode");
+    }
+
+    #[test]
+    fn resolve_tool_falls_back_to_config() {
+        let config: Config = toml::from_str("[verticals]").unwrap();
+        assert_eq!(resolve_tool(None, &config), "claude");
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let tmux = Tmux::new(cli.server);
