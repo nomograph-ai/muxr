@@ -1,3 +1,5 @@
+#![deny(warnings, clippy::all)]
+
 mod claude_status;
 mod completions;
 mod config;
