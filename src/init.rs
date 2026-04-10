@@ -2,6 +2,8 @@ use crate::config::Config;
 use anyhow::{Context, Result};
 
 /// Create a default config file.
+/// Template is derived from Config::default_template() so the structure
+/// stays in sync with the Config struct.
 pub fn init() -> Result<()> {
     let path = Config::path()?;
 
@@ -17,28 +19,7 @@ pub fn init() -> Result<()> {
             .with_context(|| format!("Failed to create {}", parent.display()))?;
     }
 
-    let default_config = r##"# muxr configuration
-# Verticals define your project estates.
-# Each vertical maps to a directory and a status bar color.
-
-default_tool = "claude"
-
-# Add your verticals here. Examples:
-#
-# [verticals.work]
-# dir = "~/projects/work"
-# color = "#7aa2f7"
-#
-# [verticals.personal]
-# dir = "~/projects/personal"
-# color = "#9ece6a"
-#
-# [verticals.oss]
-# dir = "~/projects/oss"
-# color = "#73daca"
-"##;
-
-    std::fs::write(&path, default_config)
+    std::fs::write(&path, Config::default_template())
         .with_context(|| format!("Failed to write {}", path.display()))?;
 
     eprintln!("Created config at {}", path.display());

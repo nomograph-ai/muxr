@@ -20,7 +20,7 @@ use tmux::Tmux;
     version,
     about = "Tmux session manager for AI coding workflows"
 )]
-struct Cli {
+pub(crate) struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 

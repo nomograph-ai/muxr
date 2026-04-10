@@ -1,6 +1,24 @@
 use crate::config::Config;
 use crate::tmux::Tmux;
 use anyhow::Result;
+use clap::CommandFactory;
+
+/// Derive subcommand names and descriptions from the Cli struct's clap metadata.
+/// This eliminates hand-maintained command lists -- adding a new subcommand to
+/// the Commands enum automatically includes it in completions.
+fn derived_commands() -> Vec<(String, String)> {
+    let cmd = crate::Cli::command();
+    cmd.get_subcommands()
+        .map(|sub| {
+            let name = sub.get_name().to_string();
+            let about = sub
+                .get_about()
+                .map(|a| a.to_string())
+                .unwrap_or_default();
+            (name, about)
+        })
+        .collect()
+}
 
 pub fn generate(shell: &str) -> Result<()> {
     match shell {
@@ -12,6 +30,7 @@ pub fn generate(shell: &str) -> Result<()> {
 }
 
 fn generate_zsh() -> Result<()> {
+    let commands = derived_commands();
     let all_names = Config::load()
         .map(|c| {
             c.all_names()
@@ -29,6 +48,12 @@ fn generate_zsh() -> Result<()> {
         .collect::<Vec<_>>()
         .join(" ");
 
+    let command_entries: String = commands
+        .iter()
+        .map(|(name, desc)| format!("        '{name}:{desc}'"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
     print!(
         r##"#compdef muxr
 
@@ -36,13 +61,7 @@ _muxr() {{
     local -a commands verticals sessions
 
     commands=(
-        'init:Create default config file'
-        'ls:List active tmux sessions'
-        'save:Snapshot sessions before reboot'
-        'restore:Recreate sessions after reboot'
-        'switch:Interactive session switcher'
-        'tmux-status:Generate tmux status-left'
-        'completions:Generate shell completions'
+{command_entries}
     )
 
     verticals=({vertical_list})
@@ -79,6 +98,7 @@ _muxr "$@"
 }
 
 fn generate_bash() -> Result<()> {
+    let commands = derived_commands();
     let verticals = Config::load()
         .map(|c| {
             c.all_names()
@@ -90,6 +110,11 @@ fn generate_bash() -> Result<()> {
     let sessions = Tmux::new(None).list_sessions().unwrap_or_default();
 
     let vertical_list = verticals.join(" ");
+    let command_list: String = commands
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
 
     print!(
         r#"_muxr_completions() {{
@@ -97,7 +122,7 @@ fn generate_bash() -> Result<()> {
     cur="${{COMP_WORDS[COMP_CWORD]}}"
     prev="${{COMP_WORDS[COMP_CWORD-1]}}"
 
-    commands="init ls save restore tmux-status completions"
+    commands="{command_list}"
     verticals="{vertical_list}"
 
     if [[ $COMP_CWORD -eq 1 ]]; then
@@ -136,6 +161,7 @@ complete -F _muxr_completions muxr
 }
 
 fn generate_fish() -> Result<()> {
+    let commands = derived_commands();
     let verticals = Config::load()
         .map(|c| {
             c.all_names()
@@ -149,19 +175,12 @@ fn generate_fish() -> Result<()> {
     println!("complete -c muxr -f");
     println!();
 
-    // Subcommands
-    for (cmd, desc) in [
-        ("init", "Create default config file"),
-        ("ls", "List active tmux sessions"),
-        ("save", "Snapshot sessions before reboot"),
-        ("restore", "Recreate sessions after reboot"),
-        ("switch", "Interactive session switcher"),
-        ("completions", "Generate shell completions"),
-    ] {
-        println!("complete -c muxr -n '__fish_use_subcommand' -a '{cmd}' -d '{desc}'");
+    // Subcommands -- derived from clap
+    for (name, desc) in &commands {
+        println!("complete -c muxr -n '__fish_use_subcommand' -a '{name}' -d '{desc}'");
     }
 
-    // Verticals
+    // Verticals -- from runtime config
     for v in &verticals {
         println!("complete -c muxr -n '__fish_use_subcommand' -a '{v}' -d 'Open {v} session'");
     }

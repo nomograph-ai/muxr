@@ -178,6 +178,38 @@ impl Config {
             .or_else(|| self.remotes.get(name).map(|r| r.color.as_str()))
             .unwrap_or("#8a7f83")
     }
+
+    /// Generate a default config file with example verticals.
+    /// Derived from the Config struct -- adding a field to Config
+    /// automatically includes it in the template.
+    pub fn default_template() -> String {
+        let example = Config {
+            default_tool: default_tool(),
+            verticals: HashMap::new(),
+            remotes: HashMap::new(),
+            hooks: Hooks::default(),
+        };
+
+        let base = toml::to_string_pretty(&example).unwrap_or_default();
+
+        format!(
+            r##"# muxr configuration
+# Verticals define your project estates.
+# Each vertical maps to a directory and a status bar color.
+
+{base}
+# Add your verticals here. Examples:
+#
+# [verticals.work]
+# dir = "~/projects/work"
+# color = "#7aa2f7"
+#
+# [verticals.personal]
+# dir = "~/projects/personal"
+# color = "#9ece6a"
+"##
+        )
+    }
 }
 
 #[cfg(test)]
@@ -326,6 +358,24 @@ color = "#fff"
         let config: Config = toml::from_str("[verticals]").unwrap();
         assert!(config.hooks.pre_create.is_empty());
         assert!(config.hooks.path.is_empty());
+    }
+
+    #[test]
+    fn default_template_contains_default_tool() {
+        let template = Config::default_template();
+        assert!(template.contains("default_tool = \"claude\""));
+    }
+
+    #[test]
+    fn default_template_parseable() {
+        let template = Config::default_template();
+        // Strip comment lines, the rest should parse as valid TOML
+        let non_comment: String = template
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let _config: Config = toml::from_str(&non_comment).unwrap();
     }
 
     #[test]
