@@ -47,8 +47,9 @@ pub struct Vertical {
     #[serde(default)]
     pub max_budget_usd: Option<f64>,
     /// Text appended to the Claude system prompt for this vertical.
+    /// Multiple entries are joined with newlines.
     #[serde(default)]
-    pub append_system_prompt: Option<String>,
+    pub append_system_prompt: Option<Vec<String>>,
 }
 
 fn default_true() -> bool {
@@ -216,8 +217,9 @@ impl HarnessConfig {
             if let Some(budget) = v.max_budget_usd {
                 cmd.push_str(&format!(" --max-budget-usd {budget}"));
             }
-            if let Some(ref prompt) = v.append_system_prompt {
-                cmd.push_str(&format!(" --append-system-prompt {}", shell_escape(prompt)));
+            if let Some(ref prompts) = v.append_system_prompt {
+                let joined = prompts.join("\n");
+                cmd.push_str(&format!(" --append-system-prompt {}", shell_escape(&joined)));
             }
         }
 
