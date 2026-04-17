@@ -134,7 +134,20 @@ fn main() -> Result<()> {
             if cli.args.is_empty() {
                 cmd_control_plane(&tmux)
             } else {
-                cmd_open(&tmux, &cli.args, cli.tool.as_deref())
+                // Check if first arg is a harness name before treating as vertical
+                let first = &cli.args[0];
+                let config = Config::load().ok();
+                let is_harness = config
+                    .as_ref()
+                    .map(|c| c.harness_names().contains(&first.to_string()))
+                    .unwrap_or(false);
+
+                if is_harness {
+                    let config = config.unwrap();
+                    cmd_harness_dispatch(&tmux, &config, &cli.args)
+                } else {
+                    cmd_open(&tmux, &cli.args, cli.tool.as_deref())
+                }
             }
         }
     }
