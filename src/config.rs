@@ -50,6 +50,15 @@ pub struct Vertical {
     /// Multiple entries are joined with newlines.
     #[serde(default)]
     pub append_system_prompt: Option<Vec<String>>,
+    /// File to append to the system prompt (path supports ~).
+    #[serde(default)]
+    pub append_system_prompt_file: Option<String>,
+    /// Additional directories the harness can access.
+    #[serde(default)]
+    pub add_dirs: Vec<String>,
+    /// Move cwd/git/env info out of system prompt for better cache hits.
+    #[serde(default)]
+    pub exclude_dynamic_prompt: bool,
 }
 
 fn default_true() -> bool {
@@ -220,6 +229,17 @@ impl HarnessConfig {
             if let Some(ref prompts) = v.append_system_prompt {
                 let joined = prompts.join("\n");
                 cmd.push_str(&format!(" --append-system-prompt {}", shell_escape(&joined)));
+            }
+            if let Some(ref file) = v.append_system_prompt_file {
+                let expanded = shellexpand::tilde(file);
+                cmd.push_str(&format!(" --append-system-prompt-file {}", shell_escape(&expanded)));
+            }
+            for dir in &v.add_dirs {
+                let expanded = shellexpand::tilde(dir);
+                cmd.push_str(&format!(" --add-dir {}", shell_escape(&expanded)));
+            }
+            if v.exclude_dynamic_prompt {
+                cmd.push_str(" --exclude-dynamic-system-prompt-sections");
             }
         }
 
