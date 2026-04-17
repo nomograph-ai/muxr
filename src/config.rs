@@ -262,14 +262,17 @@ impl HarnessConfig {
     }
 
     /// Build the rename command to send to the pane.
+    /// Uses raw interpolation -- this is a slash command sent as keystrokes,
+    /// not a shell command.
     pub fn build_rename_command(&self, name: &str) -> Option<String> {
         self.rename_command
             .as_ref()
-            .map(|cmd| interpolate(cmd, "name", name))
+            .map(|cmd| interpolate_raw(cmd, "name", name))
     }
 }
 
 /// Interpolate a `{key}` placeholder with a shell-escaped value.
+/// Use for values that will be parsed by a shell (launch commands).
 pub fn interpolate(template: &str, key: &str, value: &str) -> String {
     let placeholder = format!("{{{key}}}");
     if template.contains(&placeholder) {
@@ -277,6 +280,14 @@ pub fn interpolate(template: &str, key: &str, value: &str) -> String {
     } else {
         template.to_string()
     }
+}
+
+/// Interpolate a `{key}` placeholder with the raw value (no escaping).
+/// Use for slash commands sent as keystrokes to a running harness --
+/// the harness reads the literal characters, not a shell.
+pub fn interpolate_raw(template: &str, key: &str, value: &str) -> String {
+    let placeholder = format!("{{{key}}}");
+    template.replace(&placeholder, value)
 }
 
 /// Shell-escape a value by wrapping in single quotes.
@@ -790,7 +801,25 @@ session_discovery = { type = "none" }
     fn build_rename_command_interpolates() {
         let h = HarnessConfig::builtin_claude();
         let cmd = h.build_rename_command("tanuki/opus").unwrap();
-        assert_eq!(cmd, "/rename 'tanuki/opus'");
+        // Slash commands get raw values -- the harness reads literal
+        // keystrokes, not a shell.
+        assert_eq!(cmd, "/rename tanuki/opus");
+    }
+
+    #[test]
+    fn interpolate_raw_no_escaping() {
+        assert_eq!(
+            interpolate_raw("/model {model}", "model", "claude-opus-4-7"),
+            "/model claude-opus-4-7"
+        );
+    }
+
+    #[test]
+    fn interpolate_arg_escapes() {
+        assert_eq!(
+            interpolate("--model {model}", "model", "claude-opus-4-7"),
+            "--model 'claude-opus-4-7'"
+        );
     }
 
     #[test]

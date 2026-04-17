@@ -162,7 +162,7 @@ pub fn model_switch(
         .as_ref()
         .context("Harness does not support live model switch")?;
 
-    let cmd = crate::config::interpolate(cmd_template, "model", model);
+    let cmd = crate::config::interpolate_raw(cmd_template, "model", model);
     let sessions = tmux.list_sessions()?;
     let mut switched = 0;
 
