@@ -222,13 +222,17 @@ impl Tmux {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
-    /// Rename the current tmux session.
-    pub fn rename_session(&self, name: &str) -> Result<()> {
-        let status = self
-            .command()
-            .args(["rename-session", name])
-            .status()
-            .context("Failed to rename session")?;
+    /// Rename a tmux session. If `old` is None, renames the current session.
+    pub fn rename_session(&self, old: Option<&str>, new: &str) -> Result<()> {
+        let mut cmd = self.command();
+        cmd.arg("rename-session");
+        let target;
+        if let Some(o) = old {
+            target = Self::target(o);
+            cmd.args(["-t", &target]);
+        }
+        cmd.arg(new);
+        let status = cmd.status().context("Failed to rename session")?;
         if !status.success() {
             anyhow::bail!("tmux rename-session failed");
         }

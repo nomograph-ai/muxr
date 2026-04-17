@@ -366,22 +366,42 @@ fn cmd_new(tmux: &Tmux, args: &[String], tool_override: Option<&str>) -> Result<
 
 /// Rename the current tmux session and flow through to the harness.
 fn cmd_rename(tmux: &Tmux, name: &str, tool_override: Option<&str>) -> Result<()> {
-    // Get the current session name before renaming (to resolve tool)
     let old_name = tmux.current_session().unwrap_or_default();
-    let vertical = old_name.split('/').next().unwrap_or("default");
+    rename_session_by_name(tmux, &old_name, name, tool_override)
+}
 
-    tmux.rename_session(name)?;
-    eprintln!("Renamed to {name}");
+/// Rename a specific tmux session by name and flow through to its harness.
+/// Shared between the CLI `muxr rename` and the TUI switcher.
+pub(crate) fn rename_session_by_name(
+    tmux: &Tmux,
+    old: &str,
+    new: &str,
+    tool_override: Option<&str>,
+) -> Result<()> {
+    if new.is_empty() {
+        anyhow::bail!("New name cannot be empty");
+    }
+    if new == old {
+        return Ok(());
+    }
+    if tmux.session_exists(new) {
+        anyhow::bail!("Session '{new}' already exists");
+    }
+
+    let vertical = old.split('/').next().unwrap_or("default");
+
+    tmux.rename_session(Some(old), new)?;
+    eprintln!("Renamed {old} -> {new}");
 
     // Flow rename through to the harness if configured
     if let Ok(config) = Config::load() {
         let tool = config.resolve_tool(vertical, tool_override);
         if let Some(harness) = config.harness_for(&tool)
-            && let Some(cmd) = harness.build_rename_command(name)
+            && let Some(cmd) = harness.build_rename_command(new)
         {
-            let target = Tmux::target(name);
+            let new_target = Tmux::target(new);
             let _ = std::process::Command::new("tmux")
-                .args(["send-keys", "-t", &target, &cmd, "Enter"])
+                .args(["send-keys", "-t", &new_target, &cmd, "Enter"])
                 .status();
             eprintln!("Sent rename to {tool}");
         }
@@ -465,6 +485,12 @@ fn cmd_switch(tmux: &Tmux) -> Result<()> {
             tmux.kill_session(&session)?;
             eprintln!("Killed {session}");
             // Re-enter the switcher after kill
+            cmd_switch(tmux)
+        }
+        switcher::Action::Rename(old, new) => {
+            if let Err(e) = rename_session_by_name(tmux, &old, &new, None) {
+                eprintln!("rename failed: {e}");
+            }
             cmd_switch(tmux)
         }
         switcher::Action::None => Ok(()),

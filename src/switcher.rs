@@ -180,6 +180,7 @@ fn format_age(activity: u64) -> String {
 pub enum Action {
     Switch(String),
     Kill(String),
+    Rename(String, String),
     None,
 }
 
@@ -208,6 +209,9 @@ pub fn run(tmux: &Tmux) -> Result<Action> {
     let mut filtering = false;
     let mut filtered = filter_entries(&entries, &query);
     let mut confirm_kill: Option<usize> = None; // index into entries if confirming
+    // When Some, we're editing a rename buffer for entries[idx].
+    let mut renaming: Option<(usize, String)> = None;
+    let mut rename_error: Option<String> = None;
 
     // Select first non-separator
     select_nearest_real(&entries, &filtered, &mut table_state, 0);
@@ -226,12 +230,60 @@ pub fn run(tmux: &Tmux) -> Result<Action> {
                 &current,
                 &mut table_state,
                 confirm_kill,
+                renaming.as_ref().map(|(i, _)| *i),
             );
-            draw_footer(f, chunks[1], &query, filtering, confirm_kill.is_some());
+            draw_footer(
+                f,
+                chunks[1],
+                &query,
+                filtering,
+                confirm_kill.is_some(),
+                renaming.as_ref().map(|(_, buf)| buf.as_str()),
+                rename_error.as_deref(),
+            );
         })?;
 
         if let Event::Key(key) = event::read()? {
             if key.kind != KeyEventKind::Press {
+                continue;
+            }
+
+            // Rename mode -- swallows all keys until Enter/Esc
+            if let Some((idx, buf)) = renaming.as_mut() {
+                match key.code {
+                    KeyCode::Esc => {
+                        renaming = None;
+                        rename_error = None;
+                    }
+                    KeyCode::Enter => {
+                        let old = entries[*idx].name.clone();
+                        let new = buf.trim().to_string();
+                        if new.is_empty() {
+                            rename_error = Some("name cannot be empty".to_string());
+                        } else if new == old {
+                            renaming = None;
+                            rename_error = None;
+                        } else if entries.iter().any(|e| !e.is_separator && e.name == new) {
+                            rename_error = Some(format!("'{new}' already exists"));
+                        } else {
+                            terminal::disable_raw_mode()?;
+                            crossterm::execute!(
+                                terminal.backend_mut(),
+                                LeaveAlternateScreen
+                            )?;
+                            return Ok(Action::Rename(old, new));
+                        }
+                    }
+                    KeyCode::Backspace => {
+                        buf.pop();
+                        rename_error = None;
+                    }
+                    KeyCode::Char(c) => {
+                        buf.push(c);
+                        rename_error = None;
+                    }
+                    _ => {}
+                }
                 continue;
             }
 
@@ -278,6 +330,17 @@ pub fn run(tmux: &Tmux) -> Result<Action> {
                         && entries[idx].name != "muxr"
                     {
                         confirm_kill = Some(idx);
+                    }
+                }
+                KeyCode::Char('r') if !filtering => {
+                    if let Some(selected) = table_state.selected()
+                        && let Some(&idx) = filtered.get(selected)
+                        && !entries[idx].is_separator
+                        && entries[idx].name != "muxr"
+                    {
+                        let prefill = entries[idx].name.clone();
+                        renaming = Some((idx, prefill));
+                        rename_error = None;
                     }
                 }
                 KeyCode::Up => {
@@ -402,6 +465,7 @@ fn draw_table(
     current: &str,
     state: &mut TableState,
     confirm_kill: Option<usize>,
+    rename_idx: Option<usize>,
 ) {
     let dim = Style::default().fg(Color::DarkGray);
 
@@ -437,8 +501,15 @@ fn draw_table(
 
             let is_current = e.name == current;
             let is_kill_target = confirm_kill == Some(idx);
+            let is_rename_target = rename_idx == Some(idx);
 
-            let marker = if is_current { "● " } else { "  " };
+            let marker = if is_rename_target {
+                "✎ "
+            } else if is_current {
+                "● "
+            } else {
+                "  "
+            };
 
             let kill_style = Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
             let vs = if is_kill_target {
@@ -677,9 +748,35 @@ mod tests {
     }
 }
 
-fn draw_footer(f: &mut ratatui::Frame, area: Rect, query: &str, filtering: bool, killing: bool) {
+fn draw_footer(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    query: &str,
+    filtering: bool,
+    killing: bool,
+    rename_buffer: Option<&str>,
+    rename_error: Option<&str>,
+) {
     let dim = Style::default().fg(Color::DarkGray);
-    let text = if killing {
+    let text = if let Some(buf) = rename_buffer {
+        let mut spans = vec![
+            Span::styled("  rename > ", Style::default().fg(Color::Cyan)),
+            Span::styled(buf.to_string(), Style::default().fg(Color::White)),
+            Span::styled("_", Style::default().fg(Color::Cyan)),
+        ];
+        if let Some(err) = rename_error {
+            spans.push(Span::styled(
+                format!("  {err}"),
+                Style::default().fg(Color::Red),
+            ));
+        } else {
+            spans.push(Span::styled("  enter", dim));
+            spans.push(Span::styled(" commit  ", dim));
+            spans.push(Span::styled("esc", dim));
+            spans.push(Span::styled(" cancel", dim));
+        }
+        Line::from(spans)
+    } else if killing {
         Line::from(vec![
             Span::styled("  y", Style::default().fg(Color::Red)),
             Span::styled(" confirm kill  ", dim),
@@ -702,6 +799,8 @@ fn draw_footer(f: &mut ratatui::Frame, area: Rect, query: &str, filtering: bool,
             Span::styled(" move  ", dim),
             Span::styled("enter", dim),
             Span::styled(" select  ", dim),
+            Span::styled("r", dim),
+            Span::styled(" rename  ", dim),
             Span::styled("d", dim),
             Span::styled(" kill  ", dim),
             Span::styled("q", dim),
