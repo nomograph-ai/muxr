@@ -37,17 +37,25 @@ pub struct Vertical {
     /// Create git worktrees for session isolation. Default: true for harness sessions.
     #[serde(default = "default_true")]
     pub worktree: bool,
-    /// Effort level for the harness (e.g., "high", "max").
+    /// Harness-specific launch settings. Only read when a harness is active.
+    #[serde(default)]
+    pub harness: HarnessLaunchSettings,
+}
+
+/// Settings passed to the harness on launch. These are tool-specific
+/// flags that muxr passes through -- muxr does not interpret them.
+#[derive(Debug, Default, Deserialize, Serialize)]
+pub struct HarnessLaunchSettings {
+    /// Effort level (e.g., "high", "max").
     #[serde(default)]
     pub effort: Option<String>,
-    /// Permission mode for the harness (e.g., "auto", "plan").
+    /// Permission mode (e.g., "auto", "plan").
     #[serde(default)]
     pub permission_mode: Option<String>,
     /// Max budget in USD per session.
     #[serde(default)]
     pub max_budget_usd: Option<f64>,
-    /// Text appended to the Claude system prompt for this vertical.
-    /// Multiple entries are joined with newlines.
+    /// Text appended to the system prompt. Multiple entries joined with newlines.
     #[serde(default)]
     pub append_system_prompt: Option<Vec<String>>,
     /// File to append to the system prompt (path supports ~).
@@ -206,41 +214,42 @@ impl HarnessConfig {
         parts.join(" ")
     }
 
-    /// Build the launch command with vertical-specific settings.
-    pub fn launch_command_with_vertical(
+    /// Build the launch command with harness-specific settings from the vertical.
+    pub fn launch_command_with_settings(
         &self,
         session_name: Option<&str>,
         resume_id: Option<&str>,
         model: Option<&str>,
-        vertical: Option<&Vertical>,
+        settings: &HarnessLaunchSettings,
     ) -> String {
         let mut cmd = self.launch_command(session_name, resume_id, model);
 
-        if let Some(v) = vertical {
-            if let Some(ref effort) = v.effort {
-                cmd.push_str(&format!(" --effort {}", shell_escape(effort)));
-            }
-            if let Some(ref mode) = v.permission_mode {
-                cmd.push_str(&format!(" --permission-mode {}", shell_escape(mode)));
-            }
-            if let Some(budget) = v.max_budget_usd {
-                cmd.push_str(&format!(" --max-budget-usd {budget}"));
-            }
-            if let Some(ref prompts) = v.append_system_prompt {
-                let joined = prompts.join("\n");
-                cmd.push_str(&format!(" --append-system-prompt {}", shell_escape(&joined)));
-            }
-            if let Some(ref file) = v.append_system_prompt_file {
-                let expanded = shellexpand::tilde(file);
-                cmd.push_str(&format!(" --append-system-prompt-file {}", shell_escape(&expanded)));
-            }
-            for dir in &v.add_dirs {
-                let expanded = shellexpand::tilde(dir);
-                cmd.push_str(&format!(" --add-dir {}", shell_escape(&expanded)));
-            }
-            if v.exclude_dynamic_prompt {
-                cmd.push_str(" --exclude-dynamic-system-prompt-sections");
-            }
+        if let Some(ref effort) = settings.effort {
+            cmd.push_str(&format!(" --effort {}", shell_escape(effort)));
+        }
+        if let Some(ref mode) = settings.permission_mode {
+            cmd.push_str(&format!(" --permission-mode {}", shell_escape(mode)));
+        }
+        if let Some(budget) = settings.max_budget_usd {
+            cmd.push_str(&format!(" --max-budget-usd {budget}"));
+        }
+        if let Some(ref prompts) = settings.append_system_prompt {
+            let joined = prompts.join("\n");
+            cmd.push_str(&format!(" --append-system-prompt {}", shell_escape(&joined)));
+        }
+        if let Some(ref file) = settings.append_system_prompt_file {
+            let expanded = shellexpand::tilde(file);
+            cmd.push_str(&format!(
+                " --append-system-prompt-file {}",
+                shell_escape(&expanded)
+            ));
+        }
+        for dir in &settings.add_dirs {
+            let expanded = shellexpand::tilde(dir);
+            cmd.push_str(&format!(" --add-dir {}", shell_escape(&expanded)));
+        }
+        if settings.exclude_dynamic_prompt {
+            cmd.push_str(" --exclude-dynamic-system-prompt-sections");
         }
 
         cmd

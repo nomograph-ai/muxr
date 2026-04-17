@@ -207,7 +207,7 @@ fn cmd_open(tmux: &Tmux, args: &[String], tool_override: Option<&str>) -> Result
 
         config.run_pre_create_hooks(&session_dir);
         let tool_cmd = match (&harness, vertical) {
-            (Some(h), Some(v)) => h.launch_command_with_vertical(Some(&session), None, None, Some(v)),
+            (Some(h), Some(v)) => h.launch_command_with_settings(Some(&session), None, None, &v.harness),
             (Some(h), None) => h.launch_command(Some(&session), None, None),
             _ => tool.clone(),
         };
@@ -335,7 +335,7 @@ fn cmd_new(tmux: &Tmux, args: &[String], tool_override: Option<&str>) -> Result<
         config.run_pre_create_hooks(&session_dir);
         let tool_cmd = match (&harness, vertical) {
             (Some(h), Some(v)) => {
-                h.launch_command_with_vertical(Some(&session), None, None, Some(v))
+                h.launch_command_with_settings(Some(&session), None, None, &v.harness)
             }
             (Some(h), None) => h.launch_command(Some(&session), None, None),
             _ => tool.clone(),
