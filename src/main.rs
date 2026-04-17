@@ -3,6 +3,7 @@
 mod claude_status;
 mod completions;
 mod config;
+mod harness;
 mod init;
 mod remote;
 mod state;
@@ -80,13 +81,10 @@ enum Commands {
         /// Shell to generate completions for
         shell: String,
     },
-}
 
-fn resolve_tool(tool_override: Option<&str>, config: &Config) -> String {
-    match tool_override {
-        Some(t) => t.to_string(),
-        None => config.default_tool.clone(),
-    }
+    /// Harness subcommands (dynamic, from config)
+    #[command(external_subcommand)]
+    External(Vec<String>),
 }
 
 #[cfg(test)]
@@ -96,13 +94,13 @@ mod tests {
     #[test]
     fn resolve_tool_uses_override() {
         let config: Config = toml::from_str("[verticals]").unwrap();
-        assert_eq!(resolve_tool(Some("opencode"), &config), "opencode");
+        assert_eq!(config.resolve_tool("work", Some("opencode")), "opencode");
     }
 
     #[test]
     fn resolve_tool_falls_back_to_config() {
         let config: Config = toml::from_str("[verticals]").unwrap();
-        assert_eq!(resolve_tool(None, &config), "claude");
+        assert_eq!(config.resolve_tool("work", None), "claude");
     }
 }
 
@@ -117,14 +115,21 @@ fn main() -> Result<()> {
             let config = Config::load()?;
             state::SavedState::save(&config, &tmux)
         }
-        Some(Commands::Restore) => state::SavedState::restore(&tmux),
+        Some(Commands::Restore) => {
+            let config = Config::load()?;
+            state::SavedState::restore(&tmux, &config)
+        }
         Some(Commands::TmuxStatus) => cmd_tmux_status(&tmux),
         Some(Commands::ClaudeStatus) => claude_status::run(&tmux),
         Some(Commands::Switch) => cmd_switch(&tmux),
         Some(Commands::New { tool, args }) => cmd_new(&tmux, &args, tool.as_deref()),
-        Some(Commands::Rename { name }) => cmd_rename(&tmux, &name),
+        Some(Commands::Rename { name }) => cmd_rename(&tmux, &name, cli.tool.as_deref()),
         Some(Commands::Kill { name }) => cmd_kill(&tmux, &name),
         Some(Commands::Completions { shell }) => completions::generate(&shell),
+        Some(Commands::External(args)) => {
+            let config = Config::load()?;
+            cmd_harness_dispatch(&tmux, &config, &args)
+        }
         None => {
             if cli.args.is_empty() {
                 cmd_control_plane(&tmux)
@@ -160,7 +165,8 @@ fn cmd_open(tmux: &Tmux, args: &[String], tool_override: Option<&str>) -> Result
         return cmd_open_remote(tmux, &config, name, args);
     }
 
-    let tool = resolve_tool(tool_override, &config);
+    let tool = config.resolve_tool(name, tool_override);
+    let harness = config.harness_for(&tool);
 
     if !config.verticals.contains_key(name) {
         let names = config.all_names().join(", ");
@@ -182,7 +188,7 @@ fn cmd_open(tmux: &Tmux, args: &[String], tool_override: Option<&str>) -> Result
     } else {
         eprintln!("Creating {session} in {} ({})", dir.display(), tool);
         config.run_pre_create_hooks(&dir);
-        let tool_cmd = tmux::tool_command(&tool, None, Some(&session));
+        let tool_cmd = tmux::tool_command(harness.as_ref(), &tool, None, Some(&session));
         tmux.create_session(&session, &dir, &tool_cmd)?;
         tmux.attach(&session)?;
     }
@@ -289,10 +295,11 @@ fn cmd_new(tmux: &Tmux, args: &[String], tool_override: Option<&str>) -> Result<
         tmux.create_session(&session, &home, &connect_cmd)?;
         eprintln!("Created {session} -> {instance} (remote)");
     } else if config.verticals.contains_key(name) {
-        let tool = resolve_tool(tool_override, &config);
+        let tool = config.resolve_tool(name, tool_override);
+        let harness = config.harness_for(&tool);
         let dir = config.resolve_dir(name)?;
         config.run_pre_create_hooks(&dir);
-        let tool_cmd = tmux::tool_command(&tool, None, Some(&session));
+        let tool_cmd = tmux::tool_command(harness.as_ref(), &tool, None, Some(&session));
         tmux.create_session(&session, &dir, &tool_cmd)?;
         eprintln!("Created {session} ({})", tool);
     } else {
@@ -303,10 +310,29 @@ fn cmd_new(tmux: &Tmux, args: &[String], tool_override: Option<&str>) -> Result<
     Ok(())
 }
 
-/// Rename the current tmux session.
-fn cmd_rename(tmux: &Tmux, name: &str) -> Result<()> {
+/// Rename the current tmux session and flow through to the harness.
+fn cmd_rename(tmux: &Tmux, name: &str, tool_override: Option<&str>) -> Result<()> {
+    // Get the current session name before renaming (to resolve tool)
+    let old_name = tmux.current_session().unwrap_or_default();
+    let vertical = old_name.split('/').next().unwrap_or("default");
+
     tmux.rename_session(name)?;
     eprintln!("Renamed to {name}");
+
+    // Flow rename through to the harness if configured
+    if let Ok(config) = Config::load() {
+        let tool = config.resolve_tool(vertical, tool_override);
+        if let Some(harness) = config.harness_for(&tool)
+            && let Some(cmd) = harness.build_rename_command(name)
+        {
+            let target = Tmux::target(name);
+            let _ = std::process::Command::new("tmux")
+                .args(["send-keys", "-t", &target, &cmd, "Enter"])
+                .status();
+            eprintln!("Sent rename to {tool}");
+        }
+    }
+
     Ok(())
 }
 
@@ -361,6 +387,35 @@ fn cmd_switch(tmux: &Tmux) -> Result<()> {
             cmd_switch(tmux)
         }
         switcher::Action::None => Ok(()),
+    }
+}
+
+/// Dispatch harness subcommands: muxr claude upgrade --model X
+fn cmd_harness_dispatch(tmux: &Tmux, config: &Config, args: &[String]) -> Result<()> {
+    let harness_name = args.first().context("Missing harness name")?;
+
+    let harness = config
+        .harness_for(harness_name)
+        .with_context(|| format!("Unknown harness: {harness_name}"))?;
+
+    let sub = args.get(1).map(|s| s.as_str()).unwrap_or("status");
+
+    match sub {
+        "upgrade" => {
+            let model = args
+                .iter()
+                .skip(2)
+                .position(|a| a == "--model")
+                .and_then(|i| args.get(i + 3))
+                .map(|s| s.as_str());
+            harness::upgrade(tmux, config, harness_name, &harness, model)
+        }
+        "status" => harness::status(tmux, config, harness_name, &harness),
+        other => {
+            anyhow::bail!(
+                "Unknown {harness_name} subcommand: {other}\nAvailable: upgrade, status"
+            )
+        }
     }
 }
 

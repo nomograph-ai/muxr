@@ -48,11 +48,13 @@ fn build_entries(config: &Config, tmux: &Tmux) -> Result<Vec<Entry>> {
                 None => (s.name.clone(), String::new()),
             };
             let color = parse_hex_color(config.color_for(&vertical));
-            // Only read health for sessions that run a harness (not the muxr control plane)
-            let health = if s.name == "muxr" {
-                None
-            } else {
+            // Only show health for sessions that have a harness with status support
+            let tool = config.resolve_tool(&vertical, None);
+            let has_harness = s.name != "muxr" && config.harness_for(&tool).is_some();
+            let health = if has_harness {
                 claude_status::read_health(&s.name)
+            } else {
+                None
             };
 
             Entry {

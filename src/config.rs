@@ -12,6 +12,8 @@ pub struct Config {
     pub remotes: HashMap<String, Remote>,
     #[serde(default)]
     pub hooks: Hooks,
+    #[serde(default)]
+    pub harnesses: HashMap<String, HarnessConfig>,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -29,6 +31,134 @@ pub struct Hooks {
 pub struct Vertical {
     pub dir: String,
     pub color: String,
+    /// Override default_tool for this vertical.
+    #[serde(default)]
+    pub tool: Option<String>,
+}
+
+/// How to discover harness session IDs from running processes.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum SessionDiscovery {
+    /// Walk the process tree, look for a session file per PID.
+    File {
+        /// Path pattern with `{pid}` placeholder.
+        pattern: String,
+        /// JSON key containing the session ID.
+        id_key: String,
+    },
+    /// No session discovery (tool doesn't support resume).
+    None,
+}
+
+/// Configuration for a harness (AI coding tool).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct HarnessConfig {
+    /// Binary name or path.
+    pub bin: String,
+    /// Args for initial launch. Supports `{name}` interpolation.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Args for resuming a session. Supports `{session_id}` interpolation.
+    #[serde(default)]
+    pub resume_args: Vec<String>,
+    /// Args for setting the model. Supports `{model}` interpolation.
+    #[serde(default)]
+    pub model_args: Vec<String>,
+    /// Command to send to the pane on rename. Supports `{name}` interpolation.
+    #[serde(default)]
+    pub rename_command: Option<String>,
+    /// How to discover session IDs.
+    #[serde(default = "default_discovery_none")]
+    pub session_discovery: SessionDiscovery,
+    /// External command for status display.
+    #[serde(default)]
+    pub status_command: Option<String>,
+}
+
+fn default_discovery_none() -> SessionDiscovery {
+    SessionDiscovery::None
+}
+
+/// Reserved command names that cannot be used as harness names.
+const RESERVED_NAMES: &[&str] = &[
+    "init", "ls", "save", "restore", "new", "rename", "kill",
+    "switch", "tmux-status", "claude-status", "completions",
+];
+
+impl HarnessConfig {
+    /// Built-in Claude Code harness definition.
+    pub fn builtin_claude() -> Self {
+        Self {
+            bin: "claude".to_string(),
+            args: vec!["--name".to_string(), "{name}".to_string()],
+            resume_args: vec!["--resume".to_string(), "{session_id}".to_string()],
+            model_args: vec!["--model".to_string(), "{model}".to_string()],
+            rename_command: Some("/rename {name}".to_string()),
+            session_discovery: SessionDiscovery::File {
+                pattern: "~/.claude/sessions/{pid}.json".to_string(),
+                id_key: "sessionId".to_string(),
+            },
+            status_command: Some("muxr claude-status".to_string()),
+        }
+    }
+
+    /// Build the launch command with template interpolation.
+    /// All interpolated values are shell-escaped.
+    pub fn launch_command(
+        &self,
+        session_name: Option<&str>,
+        resume_id: Option<&str>,
+        model: Option<&str>,
+    ) -> String {
+        let mut parts = vec![self.bin.clone()];
+
+        if let Some(name) = session_name {
+            for arg in &self.args {
+                parts.push(interpolate(arg, "name", name));
+            }
+        }
+
+        if let Some(id) = resume_id {
+            for arg in &self.resume_args {
+                parts.push(interpolate(arg, "session_id", id));
+            }
+        }
+
+        if let Some(m) = model {
+            for arg in &self.model_args {
+                parts.push(interpolate(arg, "model", m));
+            }
+        }
+
+        parts.join(" ")
+    }
+
+    /// Build the rename command to send to the pane.
+    pub fn build_rename_command(&self, name: &str) -> Option<String> {
+        self.rename_command
+            .as_ref()
+            .map(|cmd| interpolate(cmd, "name", name))
+    }
+}
+
+/// Interpolate a `{key}` placeholder with a shell-escaped value.
+fn interpolate(template: &str, key: &str, value: &str) -> String {
+    let placeholder = format!("{{{key}}}");
+    if template.contains(&placeholder) {
+        template.replace(&placeholder, &shell_escape(value))
+    } else {
+        template.to_string()
+    }
+}
+
+/// Shell-escape a value by wrapping in single quotes.
+fn shell_escape(s: &str) -> String {
+    if s.contains('\'') {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    } else {
+        format!("'{s}'")
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -77,11 +207,28 @@ impl Config {
         let config: Config = toml::from_str(&content)
             .with_context(|| format!("Failed to parse {}", path.display()))?;
 
-        // Validate no name collisions between verticals and remotes
+        // Validate no name collisions between verticals, remotes, and harnesses
         for name in config.remotes.keys() {
             if config.verticals.contains_key(name) {
                 anyhow::bail!(
                     "Name collision: '{name}' is defined as both a vertical and a remote"
+                );
+            }
+        }
+        for name in config.harnesses.keys() {
+            if config.verticals.contains_key(name) {
+                anyhow::bail!(
+                    "Name collision: '{name}' is defined as both a vertical and a harness"
+                );
+            }
+            if config.remotes.contains_key(name) {
+                anyhow::bail!(
+                    "Name collision: '{name}' is defined as both a remote and a harness"
+                );
+            }
+            if RESERVED_NAMES.contains(&name.as_str()) {
+                anyhow::bail!(
+                    "Harness name '{name}' is reserved (conflicts with built-in command)"
                 );
             }
         }
@@ -120,6 +267,44 @@ impl Config {
             .collect();
         names.sort();
         names.dedup();
+        names
+    }
+
+    /// Resolve which tool to use for a vertical.
+    /// Priority: explicit override > vertical config > default_tool
+    pub fn resolve_tool(&self, vertical: &str, tool_override: Option<&str>) -> String {
+        if let Some(t) = tool_override {
+            return t.to_string();
+        }
+        if let Some(v) = self.verticals.get(vertical)
+            && let Some(ref t) = v.tool
+        {
+            return t.clone();
+        }
+        self.default_tool.clone()
+    }
+
+    /// Get the harness config for a tool name.
+    /// Checks user config first, then falls back to built-in definitions.
+    pub fn harness_for(&self, tool: &str) -> Option<HarnessConfig> {
+        if let Some(h) = self.harnesses.get(tool) {
+            return Some(h.clone());
+        }
+        // Built-in defaults
+        if tool == "claude" {
+            return Some(HarnessConfig::builtin_claude());
+        }
+        None
+    }
+
+    /// All configured harness names (explicit + built-in).
+    pub fn harness_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.harnesses.keys().cloned().collect();
+        // Add built-in claude if not overridden
+        if !names.contains(&"claude".to_string()) {
+            names.push("claude".to_string());
+        }
+        names.sort();
         names
     }
 
@@ -180,35 +365,35 @@ impl Config {
     }
 
     /// Generate a default config file with example verticals.
-    /// Derived from the Config struct -- adding a field to Config
-    /// automatically includes it in the template.
     pub fn default_template() -> String {
-        let example = Config {
-            default_tool: default_tool(),
-            verticals: HashMap::new(),
-            remotes: HashMap::new(),
-            hooks: Hooks::default(),
-        };
-
-        let base = toml::to_string_pretty(&example).unwrap_or_default();
-
-        format!(
-            r##"# muxr configuration
+        r##"# muxr configuration
 # Verticals define your project estates.
 # Each vertical maps to a directory and a status bar color.
 
-{base}
-# Add your verticals here. Examples:
-#
+default_tool = "claude"
+
 # [verticals.work]
 # dir = "~/projects/work"
 # color = "#7aa2f7"
+# tool = "claude"    # optional, overrides default_tool
 #
 # [verticals.personal]
 # dir = "~/projects/personal"
 # color = "#9ece6a"
+
+# [hooks]
+# pre_create = ["mise install"]
+# path = ["~/.local/share/mise/shims"]
+
+# Harness definitions. Claude is built-in (zero config needed).
+# Only define [harnesses.claude] to override the built-in defaults.
+# Other harnesses must be configured explicitly.
+#
+# [harnesses.opencode]
+# bin = "opencode"
+# session_discovery = { type = "none" }
 "##
-        )
+        .to_string()
     }
 }
 
@@ -223,16 +408,22 @@ default_tool = "claude"
 [verticals.work]
 dir = "~/projects/work"
 color = "#7aa2f7"
+tool = "claude"
 
 [verticals.personal]
 dir = "~/projects/personal"
 color = "#9ece6a"
+tool = "opencode"
 
 [remotes.lab]
 project = "my-project"
 zone = "us-central1-a"
 user = "deploy"
 color = "#d29922"
+
+[harnesses.opencode]
+bin = "opencode"
+session_discovery = { type = "none" }
 "##;
         toml::from_str(toml_str).unwrap()
     }
@@ -243,12 +434,14 @@ color = "#d29922"
         assert_eq!(config.default_tool, "claude");
         assert_eq!(config.verticals.len(), 2);
         assert_eq!(config.remotes.len(), 1);
+        assert_eq!(config.harnesses.len(), 1);
     }
 
     #[test]
     fn default_tool_is_claude() {
         let config: Config = toml::from_str("[verticals]").unwrap();
         assert_eq!(config.default_tool, "claude");
+        assert!(config.harnesses.is_empty());
     }
 
     #[test]
@@ -331,7 +524,7 @@ color = "#d29922"
     }
 
     #[test]
-    fn name_collision_rejected() {
+    fn name_collision_vertical_remote_rejected() {
         let toml_str = r##"
 [verticals.lab]
 dir = "~/lab"
@@ -344,13 +537,37 @@ user = "u"
 color = "#fff"
 "##;
         let config: Config = toml::from_str(toml_str).unwrap();
-        // Load validates collisions, but parse doesn't -- test the validation
-        // by reconstructing the check
         let has_collision = config
             .remotes
             .keys()
             .any(|name| config.verticals.contains_key(name));
         assert!(has_collision);
+    }
+
+    #[test]
+    fn name_collision_harness_vertical_detected() {
+        let toml_str = r##"
+[verticals.opencode]
+dir = "~/oc"
+color = "#fff"
+
+[harnesses.opencode]
+bin = "opencode"
+session_discovery = { type = "none" }
+"##;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let has_collision = config
+            .harnesses
+            .keys()
+            .any(|name| config.verticals.contains_key(name));
+        assert!(has_collision);
+    }
+
+    #[test]
+    fn reserved_harness_name_detected() {
+        assert!(RESERVED_NAMES.contains(&"save"));
+        assert!(RESERVED_NAMES.contains(&"switch"));
+        assert!(!RESERVED_NAMES.contains(&"claude"));
     }
 
     #[test]
@@ -366,16 +583,130 @@ color = "#fff"
         assert!(template.contains("default_tool = \"claude\""));
     }
 
+    // -- Harness config tests --
+
     #[test]
-    fn default_template_parseable() {
-        let template = Config::default_template();
-        // Strip comment lines, the rest should parse as valid TOML
-        let non_comment: String = template
-            .lines()
-            .filter(|l| !l.starts_with('#'))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let _config: Config = toml::from_str(&non_comment).unwrap();
+    fn builtin_claude_harness() {
+        let h = HarnessConfig::builtin_claude();
+        assert_eq!(h.bin, "claude");
+        assert_eq!(h.rename_command, Some("/rename {name}".to_string()));
+        assert!(matches!(h.session_discovery, SessionDiscovery::File { .. }));
+    }
+
+    #[test]
+    fn harness_for_returns_builtin_claude() {
+        let config: Config = toml::from_str("[verticals]").unwrap();
+        let h = config.harness_for("claude").unwrap();
+        assert_eq!(h.bin, "claude");
+    }
+
+    #[test]
+    fn harness_for_returns_configured() {
+        let config = sample_config();
+        let h = config.harness_for("opencode").unwrap();
+        assert_eq!(h.bin, "opencode");
+    }
+
+    #[test]
+    fn harness_for_unknown_returns_none() {
+        let config = sample_config();
+        assert!(config.harness_for("cursor").is_none());
+    }
+
+    #[test]
+    fn harness_config_overrides_builtin() {
+        let toml_str = r##"
+[verticals]
+
+[harnesses.claude]
+bin = "claude"
+args = ["--name", "{name}", "--verbose"]
+session_discovery = { type = "none" }
+"##;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let h = config.harness_for("claude").unwrap();
+        assert_eq!(h.args.len(), 3); // overridden, not the built-in 2
+        assert!(matches!(h.session_discovery, SessionDiscovery::None));
+    }
+
+    #[test]
+    fn launch_command_bare() {
+        let h = HarnessConfig::builtin_claude();
+        assert_eq!(h.launch_command(None, None, None), "claude");
+    }
+
+    #[test]
+    fn launch_command_with_name() {
+        let h = HarnessConfig::builtin_claude();
+        let cmd = h.launch_command(Some("work/api"), None, None);
+        assert_eq!(cmd, "claude --name 'work/api'");
+    }
+
+    #[test]
+    fn launch_command_with_resume_and_model() {
+        let h = HarnessConfig::builtin_claude();
+        let cmd = h.launch_command(Some("tanuki/opus"), Some("abc-123"), Some("claude-opus-4-7"));
+        assert_eq!(
+            cmd,
+            "claude --name 'tanuki/opus' --resume 'abc-123' --model 'claude-opus-4-7'"
+        );
+    }
+
+    #[test]
+    fn launch_command_shell_escapes_quotes() {
+        let h = HarnessConfig::builtin_claude();
+        let cmd = h.launch_command(Some("it's a test"), None, None);
+        assert!(cmd.contains("'it'\\''s a test'"));
+    }
+
+    #[test]
+    fn build_rename_command_interpolates() {
+        let h = HarnessConfig::builtin_claude();
+        let cmd = h.build_rename_command("tanuki/opus").unwrap();
+        assert_eq!(cmd, "/rename 'tanuki/opus'");
+    }
+
+    #[test]
+    fn build_rename_command_none_when_not_configured() {
+        let h = HarnessConfig {
+            rename_command: None,
+            ..HarnessConfig::builtin_claude()
+        };
+        assert!(h.build_rename_command("test").is_none());
+    }
+
+    #[test]
+    fn resolve_tool_flag_wins() {
+        let config = sample_config();
+        assert_eq!(config.resolve_tool("work", Some("cursor")), "cursor");
+    }
+
+    #[test]
+    fn resolve_tool_vertical_config() {
+        let config = sample_config();
+        assert_eq!(config.resolve_tool("personal", None), "opencode");
+    }
+
+    #[test]
+    fn resolve_tool_default_fallback() {
+        let config = sample_config();
+        // Unknown vertical falls back to default_tool
+        assert_eq!(config.resolve_tool("nonexistent", None), "claude");
+    }
+
+    #[test]
+    fn harness_names_includes_builtin() {
+        let config: Config = toml::from_str("[verticals]").unwrap();
+        let names = config.harness_names();
+        assert!(names.contains(&"claude".to_string()));
+    }
+
+    #[test]
+    fn harness_names_includes_configured() {
+        let config = sample_config();
+        let names = config.harness_names();
+        assert!(names.contains(&"claude".to_string()));
+        assert!(names.contains(&"opencode".to_string()));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 [package]
 name = "nomograph-muxr"
-version = "0.7.2"
+version = "0.8.0"
 edition = "2024"
 description = "Tmux session manager for AI coding workflows"
 authors = ["Andrew Dunn <andunn@gitlab.com>"]

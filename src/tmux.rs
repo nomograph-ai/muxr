@@ -29,8 +29,23 @@ impl Tmux {
     /// Session names with `/` conflict with tmux's session/window target
     /// syntax. The trailing `:` tells tmux to treat the entire string as
     /// a session name targeting the current window.
-    fn target(name: &str) -> String {
+    pub fn target(name: &str) -> String {
         format!("={name}:")
+    }
+
+    /// Get the name of the current tmux session (if running inside tmux).
+    pub fn current_session(&self) -> Option<String> {
+        let output = self
+            .command()
+            .args(["display-message", "-p", "#{session_name}"])
+            .output()
+            .ok()?;
+        if output.status.success() {
+            let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if name.is_empty() { None } else { Some(name) }
+        } else {
+            None
+        }
     }
 
     /// Check if a tmux session exists.
@@ -229,21 +244,17 @@ pub struct SessionInfo {
     pub activity: u64,
 }
 
-/// Build the tool launch command.
-/// When session_name is set, passes --name for Claude session identification.
-/// When resuming, passes the session ID shell-quoted to prevent word splitting.
-pub fn tool_command(tool: &str, resume_id: Option<&str>, session_name: Option<&str>) -> String {
-    if tool == "claude" {
-        let mut cmd = "claude".to_string();
-        if let Some(name) = session_name {
-            cmd.push_str(&format!(" --name '{name}'"));
-        }
-        if let Some(id) = resume_id {
-            cmd.push_str(&format!(" --resume '{id}'"));
-        }
-        cmd
-    } else {
-        tool.to_string()
+/// Build the tool launch command using harness config.
+/// Falls back to raw binary name when no harness is configured.
+pub fn tool_command(
+    harness: Option<&crate::config::HarnessConfig>,
+    tool: &str,
+    resume_id: Option<&str>,
+    session_name: Option<&str>,
+) -> String {
+    match harness {
+        Some(h) => h.launch_command(session_name, resume_id, None),
+        None => tool.to_string(),
     }
 }
 
@@ -258,36 +269,40 @@ mod tests {
     }
 
     #[test]
-    fn tool_command_claude_bare() {
-        assert_eq!(tool_command("claude", None, None), "claude");
+    fn tool_command_with_harness_bare() {
+        let h = crate::config::HarnessConfig::builtin_claude();
+        assert_eq!(tool_command(Some(&h), "claude", None, None), "claude");
     }
 
     #[test]
-    fn tool_command_claude_with_name() {
+    fn tool_command_with_harness_name() {
+        let h = crate::config::HarnessConfig::builtin_claude();
         assert_eq!(
-            tool_command("claude", None, Some("work/api")),
+            tool_command(Some(&h), "claude", None, Some("work/api")),
             "claude --name 'work/api'"
         );
     }
 
     #[test]
-    fn tool_command_claude_with_resume() {
+    fn tool_command_with_harness_resume() {
+        let h = crate::config::HarnessConfig::builtin_claude();
         assert_eq!(
-            tool_command("claude", Some("abc-123"), None),
+            tool_command(Some(&h), "claude", Some("abc-123"), None),
             "claude --resume 'abc-123'"
         );
     }
 
     #[test]
-    fn tool_command_claude_with_name_and_resume() {
+    fn tool_command_with_harness_name_and_resume() {
+        let h = crate::config::HarnessConfig::builtin_claude();
         assert_eq!(
-            tool_command("claude", Some("abc-123"), Some("work/api")),
+            tool_command(Some(&h), "claude", Some("abc-123"), Some("work/api")),
             "claude --name 'work/api' --resume 'abc-123'"
         );
     }
 
     #[test]
-    fn tool_command_non_claude_ignores_args() {
-        assert_eq!(tool_command("opencode", Some("id"), Some("name")), "opencode");
+    fn tool_command_no_harness_falls_back() {
+        assert_eq!(tool_command(None, "opencode", Some("id"), Some("name")), "opencode");
     }
 }

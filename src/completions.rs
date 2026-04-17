@@ -31,7 +31,9 @@ pub fn generate(shell: &str) -> Result<()> {
 
 fn generate_zsh() -> Result<()> {
     let commands = derived_commands();
-    let all_names = Config::load()
+    let config = Config::load().ok();
+    let all_names = config
+        .as_ref()
         .map(|c| {
             c.all_names()
                 .iter()
@@ -39,9 +41,14 @@ fn generate_zsh() -> Result<()> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let harness_names = config
+        .as_ref()
+        .map(|c| c.harness_names())
+        .unwrap_or_default();
     let sessions = Tmux::new(None).list_sessions().unwrap_or_default();
 
     let vertical_list = all_names.join(" ");
+    let harness_list = harness_names.join(" ");
     let session_list: String = sessions
         .iter()
         .map(|(name, _)| name.as_str())
@@ -67,10 +74,19 @@ _muxr() {{
     verticals=({vertical_list})
     sessions=({session_list})
 
+    harnesses=({harness_list})
+
     if (( CURRENT == 2 )); then
         _alternative \
             'commands:command:compadd -a commands' \
-            'verticals:vertical:compadd -a verticals'
+            'verticals:vertical:compadd -a verticals' \
+            'harnesses:harness:compadd -a harnesses'
+        return
+    fi
+
+    # If first arg is a harness, complete with harness subcommands
+    if (( ${{+harnesses[(r)$words[2]]}} )); then
+        compadd upgrade status
         return
     fi
 
@@ -99,7 +115,9 @@ _muxr "$@"
 
 fn generate_bash() -> Result<()> {
     let commands = derived_commands();
-    let verticals = Config::load()
+    let config = Config::load().ok();
+    let verticals = config
+        .as_ref()
         .map(|c| {
             c.all_names()
                 .iter()
@@ -107,9 +125,14 @@ fn generate_bash() -> Result<()> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let harness_names = config
+        .as_ref()
+        .map(|c| c.harness_names())
+        .unwrap_or_default();
     let sessions = Tmux::new(None).list_sessions().unwrap_or_default();
 
     let vertical_list = verticals.join(" ");
+    let harness_list = harness_names.join(" ");
     let command_list: String = commands
         .iter()
         .map(|(name, _)| name.as_str())
@@ -125,10 +148,20 @@ fn generate_bash() -> Result<()> {
     commands="{command_list}"
     verticals="{vertical_list}"
 
+    harnesses="{harness_list}"
+
     if [[ $COMP_CWORD -eq 1 ]]; then
-        COMPREPLY=($(compgen -W "$commands $verticals" -- "$cur"))
+        COMPREPLY=($(compgen -W "$commands $verticals $harnesses" -- "$cur"))
         return
     fi
+
+    # If first arg is a harness, complete with harness subcommands
+    case " $harnesses " in
+        *" $prev "*)
+            COMPREPLY=($(compgen -W "upgrade status" -- "$cur"))
+            return
+            ;;
+    esac
 
     # If first arg is a vertical, complete with session contexts
     local vertical="${{COMP_WORDS[1]}}"
@@ -162,13 +195,19 @@ complete -F _muxr_completions muxr
 
 fn generate_fish() -> Result<()> {
     let commands = derived_commands();
-    let verticals = Config::load()
+    let config = Config::load().ok();
+    let verticals = config
+        .as_ref()
         .map(|c| {
             c.all_names()
                 .iter()
                 .map(|s| s.to_string())
                 .collect::<Vec<_>>()
         })
+        .unwrap_or_default();
+    let harness_names = config
+        .as_ref()
+        .map(|c| c.harness_names())
         .unwrap_or_default();
 
     println!("# muxr fish completions");
@@ -183,6 +222,13 @@ fn generate_fish() -> Result<()> {
     // Verticals -- from runtime config
     for v in &verticals {
         println!("complete -c muxr -n '__fish_use_subcommand' -a '{v}' -d 'Open {v} session'");
+    }
+
+    // Harnesses -- from config + built-ins
+    for h in &harness_names {
+        println!("complete -c muxr -n '__fish_use_subcommand' -a '{h}' -d '{h} harness'");
+        println!("complete -c muxr -n '__fish_seen_subcommand_from {h}' -a 'upgrade' -d 'Restart sessions'");
+        println!("complete -c muxr -n '__fish_seen_subcommand_from {h}' -a 'status' -d 'Show status'");
     }
 
     Ok(())
