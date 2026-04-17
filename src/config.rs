@@ -238,10 +238,16 @@ impl HarnessConfig {
             cmd.push_str(&format!(" --append-system-prompt {}", shell_escape(&joined)));
         }
         if let Some(ref file) = settings.append_system_prompt_file {
-            let expanded = shellexpand::tilde(file);
+            // Absolute/~ paths expand. Relative paths resolve from cwd
+            // (the vertical dir or worktree), passed as-is to claude.
+            let path = if file.starts_with('/') || file.starts_with('~') {
+                shellexpand::tilde(file).to_string()
+            } else {
+                file.clone()
+            };
             cmd.push_str(&format!(
                 " --append-system-prompt-file {}",
-                shell_escape(&expanded)
+                shell_escape(&path)
             ));
         }
         for dir in &settings.add_dirs {
