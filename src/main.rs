@@ -87,23 +87,6 @@ enum Commands {
     External(Vec<String>),
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn resolve_tool_uses_override() {
-        let config: Config = toml::from_str("[verticals]").unwrap();
-        assert_eq!(config.resolve_tool("work", Some("opencode")), "opencode");
-    }
-
-    #[test]
-    fn resolve_tool_falls_back_to_config() {
-        let config: Config = toml::from_str("[verticals]").unwrap();
-        assert_eq!(config.resolve_tool("work", None), "claude");
-    }
-}
-
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let tmux = Tmux::new(cli.server);
@@ -556,4 +539,21 @@ fn cmd_tmux_status(tmux: &Tmux) -> Result<()> {
     print!("#[fg={color}]● #[fg=#E8DDD0]{session_name} #[fg=#3B3639]│ ");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_tool_uses_override() {
+        let config: Config = toml::from_str("[verticals]").unwrap();
+        assert_eq!(config.resolve_tool("work", Some("opencode")), "opencode");
+    }
+
+    #[test]
+    fn resolve_tool_falls_back_to_config() {
+        let config: Config = toml::from_str("[verticals]").unwrap();
+        assert_eq!(config.resolve_tool("work", None), "claude");
+    }
 }

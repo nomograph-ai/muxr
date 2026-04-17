@@ -457,6 +457,7 @@ fn health_bar(pct: u32) -> Vec<Span<'static>> {
     spans
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_table(
     f: &mut ratatui::Frame,
     area: Rect,
@@ -627,6 +628,75 @@ fn draw_table(
     f.render_stateful_widget(table, area, state);
 }
 
+#[allow(clippy::too_many_arguments)]
+fn draw_footer(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    query: &str,
+    filtering: bool,
+    killing: bool,
+    rename_buffer: Option<&str>,
+    rename_error: Option<&str>,
+) {
+    let dim = Style::default().fg(Color::DarkGray);
+    let text = if let Some(buf) = rename_buffer {
+        let mut spans = vec![
+            Span::styled("  rename > ", Style::default().fg(Color::Cyan)),
+            Span::styled(buf.to_string(), Style::default().fg(Color::White)),
+            Span::styled("_", Style::default().fg(Color::Cyan)),
+        ];
+        if let Some(err) = rename_error {
+            spans.push(Span::styled(
+                format!("  {err}"),
+                Style::default().fg(Color::Red),
+            ));
+        } else {
+            spans.push(Span::styled("  enter", dim));
+            spans.push(Span::styled(" commit  ", dim));
+            spans.push(Span::styled("esc", dim));
+            spans.push(Span::styled(" cancel", dim));
+        }
+        Line::from(spans)
+    } else if killing {
+        Line::from(vec![
+            Span::styled("  y", Style::default().fg(Color::Red)),
+            Span::styled(" confirm kill  ", dim),
+            Span::styled("any", dim),
+            Span::styled(" cancel", dim),
+        ])
+    } else if filtering || !query.is_empty() {
+        Line::from(vec![
+            Span::styled("  /", Style::default().fg(Color::Yellow)),
+            Span::styled(query, Style::default().fg(Color::White)),
+            Span::styled("_", Style::default().fg(Color::Yellow)),
+            Span::styled("  esc", dim),
+            Span::styled(" clear", dim),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("  /", dim),
+            Span::styled("filter  ", dim),
+            Span::styled("j/k", dim),
+            Span::styled(" move  ", dim),
+            Span::styled("enter", dim),
+            Span::styled(" select  ", dim),
+            Span::styled("r", dim),
+            Span::styled(" rename  ", dim),
+            Span::styled("d", dim),
+            Span::styled(" kill  ", dim),
+            Span::styled("q", dim),
+            Span::styled(" quit", dim),
+        ])
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray));
+
+    let paragraph = Paragraph::new(text).block(block);
+    f.render_widget(paragraph, area);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -748,70 +818,3 @@ mod tests {
     }
 }
 
-fn draw_footer(
-    f: &mut ratatui::Frame,
-    area: Rect,
-    query: &str,
-    filtering: bool,
-    killing: bool,
-    rename_buffer: Option<&str>,
-    rename_error: Option<&str>,
-) {
-    let dim = Style::default().fg(Color::DarkGray);
-    let text = if let Some(buf) = rename_buffer {
-        let mut spans = vec![
-            Span::styled("  rename > ", Style::default().fg(Color::Cyan)),
-            Span::styled(buf.to_string(), Style::default().fg(Color::White)),
-            Span::styled("_", Style::default().fg(Color::Cyan)),
-        ];
-        if let Some(err) = rename_error {
-            spans.push(Span::styled(
-                format!("  {err}"),
-                Style::default().fg(Color::Red),
-            ));
-        } else {
-            spans.push(Span::styled("  enter", dim));
-            spans.push(Span::styled(" commit  ", dim));
-            spans.push(Span::styled("esc", dim));
-            spans.push(Span::styled(" cancel", dim));
-        }
-        Line::from(spans)
-    } else if killing {
-        Line::from(vec![
-            Span::styled("  y", Style::default().fg(Color::Red)),
-            Span::styled(" confirm kill  ", dim),
-            Span::styled("any", dim),
-            Span::styled(" cancel", dim),
-        ])
-    } else if filtering || !query.is_empty() {
-        Line::from(vec![
-            Span::styled("  /", Style::default().fg(Color::Yellow)),
-            Span::styled(query, Style::default().fg(Color::White)),
-            Span::styled("_", Style::default().fg(Color::Yellow)),
-            Span::styled("  esc", dim),
-            Span::styled(" clear", dim),
-        ])
-    } else {
-        Line::from(vec![
-            Span::styled("  /", dim),
-            Span::styled("filter  ", dim),
-            Span::styled("j/k", dim),
-            Span::styled(" move  ", dim),
-            Span::styled("enter", dim),
-            Span::styled(" select  ", dim),
-            Span::styled("r", dim),
-            Span::styled(" rename  ", dim),
-            Span::styled("d", dim),
-            Span::styled(" kill  ", dim),
-            Span::styled("q", dim),
-            Span::styled(" quit", dim),
-        ])
-    };
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray));
-
-    let paragraph = Paragraph::new(text).block(block);
-    f.render_widget(paragraph, area);
-}
