@@ -7,7 +7,19 @@ include:
       audit_allow_failure: false
       crates_publish: true
 
-stages: [test, build, sign, publish, release]
+stages: [test, build, sign, publish, release, notify]
+
+# Nudge the kits registry to re-sense on tag push, so own-tier updates
+# land in an MR immediately instead of waiting for the twice-daily
+# schedule. See nomograph/pipeline kit-registry@v3.1.0.
+notify-kits:
+  stage: notify
+  rules:
+    - if: $CI_COMMIT_TAG
+  trigger:
+    project: nomograph/kits
+    branch: main
+  # no strategy:depend -- fire and forget. kits has its own lifecycle.
 
 default:
   tags: [storr]
