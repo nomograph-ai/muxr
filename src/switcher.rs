@@ -48,7 +48,12 @@ fn build_entries(config: &Config, tmux: &Tmux) -> Result<Vec<Entry>> {
                 None => (s.name.clone(), String::new()),
             };
             let color = parse_hex_color(config.color_for(&vertical));
-            let health = claude_status::read_health(&s.name);
+            // Only read health for sessions that run a harness (not the muxr control plane)
+            let health = if s.name == "muxr" {
+                None
+            } else {
+                claude_status::read_health(&s.name)
+            };
 
             Entry {
                 vertical,
