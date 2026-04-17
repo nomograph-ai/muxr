@@ -186,10 +186,32 @@ fn cmd_open(tmux: &Tmux, args: &[String], tool_override: Option<&str>) -> Result
         eprintln!("Attaching to {session}");
         tmux.attach(&session)?;
     } else {
-        eprintln!("Creating {session} in {} ({})", dir.display(), tool);
-        config.run_pre_create_hooks(&dir);
-        let tool_cmd = tmux::tool_command(harness.as_ref(), &tool, None, Some(&session));
-        tmux.create_session(&session, &dir, &tool_cmd)?;
+        let vertical = config.verticals.get(name);
+        let use_worktree = vertical.map(|v| v.worktree).unwrap_or(false)
+            && harness.is_some()
+            && tmux::is_git_repo(&dir);
+
+        let session_dir = if use_worktree {
+            let context = if args.len() >= 2 {
+                args[1..].join("/")
+            } else {
+                "default".to_string()
+            };
+            let wt = tmux::create_worktree(&dir, &context)?;
+            eprintln!("Creating {session} in {} (worktree, {})", wt.display(), tool);
+            wt
+        } else {
+            eprintln!("Creating {session} in {} ({})", dir.display(), tool);
+            dir.clone()
+        };
+
+        config.run_pre_create_hooks(&session_dir);
+        let tool_cmd = match (&harness, vertical) {
+            (Some(h), Some(v)) => h.launch_command_with_vertical(Some(&session), None, None, Some(v)),
+            (Some(h), None) => h.launch_command(Some(&session), None, None),
+            _ => tool.clone(),
+        };
+        tmux.create_session(&session, &session_dir, &tool_cmd)?;
         tmux.attach(&session)?;
     }
 
@@ -297,11 +319,30 @@ fn cmd_new(tmux: &Tmux, args: &[String], tool_override: Option<&str>) -> Result<
     } else if config.verticals.contains_key(name) {
         let tool = config.resolve_tool(name, tool_override);
         let harness = config.harness_for(&tool);
+        let vertical = config.verticals.get(name);
         let dir = config.resolve_dir(name)?;
-        config.run_pre_create_hooks(&dir);
-        let tool_cmd = tmux::tool_command(harness.as_ref(), &tool, None, Some(&session));
-        tmux.create_session(&session, &dir, &tool_cmd)?;
-        eprintln!("Created {session} ({})", tool);
+
+        let use_worktree = vertical.map(|v| v.worktree).unwrap_or(false)
+            && harness.is_some()
+            && tmux::is_git_repo(&dir);
+
+        let session_dir = if use_worktree {
+            tmux::create_worktree(&dir, &context)?
+        } else {
+            dir.clone()
+        };
+
+        config.run_pre_create_hooks(&session_dir);
+        let tool_cmd = match (&harness, vertical) {
+            (Some(h), Some(v)) => {
+                h.launch_command_with_vertical(Some(&session), None, None, Some(v))
+            }
+            (Some(h), None) => h.launch_command(Some(&session), None, None),
+            _ => tool.clone(),
+        };
+        tmux.create_session(&session, &session_dir, &tool_cmd)?;
+        let wt_label = if use_worktree { " (worktree)" } else { "" };
+        eprintln!("Created {session} ({tool}){wt_label}");
     } else {
         let names = config.all_names().join(", ");
         anyhow::bail!("Unknown vertical or remote: {name}\nKnown: {names}");
@@ -336,17 +377,44 @@ fn cmd_rename(tmux: &Tmux, name: &str, tool_override: Option<&str>) -> Result<()
     Ok(())
 }
 
-/// Kill a session or all sessions.
+/// Kill a session or all sessions. Cleans up worktrees if configured.
 fn cmd_kill(tmux: &Tmux, name: &str) -> Result<()> {
+    let config = Config::load().ok();
+
+    let kill_one = |sname: &str| {
+        tmux.kill_session(sname).ok();
+        eprintln!("Killed {sname}");
+
+        // Clean up worktree if this vertical uses worktrees
+        if let Some(ref config) = config {
+            let vertical = sname.split('/').next().unwrap_or(sname);
+            let context = sname.split('/').skip(1).collect::<Vec<_>>().join("/");
+            if let Ok(dir) = config.resolve_dir(vertical)
+                && config
+                    .verticals
+                    .get(vertical)
+                    .map(|v| v.worktree)
+                    .unwrap_or(false)
+            {
+                let ctx = if context.is_empty() {
+                    "default"
+                } else {
+                    &context
+                };
+                if let Err(e) = tmux::remove_worktree(&dir, ctx) {
+                    eprintln!("  worktree cleanup: {e}");
+                }
+            }
+        }
+    };
+
     if name == "all" {
         let sessions = tmux.list_sessions()?;
         for (sname, _) in &sessions {
-            tmux.kill_session(sname)?;
-            eprintln!("Killed {sname}");
+            kill_one(sname);
         }
     } else if tmux.session_exists(name) {
-        tmux.kill_session(name)?;
-        eprintln!("Killed {name}");
+        kill_one(name);
     } else {
         eprintln!("Session not found: {name}");
     }
@@ -402,21 +470,34 @@ fn cmd_harness_dispatch(tmux: &Tmux, config: &Config, args: &[String]) -> Result
 
     match sub {
         "upgrade" => {
-            let model = args
-                .iter()
-                .skip(2)
-                .position(|a| a == "--model")
-                .and_then(|i| args.get(i + 3))
-                .map(|s| s.as_str());
-            harness::upgrade(tmux, config, harness_name, &harness, model)
+            let model = find_flag_value(&args[2..], "--model");
+            harness::upgrade(tmux, config, harness_name, &harness, model.as_deref())
         }
+        "model" => {
+            let model = args.get(2).map(|s| s.as_str());
+            harness::model_switch(tmux, config, harness_name, &harness, model)
+        }
+        "compact" => {
+            let threshold = find_flag_value(&args[2..], "--threshold")
+                .and_then(|v| v.parse::<u32>().ok());
+            harness::compact(tmux, config, harness_name, &harness, threshold)
+        }
+        "fork" => harness::fork(tmux, config, harness_name, &harness),
         "status" => harness::status(tmux, config, harness_name, &harness),
         other => {
             anyhow::bail!(
-                "Unknown {harness_name} subcommand: {other}\nAvailable: upgrade, status"
+                "Unknown {harness_name} subcommand: {other}\nAvailable: model, compact, fork, upgrade, status"
             )
         }
     }
+}
+
+/// Extract a flag value from args (e.g., --model opus-4-7 -> Some("opus-4-7")).
+fn find_flag_value(args: &[String], flag: &str) -> Option<String> {
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
 }
 
 /// Generate tmux status-left format string from config verticals.

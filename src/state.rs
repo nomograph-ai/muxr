@@ -5,7 +5,7 @@ use std::process::Command;
 
 use crate::config::{Config, HarnessConfig, SessionDiscovery};
 use crate::remote;
-use crate::tmux::{self, Tmux};
+use crate::tmux::Tmux;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SavedState {
@@ -218,7 +218,10 @@ impl SavedState {
                 }
 
                 let harness = config.harness_for(&s.tool);
-                let tool_cmd = tmux::tool_command(harness.as_ref(), &s.tool, s.session_id.as_deref(), Some(&s.name));
+                let tool_cmd = match &harness {
+                    Some(h) => h.restore_command(Some(&s.name), s.session_id.as_deref()),
+                    None => s.tool.clone(),
+                };
                 tmux.create_session(&s.name, &dir, &tool_cmd)?;
                 eprintln!("  {} -> {}", s.name, s.dir);
                 count += 1;

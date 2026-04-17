@@ -3,7 +3,7 @@
 //! Generic over HarnessConfig -- the same code handles claude, opencode, cursor.
 //! All process management is local only (remote sessions do not participate).
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::process::Command;
 
 use crate::claude_status;
@@ -145,6 +145,158 @@ pub fn status(
         eprintln!("  (no active {harness_name} sessions)");
     }
 
+    Ok(())
+}
+
+/// Switch model on all sessions by sending /model command (no restart).
+pub fn model_switch(
+    tmux: &Tmux,
+    config: &Config,
+    harness_name: &str,
+    harness: &HarnessConfig,
+    model: Option<&str>,
+) -> Result<()> {
+    let model = model.context("Usage: muxr {harness_name} model <model-name>")?;
+    let cmd_template = harness
+        .model_switch_command
+        .as_ref()
+        .context("Harness does not support live model switch")?;
+
+    let cmd = crate::config::interpolate(cmd_template, "model", model);
+    let sessions = tmux.list_sessions()?;
+    let mut switched = 0;
+
+    for (name, _) in &sessions {
+        if name == "muxr" {
+            continue;
+        }
+        let vertical = name.split('/').next().unwrap_or(name);
+        let tool = config.resolve_tool(vertical, None);
+        if tool != harness_name {
+            continue;
+        }
+
+        let target = Tmux::target(name);
+        let _ = Command::new("tmux")
+            .args(["send-keys", "-t", &target, &cmd, "Enter"])
+            .status();
+        eprintln!("  {name}: sent {cmd}");
+        switched += 1;
+    }
+
+    eprintln!("\nSwitched {switched} session(s) to {model}.");
+    Ok(())
+}
+
+/// Compact context on sessions over a threshold.
+pub fn compact(
+    tmux: &Tmux,
+    config: &Config,
+    harness_name: &str,
+    harness: &HarnessConfig,
+    threshold: Option<u32>,
+) -> Result<()> {
+    let threshold = threshold.unwrap_or(80);
+    let cmd = harness
+        .compact_command
+        .as_ref()
+        .context("Harness does not support compact")?;
+
+    let sessions = tmux.list_sessions()?;
+    let mut compacted = 0;
+
+    for (name, _) in &sessions {
+        if name == "muxr" {
+            continue;
+        }
+        let vertical = name.split('/').next().unwrap_or(name);
+        let tool = config.resolve_tool(vertical, None);
+        if tool != harness_name {
+            continue;
+        }
+
+        let health = crate::claude_status::read_health(name);
+        let pct = health.as_ref().map(|h| h.context_pct).unwrap_or(0);
+
+        if pct >= threshold {
+            let target = Tmux::target(name);
+            let _ = Command::new("tmux")
+                .args(["send-keys", "-t", &target, cmd, "Enter"])
+                .status();
+            eprintln!("  {name}: {pct}% -> compacting");
+            compacted += 1;
+        } else {
+            eprintln!("  {name}: {pct}% (under threshold)");
+        }
+    }
+
+    eprintln!("\nCompacted {compacted} session(s) (threshold: {threshold}%).");
+    Ok(())
+}
+
+/// Fork the current session: create a git worktree + new claude session
+/// with --fork-session from the current conversation.
+pub fn fork(
+    tmux: &Tmux,
+    config: &Config,
+    harness_name: &str,
+    harness: &HarnessConfig,
+) -> Result<()> {
+    use anyhow::Context;
+
+    // Get current session info
+    let current = tmux
+        .current_session()
+        .context("Not in a tmux session")?;
+    let vertical = current.split('/').next().unwrap_or(&current);
+    let tool = config.resolve_tool(vertical, None);
+
+    if tool != harness_name {
+        anyhow::bail!("Current session ({current}) is not running {harness_name}");
+    }
+
+    // Discover the session ID to fork from
+    let session_id = state::discover_session_id(tmux, &current, Some(harness))
+        .context("Could not discover session ID to fork from")?;
+
+    // Create a fork name
+    let fork_name = format!("{current}/fork");
+    if tmux.session_exists(&fork_name) {
+        anyhow::bail!("Fork session {fork_name} already exists");
+    }
+
+    // Resolve directory -- use worktree if configured
+    let dir = config.resolve_dir(vertical)?;
+    let v = config.verticals.get(vertical);
+    let use_worktree = v.map(|v| v.worktree).unwrap_or(false) && crate::tmux::is_git_repo(&dir);
+
+    let session_dir = if use_worktree {
+        let context = current
+            .split('/')
+            .skip(1)
+            .collect::<Vec<_>>()
+            .join("/");
+        let fork_ctx = format!("{context}-fork");
+        crate::tmux::create_worktree(&dir, &fork_ctx)?
+    } else {
+        dir.clone()
+    };
+
+    // Build launch command with fork args
+    let mut cmd = harness.launch_command(Some(&fork_name), Some(&session_id), None);
+    for arg in &harness.fork_args {
+        cmd.push(' ');
+        cmd.push_str(arg);
+    }
+
+    tmux.create_session(&fork_name, &session_dir, &cmd)?;
+    eprintln!("Forked {current} -> {fork_name}");
+    eprintln!("  session: {session_id}");
+    if use_worktree {
+        eprintln!("  worktree: {}", session_dir.display());
+    }
+
+    tmux.attach(&fork_name)?;
     Ok(())
 }
 

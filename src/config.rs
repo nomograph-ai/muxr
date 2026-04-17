@@ -34,6 +34,22 @@ pub struct Vertical {
     /// Override default_tool for this vertical.
     #[serde(default)]
     pub tool: Option<String>,
+    /// Create git worktrees for session isolation. Default: true for harness sessions.
+    #[serde(default = "default_true")]
+    pub worktree: bool,
+    /// Effort level for the harness (e.g., "high", "max").
+    #[serde(default)]
+    pub effort: Option<String>,
+    /// Permission mode for the harness (e.g., "auto", "plan").
+    #[serde(default)]
+    pub permission_mode: Option<String>,
+    /// Max budget in USD per session.
+    #[serde(default)]
+    pub max_budget_usd: Option<f64>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// How to discover harness session IDs from running processes.
@@ -68,6 +84,21 @@ pub struct HarnessConfig {
     /// Command to send to the pane on rename. Supports `{name}` interpolation.
     #[serde(default)]
     pub rename_command: Option<String>,
+    /// Command to send for live model switch. Supports `{model}` interpolation.
+    #[serde(default)]
+    pub model_switch_command: Option<String>,
+    /// Command to compact context.
+    #[serde(default)]
+    pub compact_command: Option<String>,
+    /// Command to exit the harness gracefully.
+    #[serde(default)]
+    pub exit_command: Option<String>,
+    /// Args to pass when session ID is missing (fallback resume).
+    #[serde(default)]
+    pub continue_args: Vec<String>,
+    /// Args for forking a session (new UUID from existing conversation).
+    #[serde(default)]
+    pub fork_args: Vec<String>,
     /// How to discover session IDs.
     #[serde(default = "default_discovery_none")]
     pub session_discovery: SessionDiscovery,
@@ -95,6 +126,11 @@ impl HarnessConfig {
             resume_args: vec!["--resume".to_string(), "{session_id}".to_string()],
             model_args: vec!["--model".to_string(), "{model}".to_string()],
             rename_command: Some("/rename {name}".to_string()),
+            model_switch_command: Some("/model {model}".to_string()),
+            compact_command: Some("/compact".to_string()),
+            exit_command: Some("/exit".to_string()),
+            continue_args: vec!["--continue".to_string()],
+            fork_args: vec!["--fork-session".to_string()],
             session_discovery: SessionDiscovery::File {
                 pattern: "~/.claude/sessions/{pid}.json".to_string(),
                 id_key: "sessionId".to_string(),
@@ -134,6 +170,54 @@ impl HarnessConfig {
         parts.join(" ")
     }
 
+    /// Build the resume command for restore. Uses --continue as fallback
+    /// when session ID is lost.
+    pub fn restore_command(
+        &self,
+        session_name: Option<&str>,
+        resume_id: Option<&str>,
+    ) -> String {
+        if resume_id.is_some() {
+            return self.launch_command(session_name, resume_id, None);
+        }
+        // No session ID -- fall back to --continue
+        let mut parts = vec![self.bin.clone()];
+        if let Some(name) = session_name {
+            for arg in &self.args {
+                parts.push(interpolate(arg, "name", name));
+            }
+        }
+        for arg in &self.continue_args {
+            parts.push(arg.clone());
+        }
+        parts.join(" ")
+    }
+
+    /// Build the launch command with vertical-specific settings.
+    pub fn launch_command_with_vertical(
+        &self,
+        session_name: Option<&str>,
+        resume_id: Option<&str>,
+        model: Option<&str>,
+        vertical: Option<&Vertical>,
+    ) -> String {
+        let mut cmd = self.launch_command(session_name, resume_id, model);
+
+        if let Some(v) = vertical {
+            if let Some(ref effort) = v.effort {
+                cmd.push_str(&format!(" --effort {}", shell_escape(effort)));
+            }
+            if let Some(ref mode) = v.permission_mode {
+                cmd.push_str(&format!(" --permission-mode {}", shell_escape(mode)));
+            }
+            if let Some(budget) = v.max_budget_usd {
+                cmd.push_str(&format!(" --max-budget-usd {budget}"));
+            }
+        }
+
+        cmd
+    }
+
     /// Build the rename command to send to the pane.
     pub fn build_rename_command(&self, name: &str) -> Option<String> {
         self.rename_command
@@ -143,7 +227,7 @@ impl HarnessConfig {
 }
 
 /// Interpolate a `{key}` placeholder with a shell-escaped value.
-fn interpolate(template: &str, key: &str, value: &str) -> String {
+pub fn interpolate(template: &str, key: &str, value: &str) -> String {
     let placeholder = format!("{{{key}}}");
     if template.contains(&placeholder) {
         template.replace(&placeholder, &shell_escape(value))
