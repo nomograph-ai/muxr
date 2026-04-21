@@ -503,7 +503,7 @@ dependencies = [
 
 [[package]]
 name = "nomograph-muxr"
-version = "0.9.5"
+version = "0.9.7"
 dependencies = [
  "anyhow",
  "clap",

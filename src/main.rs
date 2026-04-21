@@ -43,7 +43,12 @@ enum Commands {
     /// Create a default config file
     Init,
     /// List active tmux sessions
-    Ls,
+    Ls {
+        /// Show only sessions with a running harness (claude) process. Hides
+        /// panes sitting at a shell prompt with no harness attached.
+        #[arg(long)]
+        active: bool,
+    },
     /// Snapshot sessions before reboot
     Save,
     /// Restore sessions after reboot
@@ -74,6 +79,17 @@ enum Commands {
         /// Session name (e.g., work/default) or "all"
         name: String,
     },
+    /// Retire a session: gracefully /exit the harness, kill the tmux session,
+    /// and remove the worktree if the vertical uses worktrees. Drops the
+    /// session from the saved state so future `muxr restore` won't recreate it.
+    Retire {
+        /// Session name (e.g. tanuki/agentshaped) or "all" to retire every
+        /// tmux session.
+        name: String,
+        /// Keep the git worktree on disk after killing the session.
+        #[arg(long)]
+        keep_worktree: bool,
+    },
     /// Interactive session switcher (TUI)
     Switch,
     /// Generate shell completions (zsh, bash, fish)
@@ -93,7 +109,7 @@ fn main() -> Result<()> {
 
     match cli.command {
         Some(Commands::Init) => init::init(),
-        Some(Commands::Ls) => cmd_ls(&tmux),
+        Some(Commands::Ls { active }) => cmd_ls(&tmux, active),
         Some(Commands::Save) => {
             let config = Config::load()?;
             state::SavedState::save(&config, &tmux)
@@ -108,6 +124,10 @@ fn main() -> Result<()> {
         Some(Commands::New { tool, args }) => cmd_new(&tmux, &args, tool.as_deref()),
         Some(Commands::Rename { name }) => cmd_rename(&tmux, &name, cli.tool.as_deref()),
         Some(Commands::Kill { name }) => cmd_kill(&tmux, &name),
+        Some(Commands::Retire {
+            name,
+            keep_worktree,
+        }) => cmd_retire(&tmux, &name, keep_worktree),
         Some(Commands::Completions { shell }) => completions::generate(&shell),
         Some(Commands::External(args)) => {
             let config = Config::load()?;
@@ -437,24 +457,200 @@ fn cmd_kill(tmux: &Tmux, name: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_ls(tmux: &Tmux) -> Result<()> {
+/// Retire a session cleanly:
+/// 1. If a harness is running in the pane, send `/exit` and wait for the
+///    process to terminate (up to 10s, then SIGKILL).
+/// 2. Kill the tmux session.
+/// 3. Remove the associated git worktree unless `keep_worktree` is set.
+/// 4. Drop the session from `state.json` so `muxr restore` won't resurrect it.
+///
+/// This is the counterpart to `new`: retire deletes everything new creates.
+fn cmd_retire(tmux: &Tmux, name: &str, keep_worktree: bool) -> Result<()> {
+    let config = Config::load().ok();
+
+    let retire_one = |sname: &str| {
+        // 1. Graceful harness exit if something is running in the pane.
+        if let Some(ref cfg) = config {
+            let vertical = sname.split('/').next().unwrap_or(sname);
+            let tool = cfg.resolve_tool(vertical, None);
+            if let Some(harness) = cfg.harness_for(&tool)
+                && state::has_harness_process(tmux, sname, &harness.bin)
+            {
+                let target = Tmux::target(sname);
+                let _ = std::process::Command::new("tmux")
+                    .args(["send-keys", "-t", &target, "/exit", "Enter"])
+                    .status();
+
+                // Wait briefly for the harness process to exit before we kill
+                // the tmux session out from under it. Claude persists state
+                // continuously, so a few seconds is plenty; not waiting risks
+                // losing the last tool-call worth of working memory.
+                let shell_pid = tmux.pane_pid(sname).ok().flatten();
+                let harness_pid = shell_pid.and_then(|sp| {
+                    state::descendant_pids(sp)
+                        .into_iter()
+                        .find(|pid| harness_proc_match(*pid, &harness.bin))
+                });
+                if let Some(pid) = harness_pid {
+                    wait_for_pid_exit(pid, 10);
+                }
+            }
+        }
+
+        // 2. Kill the tmux session.
+        tmux.kill_session(sname).ok();
+
+        // 3. Remove the worktree if configured and not opted-out.
+        if !keep_worktree
+            && let Some(ref cfg) = config
+        {
+            let vertical = sname.split('/').next().unwrap_or(sname);
+            let context = sname.split('/').skip(1).collect::<Vec<_>>().join("/");
+            let uses_worktree = cfg
+                .verticals
+                .get(vertical)
+                .map(|v| v.worktree)
+                .unwrap_or(false);
+            if uses_worktree
+                && let Ok(dir) = cfg.resolve_dir(vertical)
+            {
+                let ctx = if context.is_empty() {
+                    "default"
+                } else {
+                    &context
+                };
+                // Main checkout ("default") is NOT a worktree for any vertical.
+                // remove_worktree is no-op-safe in that case, but guard anyway
+                // so we don't accidentally prune the primary checkout.
+                if ctx != "default"
+                    && let Err(e) = tmux::remove_worktree(&dir, ctx)
+                {
+                    eprintln!("  worktree cleanup: {e}");
+                }
+            }
+        }
+
+        eprintln!("Retired {sname}");
+    };
+
+    if name == "all" {
+        let sessions = tmux.list_sessions()?;
+        for (sname, _) in &sessions {
+            retire_one(sname);
+        }
+    } else if tmux.session_exists(name) {
+        retire_one(name);
+    } else {
+        eprintln!("Session not found: {name}");
+        return Ok(());
+    }
+
+    // Refresh state.json from post-retire tmux state. Retired sessions no
+    // longer exist in tmux, so `save` naturally excludes them — no manual
+    // list-editing required.
+    if let Some(ref cfg) = config
+        && let Err(e) = state::SavedState::save(cfg, tmux)
+    {
+        eprintln!("  state.json refresh: {e}");
+    }
+
+    Ok(())
+}
+
+/// Wait up to `timeout_secs` for a PID to exit. Escalates to SIGKILL if
+/// the process is still alive when the timeout elapses. Stderr from
+/// `kill -0` polls is suppressed — when the pid is gone the helper prints
+/// "No such process" which is not an error condition here.
+fn wait_for_pid_exit(pid: u32, timeout_secs: u32) {
+    use std::process::Stdio;
+    for _ in 0..timeout_secs * 10 {
+        let alive = std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !alive {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    eprintln!("  process {pid} did not exit, sending SIGKILL");
+    let _ = std::process::Command::new("kill")
+        .args(["-9", &pid.to_string()])
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// Check if a PID is running the named harness binary. Matches against full
+/// argv, not just `comm`, because node-based harnesses (claude-code) run as
+/// `node /path/to/claude …` where comm is `node`.
+fn harness_proc_match(pid: u32, bin: &str) -> bool {
+    use std::process::Stdio;
+    let suffix = format!("/{bin}");
+    std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "args="])
+        .stderr(Stdio::null())
+        .output()
+        .map(|o| {
+            let args = String::from_utf8_lossy(&o.stdout);
+            args.split_whitespace()
+                .any(|tok| tok == bin || tok.ends_with(&suffix))
+        })
+        .unwrap_or(false)
+}
+
+fn cmd_ls(tmux: &Tmux, active_only: bool) -> Result<()> {
     let config = Config::load().ok();
     let sessions = tmux.list_sessions()?;
-    if sessions.is_empty() {
-        eprintln!("No active tmux sessions.");
-    } else {
-        for (name, path) in &sessions {
-            let vertical = name.split('/').next().unwrap_or(name);
-            let is_remote = config
-                .as_ref()
-                .map(|c| c.is_remote(vertical))
-                .unwrap_or(false);
 
-            if is_remote {
-                println!("  {name}  (remote)");
-            } else {
-                println!("  {name}  ({path})");
+    // Pre-resolve harness for each vertical so we can detect running harness
+    // processes when --active is requested. Done once outside the loop since
+    // Config::harness_for is a map lookup but feels cheaper to cache.
+    let harness_for = |vertical: &str| -> Option<config::HarnessConfig> {
+        let cfg = config.as_ref()?;
+        let tool = cfg.resolve_tool(vertical, None);
+        cfg.harness_for(&tool)
+    };
+
+    let mut shown = 0;
+    for (name, path) in &sessions {
+        let vertical = name.split('/').next().unwrap_or(name);
+
+        if active_only {
+            // Skip muxr control-plane sessions and any session without a
+            // running harness process. The detection mirrors
+            // harness::upgrade's check, so --active and `upgrade` target
+            // the same set.
+            if name == "muxr" {
+                continue;
             }
+            let Some(harness) = harness_for(vertical) else {
+                continue;
+            };
+            if !state::has_harness_process(tmux, name, &harness.bin) {
+                continue;
+            }
+        }
+
+        let is_remote = config
+            .as_ref()
+            .map(|c| c.is_remote(vertical))
+            .unwrap_or(false);
+
+        if is_remote {
+            println!("  {name}  (remote)");
+        } else {
+            println!("  {name}  ({path})");
+        }
+        shown += 1;
+    }
+
+    if shown == 0 {
+        if active_only {
+            eprintln!("No active harness sessions.");
+        } else {
+            eprintln!("No active tmux sessions.");
         }
     }
     Ok(())

@@ -2,6 +2,33 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.9.7] - 2026-04-21
+
+### Added
+- `muxr ls --active` filters to sessions with a running harness process.
+  Hides panes sitting at a shell prompt with nothing attached. The muxr
+  control-plane session is also filtered out. Same detection as
+  `muxr claude upgrade`, so the two commands target the same set.
+- `muxr retire <session>` is the counterpart to `muxr new`: gracefully
+  `/exit`s the harness (up to 10s, then SIGKILL), kills the tmux
+  session, removes the git worktree when the vertical uses worktrees,
+  and refreshes `state.json` so `muxr restore` won't recreate it.
+  `retire all` retires every session. `--keep-worktree` skips the
+  worktree deletion for the edge case where you want the tree on disk.
+  Main checkouts (`<vertical>/default`) never have their working tree
+  removed — only worktree-shaped contexts.
+
+### Fixed
+- Harness-process detection matches against full argv, not just `comm`.
+  Node-based harnesses (claude-code) run as `node /path/to/claude …`
+  where `comm` is `node`, so the previous comm-based check silently
+  reported "no claude process" for every session and made
+  `muxr claude upgrade` a no-op. The fix restores upgrade behavior and
+  powers the new `ls --active` and `retire` commands.
+- `wait_for_exit` polls in `harness::upgrade` no longer leak "No such
+  process" to stderr once the pid is gone. The poll is a normal exit
+  signal, not an error.
+
 ## [v0.4.1] - 2026-04-02
 
 ### Added

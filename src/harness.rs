@@ -4,7 +4,7 @@
 //! All process management is local only (remote sessions do not participate).
 
 use anyhow::{Context, Result};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use crate::claude_status;
 use crate::config::{Config, HarnessConfig};
@@ -301,13 +301,19 @@ pub fn fork(
 }
 
 /// Check if a PID is running a specific binary.
+///
+/// Matches against full argv -- node-based harnesses (claude-code) run
+/// as `node /path/to/claude ...` where comm is `node`.
 fn is_harness_process(pid: u32, bin: &str) -> bool {
+    let suffix = format!("/{bin}");
     Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "comm="])
+        .args(["-p", &pid.to_string(), "-o", "args="])
         .output()
         .map(|o| {
-            let comm = String::from_utf8_lossy(&o.stdout);
-            comm.trim().ends_with(bin)
+            let args_str = String::from_utf8_lossy(&o.stdout);
+            args_str
+                .split_whitespace()
+                .any(|tok| tok == bin || tok.ends_with(&suffix))
         })
         .unwrap_or(false)
 }
@@ -315,9 +321,12 @@ fn is_harness_process(pid: u32, bin: &str) -> bool {
 /// Wait for a process to exit, escalating to SIGKILL after timeout.
 fn wait_for_exit(pid: u32, timeout_secs: u32) {
     for _ in 0..timeout_secs * 10 {
-        // Check if still alive
+        // Check if still alive. Suppress stderr -- when pid is gone,
+        // `kill -0` prints "No such process" which is not an error condition
+        // for this polling check.
         let alive = Command::new("kill")
             .args(["-0", &pid.to_string()])
+            .stderr(Stdio::null())
             .status()
             .map(|s| s.success())
             .unwrap_or(false);

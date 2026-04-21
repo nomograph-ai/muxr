@@ -88,18 +88,26 @@ pub fn discover_session_id(
 }
 
 /// Check if a harness process is running in a tmux session.
+///
+/// Matches against the full argv (not just comm) because node-based
+/// harnesses like claude-code run as `node /path/to/claude ...` -- the
+/// executable's comm is `node`, but one of the args ends with `/claude`.
 #[allow(dead_code)] // used by harness.rs and switcher.rs
 pub fn has_harness_process(tmux: &Tmux, tmux_session: &str, bin: &str) -> bool {
     let Some(Ok(Some(shell_pid))) = Some(tmux.pane_pid(tmux_session)) else {
         return false;
     };
+    let suffix = format!("/{bin}");
     for pid in descendant_pids(shell_pid) {
         if let Ok(output) = Command::new("ps")
-            .args(["-p", &pid.to_string(), "-o", "comm="])
+            .args(["-p", &pid.to_string(), "-o", "args="])
             .output()
         {
-            let comm = String::from_utf8_lossy(&output.stdout);
-            if comm.trim().ends_with(bin) {
+            let args_str = String::from_utf8_lossy(&output.stdout);
+            if args_str
+                .split_whitespace()
+                .any(|tok| tok == bin || tok.ends_with(&suffix))
+            {
                 return true;
             }
         }
