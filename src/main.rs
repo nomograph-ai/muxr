@@ -258,10 +258,41 @@ fn cmd_open_campaign(
     }
 
     let composed = primitives::compose_prompt(campaign, &campaign_body, &session_body);
-    settings
-        .append_system_prompt
-        .get_or_insert_with(Vec::new)
-        .push(composed);
+
+    // Claude Code rejects --append-system-prompt and --append-system-prompt-file
+    // together. Also, multi-line content via shell send-keys breaks shell
+    // parsing. Solution: resolve any configured HARNESS.md-style file,
+    // combine with the composed campaign+session prompt, write to a single
+    // temp file, pass only --append-system-prompt-file.
+    let harness_md_content = if let Some(ref file) = settings.append_system_prompt_file {
+        let expanded = shellexpand::tilde(file).to_string();
+        let path = if expanded.starts_with('/') {
+            std::path::PathBuf::from(expanded)
+        } else {
+            harness_dir.join(&expanded)
+        };
+        std::fs::read_to_string(&path).unwrap_or_default()
+    } else {
+        String::new()
+    };
+
+    let full_prompt = if harness_md_content.trim().is_empty() {
+        composed
+    } else {
+        format!("{}\n\n---\n\n{}", harness_md_content.trim_end(), composed)
+    };
+
+    let tmp_path = std::env::temp_dir().join(format!(
+        "muxr-prompt-{}-{}-{}.md",
+        harness_name,
+        campaign,
+        session_basename
+    ));
+    std::fs::write(&tmp_path, &full_prompt)?;
+
+    // Clear the inline and replace the file with our composed temp file.
+    settings.append_system_prompt = None;
+    settings.append_system_prompt_file = Some(tmp_path.to_string_lossy().to_string());
 
     for path in &campaign_data.paths {
         let expanded = primitives::expand_home(path);

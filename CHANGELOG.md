@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v1.1.1] - 2026-04-24
+
+### Fixed
+- Campaign launch now composes HARNESS.md + campaign body + session body
+  into a single temp file and passes it via --append-system-prompt-file.
+  Previous v1.0+/1.1.0 passed both --append-system-prompt (inline) and
+  --append-system-prompt-file (config HARNESS.md), which Claude rejects:
+  "Cannot use both". Also the multi-line inline value tripped tmux
+  send-keys shell parsing (quote> prompts).
+  - Temp file location: `${TMPDIR}/muxr-prompt-<harness>-<campaign>-<date>.md`
+  - Session launch is now a single clean `claude ... --append-system-prompt-file <path> ...` invocation.
+
 ## [v1.1.0] - 2026-04-24
 
 ### Added
