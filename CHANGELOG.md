@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v1.0.4] - 2026-04-24
+
+### Added
+- Tab completion for campaigns. `muxr <harness> <TAB>` now offers the
+  campaign slugs that actually exist on disk for that harness
+  (read from `<harness-dir>/campaigns/*/campaign.md`), not just active
+  tmux session contexts.
+- Tool subcommand completions updated to include `compact` and `model`
+  alongside existing `upgrade` and `status`.
+
+### Changed
+- Shell completions use the new vocabulary: `harnesses` (was "verticals")
+  and `tools` (was built-in harness). Internal variable renames only;
+  user-facing behavior is arg-positional, unchanged.
+
 ## [v1.0.3] - 2026-04-24
 
 ### Fixed
