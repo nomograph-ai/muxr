@@ -5,6 +5,7 @@ mod completions;
 mod config;
 mod harness;
 mod init;
+mod primitives;
 mod remote;
 mod state;
 mod switcher;
@@ -183,14 +184,32 @@ fn cmd_open(tmux: &Tmux, args: &[String], tool_override: Option<&str>) -> Result
         anyhow::bail!("Unknown vertical or remote: {name}\nKnown: {names}");
     }
 
+    let dir = config.resolve_dir(name)?;
+
+    // Campaign/session primitives: if args[1] names a real campaign
+    // (campaigns/<name>/campaign.md exists), route to the v1 composition
+    // path. Otherwise fall back to legacy <vertical>/<context> behavior.
+    if args.len() >= 2 {
+        let maybe_campaign = &args[1];
+        let campaign_md = dir
+            .join("campaigns")
+            .join(maybe_campaign)
+            .join("campaign.md");
+        if campaign_md.is_file() {
+            let date = args
+                .get(2)
+                .cloned()
+                .unwrap_or_else(primitives::today);
+            return cmd_open_campaign(tmux, &config, name, maybe_campaign, &date);
+        }
+    }
+
     let session = if args.len() >= 2 {
         let context = args[1..].join("/");
         format!("{name}/{context}")
     } else {
         format!("{name}/default")
     };
-
-    let dir = config.resolve_dir(name)?;
 
     if tmux.session_exists(&session) {
         eprintln!("Attaching to {session}");
@@ -210,6 +229,104 @@ fn cmd_open(tmux: &Tmux, args: &[String], tool_override: Option<&str>) -> Result
         tmux.attach(&session)?;
     }
 
+    Ok(())
+}
+
+/// Open or attach to a campaign session: muxr <harness> <campaign> [<date>]
+///
+/// Resolves `campaigns/<campaign>/sessions/<date>[-<suffix>].md`, scaffolding
+/// from `campaigns/TEMPLATE/sessions/TEMPLATE.md` if no same-day file exists.
+/// Composes system prompt from the campaign body + session body; passes each
+/// campaign `paths:` entry as `--add-dir`.
+fn cmd_open_campaign(
+    tmux: &Tmux,
+    config: &Config,
+    harness_name: &str,
+    campaign: &str,
+    date: &str,
+) -> Result<()> {
+    let harness_dir = config.resolve_dir(harness_name)?;
+    let campaign_md = primitives::campaign_file(&harness_dir, campaign)?;
+    let session_path =
+        primitives::resolve_or_scaffold_session(&harness_dir, campaign, date)?;
+
+    let session_basename = session_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(date);
+    let session_name = format!("{harness_name}/{campaign}/{session_basename}");
+
+    if tmux.session_exists(&session_name) {
+        eprintln!("Attaching to {session_name}");
+        tmux.attach(&session_name)?;
+        return Ok(());
+    }
+
+    let tool = config.resolve_tool(harness_name, None);
+    let tool_config = config.harness_for(&tool);
+    let vertical = config.verticals.get(harness_name);
+
+    // Start from the vertical's existing launch settings; layer campaign
+    // paths and the composed prompt on top.
+    let mut settings = vertical
+        .map(|v| v.harness.clone())
+        .unwrap_or_default();
+
+    let (campaign_data, campaign_body) = primitives::load_campaign(&campaign_md)?;
+    let (session_data, session_body) = primitives::load_session(&session_path)?;
+
+    // Schema validation: session's campaign must match requested campaign.
+    if session_data.campaign != campaign {
+        anyhow::bail!(
+            "Session file {} declares campaign '{}' but was opened as '{}'.",
+            session_path.display(),
+            session_data.campaign,
+            campaign
+        );
+    }
+    if !session_data.entrypoint.is_empty() {
+        eprintln!("  entrypoint: {}", session_data.entrypoint);
+    }
+
+    let composed = primitives::compose_prompt(campaign, &campaign_body, &session_body);
+    settings
+        .append_system_prompt
+        .get_or_insert_with(Vec::new)
+        .push(composed);
+
+    for path in &campaign_data.paths {
+        let expanded = primitives::expand_home(path);
+        if !settings.add_dirs.iter().any(|d| d == &expanded) {
+            settings.add_dirs.push(expanded);
+        }
+    }
+
+    let session_dir = harness_dir.clone();
+    config.run_pre_create_hooks(&session_dir);
+
+    let tool_cmd = match &tool_config {
+        Some(h) => {
+            h.launch_command_with_settings(Some(&session_name), None, None, &settings)
+        }
+        None => tool.clone(),
+    };
+
+    eprintln!(
+        "Creating {session_name} in {} ({})",
+        session_dir.display(),
+        tool
+    );
+    if !campaign_data.synthesist_trees.is_empty() {
+        eprintln!(
+            "  synthesist trees: {}",
+            campaign_data.synthesist_trees.join(", ")
+        );
+    }
+    if !campaign_data.paths.is_empty() {
+        eprintln!("  paths: {} added as --add-dir", campaign_data.paths.len());
+    }
+    tmux.create_session(&session_name, &session_dir, &tool_cmd)?;
+    tmux.attach(&session_name)?;
     Ok(())
 }
 

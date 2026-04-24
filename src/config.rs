@@ -41,7 +41,7 @@ pub struct Vertical {
 
 /// Settings passed to the harness on launch. These are tool-specific
 /// flags that muxr passes through -- muxr does not interpret them.
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
 pub struct HarnessLaunchSettings {
     /// Effort level (e.g., "high", "max").
     #[serde(default)]
