@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v1.1.0] - 2026-04-24
+
+### Added
+- **Switchboard.** `muxr <harness>` with no campaign arg launches the
+  per-harness switchboard -- one always-available AI session whose job
+  is to orchestrate work without the human memorizing muxr commands.
+  Auto-scaffolded as `campaigns/_switchboard/` on first launch.
+  - Purpose-split:
+    - `muxr` -- bare control-plane shell
+    - `muxr <harness>` -- harness switchboard (Claude, meta-scope)
+    - `muxr <harness> <campaign>` -- campaign session (Claude, work)
+  - The switchboard classifies intent ("I want to work on X") into
+    action (scaffold/launch a campaign, report status, archive) and
+    delegates real work to campaign sessions.
+
+### Removed
+- `muxr new <harness> <args>` subcommand. Creating detached sessions
+  without attaching is obsolete: campaigns scaffold automatically on
+  first launch, and the switchboard handles multi-session orchestration.
+- `LaunchSettings.effort`, `.permission_mode`, `.max_budget_usd` config
+  fields. Never wired up. Removed from serde surface.
+
+### Changed
+- Campaign tab completion filters slugs beginning with `_`. The
+  switchboard reserved slug doesn't clutter `muxr <harness> <TAB>`.
+
 ## [v1.0.5] - 2026-04-24
 
 ### Changed (breaking vs v1.0.2/1.0.3/1.0.4 only)

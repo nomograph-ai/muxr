@@ -90,6 +90,68 @@ pub fn campaign_file(harness_dir: &Path, campaign: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Reserved campaign slug for the harness switchboard. One per harness.
+/// Launched by `muxr <harness>` with no campaign arg.
+pub const SWITCHBOARD: &str = "_switchboard";
+
+/// Scaffold the switchboard campaign for a harness if it doesn't exist.
+///
+/// The switchboard is the per-harness orchestrator AI. It lives at
+/// `campaigns/_switchboard/` and gets a specific persona + bootstrap
+/// entrypoint, distinct from regular campaign scaffolding.
+pub fn scaffold_switchboard(harness_dir: &Path) -> Result<PathBuf> {
+    let campaign_dir = harness_dir.join("campaigns").join(SWITCHBOARD);
+    let sessions_dir = campaign_dir.join("sessions");
+    fs::create_dir_all(&sessions_dir)?;
+
+    let campaign_md = campaign_dir.join("campaign.md");
+    if !campaign_md.is_file() {
+        let harness_name = harness_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("harness");
+        let content = format!(
+            "---\nsynthesist_trees: []\npaths: []\n---\n\n\
+             # {harness_name} switchboard\n\n\
+             ## What this is\n\
+             The per-harness orchestrator. One AI session whose job is to \
+             help the human spawn, triage, archive, and navigate campaigns \
+             in this harness without memorizing muxr commands. Scope is \
+             this harness only -- cross-harness work happens at the \
+             control-plane shell.\n\n\
+             ## How to behave\n\
+             - Classify intent fast. Propose, don't interrogate.\n\
+             - \"I want to work on X\" -> glob campaigns/*/ to see what \
+             exists; if X is there, run `muxr {harness_name} X` to launch \
+             it in a new tmux session (via Bash). If not, propose paths \
+             from the add_dirs and run the scaffold launch.\n\
+             - \"What's going on\" -> `synthesist status`, `muxr ls --active`, \
+             summarize.\n\
+             - Delegate actual work to campaign sessions. This pane is a \
+             dispatcher, not a work pane. Keep conversations short.\n\
+             - /serialize rarely here -- the switchboard isn't a work \
+             session. Update its log only when the harness itself changed \
+             (new campaign added, old one archived, structural shift).\n"
+        );
+        fs::write(&campaign_md, content)?;
+    }
+
+    // Seed today's session if missing
+    let today = today();
+    let session_path = sessions_dir.join(format!("{today}.md"));
+    if !session_path.exists() {
+        let content = format!(
+            "---\ncampaign: {SWITCHBOARD}\nentrypoint: \"Switchboard ready. First-glance: run `synthesist status` and ls campaigns/ so you know what's live. Then wait for the human's intent.\"\n---\n\n\
+             # Switchboard {today}\n\n\
+             ## {today}\n\
+             Switchboard session opened.\n"
+        );
+        fs::write(&session_path, content)?;
+    }
+
+    Ok(campaign_md)
+}
+
 /// Scaffold a stub campaign + a bootstrap session file that tells Claude
 /// to onboard the human conversationally.
 ///

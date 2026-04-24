@@ -60,16 +60,6 @@ enum Commands {
     /// Claude Code statusline (reads JSON from stdin, outputs ANSI)
     #[command(name = "claude-status")]
     ClaudeStatus,
-    /// Create a session in the background (don't attach)
-    New {
-        /// Override the default tool (e.g., --tool opencode)
-        #[arg(long)]
-        tool: Option<String>,
-
-        /// Vertical and context (e.g., work api auth)
-        #[arg(num_args = 1..)]
-        args: Vec<String>,
-    },
     /// Rename the current session
     Rename {
         /// New name for the current session
@@ -119,7 +109,6 @@ fn main() -> Result<()> {
         Some(Commands::TmuxStatus) => cmd_tmux_status(&tmux),
         Some(Commands::ClaudeStatus) => claude_status::run(&tmux),
         Some(Commands::Switch) => cmd_switch(&tmux),
-        Some(Commands::New { tool, args }) => cmd_new(&tmux, &args, tool.as_deref()),
         Some(Commands::Rename { name }) => cmd_rename(&tmux, &name, cli.tool.as_deref()),
         Some(Commands::Kill { name }) => cmd_kill(&tmux, &name),
         Some(Commands::Retire { name }) => cmd_retire(&tmux, &name),
@@ -181,18 +170,23 @@ fn cmd_open(tmux: &Tmux, args: &[String], tool_override: Option<&str>) -> Result
         anyhow::bail!("Unknown harness or remote: {name}\nKnown: {names}");
     }
 
-    // Every launch requires a campaign. No more legacy <harness>/<context>.
-    let campaign = args.get(1).with_context(|| {
-        format!(
-            "Usage: muxr {name} <campaign> [<date>]\n\
-             Campaign is required. List campaigns: muxr {name} ls"
-        )
-    })?;
+    let dir = config.resolve_dir(name)?;
+
+    // No campaign arg -> route to the harness switchboard (auto-scaffold
+    // on first launch).
+    let switchboard_slug: String;
+    let campaign: &str = if let Some(arg) = args.get(1) {
+        arg.as_str()
+    } else {
+        primitives::scaffold_switchboard(&dir)?;
+        switchboard_slug = primitives::SWITCHBOARD.to_string();
+        &switchboard_slug
+    };
+
     let date = args
         .get(2)
         .cloned()
         .unwrap_or_else(primitives::today);
-    // tool_override propagates through config.resolve_tool inside cmd_open_campaign
     let _ = tool_override;
     cmd_open_campaign(tmux, &config, name, campaign, &date)
 }
@@ -372,59 +366,6 @@ fn cmd_remote_ls(remote: &config::Remote, remote_name: &str) -> Result<()> {
             _ => println!("    (no tmux sessions)"),
         }
     }
-    Ok(())
-}
-
-/// Create a session in the background without attaching.
-fn cmd_new(tmux: &Tmux, args: &[String], tool_override: Option<&str>) -> Result<()> {
-    let config = Config::load()?;
-    let name = &args[0];
-
-    let context = if args.len() >= 2 {
-        args[1..].join("/")
-    } else {
-        "default".to_string()
-    };
-
-    let session = format!("{name}/{context}");
-
-    if tmux.session_exists(&session) {
-        eprintln!("{session} already exists");
-        return Ok(());
-    }
-
-    if config.is_remote(name) {
-        let remote = config.remote(name).context("Remote not found")?;
-        let instance = remote.instance_name(&context);
-        if let Err(e) = remote::bootstrap_claude_config(remote, &instance) {
-            eprintln!("  Bootstrap warning: {e}");
-        }
-        let connect_cmd = remote::connect_command(remote, &instance, &context)?;
-        let home = dirs::home_dir().context("No home directory")?;
-        tmux.create_session(&session, &home, &connect_cmd)?;
-        eprintln!("Created {session} -> {instance} (remote)");
-    } else if config.harnesses.contains_key(name) {
-        let tool = config.resolve_tool(name, tool_override);
-        let tool_def = config.tool_for(&tool);
-        let harness = config.harnesses.get(name);
-        let dir = config.resolve_dir(name)?;
-        let session_dir = dir.clone();
-
-        config.run_pre_create_hooks(&session_dir);
-        let tool_cmd = match (&tool_def, harness) {
-            (Some(t), Some(h)) => {
-                t.launch_command_with_settings(Some(&session), None, None, &h.launch)
-            }
-            (Some(t), None) => t.launch_command(Some(&session), None, None),
-            _ => tool.clone(),
-        };
-        tmux.create_session(&session, &session_dir, &tool_cmd)?;
-        eprintln!("Created {session} ({tool})");
-    } else {
-        let names = config.all_names().join(", ");
-        anyhow::bail!("Unknown harness or remote: {name}\nKnown: {names}");
-    }
-
     Ok(())
 }
 

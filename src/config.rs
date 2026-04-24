@@ -39,19 +39,10 @@ pub struct Harness {
     pub launch: LaunchSettings,
 }
 
-/// Settings passed to the harness on launch. These are tool-specific
-/// flags that muxr passes through -- muxr does not interpret them.
+/// Settings passed to the tool on launch. Muxr passes these through
+/// to the runtime -- it does not interpret them.
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
 pub struct LaunchSettings {
-    /// Effort level (e.g., "high", "max").
-    #[serde(default)]
-    pub effort: Option<String>,
-    /// Permission mode (e.g., "auto", "plan").
-    #[serde(default)]
-    pub permission_mode: Option<String>,
-    /// Max budget in USD per session.
-    #[serde(default)]
-    pub max_budget_usd: Option<f64>,
     /// Text appended to the system prompt. Multiple entries joined with newlines.
     #[serde(default)]
     pub append_system_prompt: Option<Vec<String>>,
@@ -217,15 +208,6 @@ impl Tool {
     ) -> String {
         let mut cmd = self.launch_command(session_name, resume_id, model);
 
-        if let Some(ref effort) = settings.effort {
-            cmd.push_str(&format!(" --effort {}", shell_escape(effort)));
-        }
-        if let Some(ref mode) = settings.permission_mode {
-            cmd.push_str(&format!(" --permission-mode {}", shell_escape(mode)));
-        }
-        if let Some(budget) = settings.max_budget_usd {
-            cmd.push_str(&format!(" --max-budget-usd {budget}"));
-        }
         if let Some(ref prompts) = settings.append_system_prompt {
             let joined = prompts.join("\n");
             cmd.push_str(&format!(" --append-system-prompt {}", shell_escape(&joined)));

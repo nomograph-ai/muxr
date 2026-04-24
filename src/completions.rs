@@ -27,6 +27,7 @@ fn campaigns_by_harness(config: &Config) -> BTreeMap<String, Vec<String>> {
             .filter(|e| e.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
             .filter_map(|e| e.file_name().into_string().ok())
             .filter(|name| name != "TEMPLATE")
+            .filter(|name| !name.starts_with('_'))
             .filter(|name| {
                 campaigns_dir.join(name).join("campaign.md").is_file()
             })
