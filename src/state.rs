@@ -140,6 +140,14 @@ impl SavedState {
         let mut saved = Vec::new();
 
         for (name, path) in sessions {
+            // Skip the muxr control plane -- it's a bare shell for typing
+            // muxr commands, not a work session. Recording it would cause
+            // restore to relaunch claude inside it (tool defaults to the
+            // config's default_tool), which is not what this pane is for.
+            if name == "muxr" {
+                continue;
+            }
+
             let vertical = name.split('/').next().unwrap_or(&name);
 
             // Detect if this is a remote proxy session
@@ -208,6 +216,10 @@ impl SavedState {
 
         let mut count = 0;
         for s in &state.sessions {
+            // Defense: never restore the control plane as a tool session.
+            if s.name == "muxr" {
+                continue;
+            }
             if tmux.session_exists(&s.name) {
                 eprintln!("  {} -- already exists, skipping", s.name);
                 continue;

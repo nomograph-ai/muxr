@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v1.0.3] - 2026-04-24
+
+### Fixed
+- `muxr save` no longer records the `muxr` control-plane session, and
+  `muxr restore` skips it defensively. The control plane is a bare
+  shell for typing muxr commands; recording it caused restore to
+  relaunch claude in that pane (since the implicit tool defaulted to
+  the config's default_tool). Control plane is now ephemeral -- just
+  type `muxr` to re-open it.
+
 ## [v1.0.2] - 2026-04-24
 
 ### Added
