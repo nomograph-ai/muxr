@@ -2,6 +2,61 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v1.0.0] - 2026-04-24
+
+First stable release. Muxr graduates from tmux session manager to
+opinionated harness manager with first-class campaign/session primitives.
+
+### Added
+- Campaign/session primitives. A **campaign** is a long-lived body of
+  work; a **session** is an ephemeral episode. Files live at
+  `campaigns/<slug>/campaign.md` and
+  `campaigns/<slug>/sessions/<date>[-<suffix>].md`.
+- `muxr <harness> <campaign>` launches today's session for a campaign.
+  If the session file does not exist, muxr scaffolds one from
+  `campaigns/TEMPLATE/sessions/TEMPLATE.md`. If any same-day suffixed
+  file exists (e.g., `2026-04-24-cicd.md`), muxr attaches to it rather
+  than creating a new file.
+- `muxr <harness> <campaign> <date>` re-attaches a specific past
+  session.
+- System prompt composition. At launch, muxr merges the campaign body
+  and session body into `append_system_prompt`, so Claude enters the
+  session already knowing the campaign conventions, entrypoint, and
+  recent log.
+- Campaign `paths:` passed as `--add-dir`. The runtime knows the full
+  work surface declared by the campaign; no cwd roulette.
+- Schema validation at launch: session's `campaign:` must match the
+  requested slug, or muxr errors out before starting tmux.
+- Announce entrypoint, synthesist trees, and path count when creating a
+  new tmux session on a campaign.
+- New module `primitives` handles frontmatter parsing, campaign/session
+  file resolution, scaffolding, and prompt composition.
+- Dependencies: `serde_yaml_ng` for frontmatter, `chrono` for session
+  date generation.
+
+### Removed (breaking)
+- Git worktree support. The `worktree` field on verticals is gone, and
+  `tmux::create_worktree` / `tmux::remove_worktree` / `tmux::is_git_repo`
+  / `tmux::worktree_path` have been deleted along with their tests.
+  Concurrency moves to synthesist sessions and git branches; muxr no
+  longer manages filesystem splits.
+- `muxr <harness> fork` subcommand. Forking was only useful with
+  worktrees; without them, forking would just give two Claude sessions
+  fighting over the same working directory.
+- `--keep-worktree` flag from `muxr retire`. No worktrees means nothing
+  to keep.
+- All `use_worktree` branching in `cmd_open`, `cmd_new`, `cmd_kill`,
+  `cmd_retire`.
+
+### Unchanged (but note)
+- Legacy `muxr <vertical> <context>` launch path is preserved for
+  verticals that have not yet adopted campaigns. When `campaigns/` does
+  not exist under a vertical's directory, muxr behaves as it always has.
+- Config schema still uses `[verticals.*]` for backward compatibility.
+  The name alignment (`Vertical` → `Harness`) is deferred to a later
+  release to keep this one focused on ripping worktrees and landing
+  composition.
+
 ## [v0.9.7] - 2026-04-21
 
 ### Added
