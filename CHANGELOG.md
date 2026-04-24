@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v1.0.2] - 2026-04-24
+
+### Added
+- Interactive campaign scaffolding at launch. `muxr <harness> <unknown>`
+  now prompts the human through creating the campaign (paths,
+  synthesist tree, one-line description) instead of erroring out.
+  Keeps the launch single-command from the muxr control plane --
+  no mkdir / cp / $EDITOR dance before you can start a session on
+  a new work-body.
+
 ## [v1.0.1] - 2026-04-24
 
 ### Fixed

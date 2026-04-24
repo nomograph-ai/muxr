@@ -211,6 +211,16 @@ fn cmd_open_campaign(
     date: &str,
 ) -> Result<()> {
     let harness_dir = config.resolve_dir(harness_name)?;
+    // If the campaign doesn't exist yet, prompt interactively so the
+    // human can scaffold it in-flow. Keeps the launch single-command
+    // from the muxr control plane.
+    let campaign_md_path = harness_dir
+        .join("campaigns")
+        .join(campaign)
+        .join("campaign.md");
+    if !campaign_md_path.is_file() {
+        primitives::scaffold_campaign_interactive(&harness_dir, campaign)?;
+    }
     let campaign_md = primitives::campaign_file(&harness_dir, campaign)?;
     let session_path =
         primitives::resolve_or_scaffold_session(&harness_dir, campaign, date)?;
