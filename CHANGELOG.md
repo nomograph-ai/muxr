@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v1.0.5] - 2026-04-24
+
+### Changed (breaking vs v1.0.2/1.0.3/1.0.4 only)
+- Campaign scaffolding no longer stops the launch to ask terminal
+  questions about paths, tree, and description. Muxr creates a stub
+  campaign.md and seeds the session's entrypoint with a discovery
+  instruction, then launches claude normally. Claude searches the
+  configured add_dirs + synthesist state to propose candidate paths
+  and a tree, confirms with the human in one exchange, and writes
+  the answers into campaign.md via Edit.
+
+  The stdin-prompt flow (v1.0.2) put cognitive load on the operator
+  at exactly the wrong moment -- you just typed the campaign name,
+  you haven't switched modes to "give me structured answers". The
+  LLM carries that work more naturally.
+
 ## [v1.0.4] - 2026-04-24
 
 ### Added

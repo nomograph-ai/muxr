@@ -16,7 +16,6 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::fs;
-use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
 /// Campaign frontmatter (`campaigns/<slug>/campaign.md`).
@@ -91,88 +90,58 @@ pub fn campaign_file(harness_dir: &Path, campaign: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Interactively scaffold a new campaign via stdin prompts.
+/// Scaffold a stub campaign + a bootstrap session file that tells Claude
+/// to onboard the human conversationally.
 ///
-/// Writes `campaigns/<campaign>/campaign.md` and creates the sibling
-/// `sessions/` directory. Returns the path to the new campaign.md.
-/// Called from muxr launch when the requested campaign doesn't exist,
-/// so the human can create it in-flow rather than editing files first.
-pub fn scaffold_campaign_interactive(
-    harness_dir: &Path,
-    campaign: &str,
-) -> Result<PathBuf> {
-    eprintln!();
-    eprintln!("Campaign '{campaign}' does not exist in this harness.");
-    eprint!("Create it? [Y/n] ");
-    io::stderr().flush().ok();
-    let mut response = String::new();
-    io::stdin().lock().read_line(&mut response)?;
-    let response = response.trim().to_lowercase();
-    if !response.is_empty() && response != "y" && response != "yes" {
-        anyhow::bail!("Scaffolding declined. Cannot launch without a campaign.");
+/// Muxr does NOT prompt for paths/tree/description at the terminal.
+/// Instead it creates empty stubs and seeds the session's entrypoint
+/// with an instruction for Claude to ask the human what the campaign
+/// is about and populate campaign.md via Edit. This keeps the launch
+/// command single-keystroke and moves the onboarding into a natural
+/// LLM conversation where typos, ambiguity, and defaults are cheap.
+pub fn scaffold_campaign_stub(harness_dir: &Path, campaign: &str) -> Result<PathBuf> {
+    let campaign_dir = harness_dir.join("campaigns").join(campaign);
+    let sessions_dir = campaign_dir.join("sessions");
+    fs::create_dir_all(&sessions_dir)?;
+
+    let campaign_content = format!(
+        "---\nsynthesist_trees: []\npaths: []\n---\n\n\
+         # {campaign}\n\n\
+         ## What this is\n\
+         (pending -- Claude will prompt the human on first launch)\n\n\
+         ## How to behave\n\
+         (pending)\n"
+    );
+    let campaign_md = campaign_dir.join("campaign.md");
+    fs::write(&campaign_md, campaign_content)?;
+
+    // Seed today's session file with a bootstrap entrypoint so Claude
+    // knows to run the onboarding conversation on first response.
+    let today = today();
+    let session_path = sessions_dir.join(format!("{today}.md"));
+    if !session_path.exists() {
+        let entrypoint = format!(
+            "Bootstrap campaign '{campaign}'. campaign.md is a stub. \
+             First action: discover, don't interrogate. Search ~/gitlab.com, \
+             ~/github.com, and synthesist trees for repos/dirs/items that \
+             match the slug. Propose candidate paths and a tree mapping to \
+             the human for confirmation or correction. Keep it to one \
+             confirm-and-go exchange. Write the confirmed values into \
+             campaign.md via Edit, then proceed with whatever work the \
+             human wants."
+        );
+        let session_content = format!(
+            "---\ncampaign: {campaign}\nentrypoint: \"{entrypoint}\"\n---\n\n\
+             # Session {today}\n\n\
+             ## {today}\n\
+             Freshly scaffolded campaign. Awaiting onboarding conversation.\n"
+        );
+        fs::write(&session_path, session_content)?;
     }
 
     eprintln!();
-    eprintln!("Paths (comma-separated, absolute, supports ~)");
-    eprint!("  e.g. ~/gitlab.com/nomograph/gkg,~/gitlab.com/gitlab-org/gkg: ");
-    io::stderr().flush().ok();
-    let mut paths_line = String::new();
-    io::stdin().lock().read_line(&mut paths_line)?;
-    let paths: Vec<String> = paths_line
-        .trim()
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-
-    eprint!("Synthesist tree (blank for none): ");
-    io::stderr().flush().ok();
-    let mut tree = String::new();
-    io::stdin().lock().read_line(&mut tree)?;
-    let tree = tree.trim().to_string();
-
-    eprint!("One-sentence description (blank to edit later): ");
-    io::stderr().flush().ok();
-    let mut desc = String::new();
-    io::stdin().lock().read_line(&mut desc)?;
-    let desc = desc.trim().to_string();
-
-    // Write campaign.md
-    let campaign_dir = harness_dir.join("campaigns").join(campaign);
-    fs::create_dir_all(campaign_dir.join("sessions"))?;
-
-    let trees_yaml = if tree.is_empty() {
-        "synthesist_trees: []\n".to_string()
-    } else {
-        format!("synthesist_trees:\n  - {tree}\n")
-    };
-
-    let paths_yaml = if paths.is_empty() {
-        "paths: []\n".to_string()
-    } else {
-        let list = paths
-            .iter()
-            .map(|p| format!("  - {p}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        format!("paths:\n{list}\n")
-    };
-
-    let desc_line = if desc.is_empty() {
-        "(edit me)".to_string()
-    } else {
-        desc
-    };
-
-    let content = format!(
-        "---\n{trees_yaml}{paths_yaml}---\n\n# {campaign}\n\n## What this is\n{desc_line}\n\n## How to behave\n- (edit me)\n"
-    );
-
-    let campaign_md = campaign_dir.join("campaign.md");
-    fs::write(&campaign_md, content)?;
-    eprintln!();
-    eprintln!("Scaffolded campaign at {}", campaign_md.display());
-    eprintln!("Edit it any time to refine paths, tree, or guide.");
+    eprintln!("Scaffolded stub campaign: {}", campaign_md.display());
+    eprintln!("Claude will prompt you to fill it out on launch.");
     eprintln!();
 
     Ok(campaign_md)

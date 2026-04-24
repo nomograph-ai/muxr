@@ -219,7 +219,7 @@ fn cmd_open_campaign(
         .join(campaign)
         .join("campaign.md");
     if !campaign_md_path.is_file() {
-        primitives::scaffold_campaign_interactive(&harness_dir, campaign)?;
+        primitives::scaffold_campaign_stub(&harness_dir, campaign)?;
     }
     let campaign_md = primitives::campaign_file(&harness_dir, campaign)?;
     let session_path =
