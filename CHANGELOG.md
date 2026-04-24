@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v1.0.1] - 2026-04-24
+
+### Fixed
+- `child_pids` (used by `muxr save` Claude session discovery) no longer
+  uses `pgrep -P <ppid>` alone. macOS pgrep requires a pattern argument
+  and silently returns nothing without one, breaking session discovery
+  for every tmux session on macOS. Replaced with `ps -A -o pid,ppid`
+  parsed in-process. Cross-platform. Surfaced during first real muxr
+  save/restore dogfood on macOS.
+
 ## [v1.0.0] - 2026-04-24
 
 First stable release. Muxr graduates from tmux session manager to
