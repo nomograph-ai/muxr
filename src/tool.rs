@@ -1,13 +1,13 @@
 //! Harness operations: upgrade, status.
 //!
-//! Generic over HarnessConfig -- the same code handles claude, opencode, cursor.
+//! Generic over Tool -- the same code handles claude, opencode, cursor.
 //! All process management is local only (remote sessions do not participate).
 
 use anyhow::{Context, Result};
 use std::process::{Command, Stdio};
 
 use crate::claude_status;
-use crate::config::{Config, HarnessConfig};
+use crate::config::{Config, Tool};
 use crate::state;
 use crate::tmux::Tmux;
 
@@ -22,7 +22,7 @@ pub fn upgrade(
     tmux: &Tmux,
     config: &Config,
     harness_name: &str,
-    harness: &HarnessConfig,
+    harness: &Tool,
     model: Option<&str>,
 ) -> Result<()> {
     let sessions = tmux.list_sessions()?;
@@ -106,7 +106,7 @@ pub fn status(
     tmux: &Tmux,
     config: &Config,
     harness_name: &str,
-    _harness: &HarnessConfig,
+    _harness: &Tool,
 ) -> Result<()> {
     let sessions = tmux.list_sessions()?;
 
@@ -153,7 +153,7 @@ pub fn model_switch(
     tmux: &Tmux,
     config: &Config,
     harness_name: &str,
-    harness: &HarnessConfig,
+    harness: &Tool,
     model: Option<&str>,
 ) -> Result<()> {
     let model = model.context("Usage: muxr {harness_name} model <model-name>")?;
@@ -193,7 +193,7 @@ pub fn compact(
     tmux: &Tmux,
     config: &Config,
     harness_name: &str,
-    harness: &HarnessConfig,
+    harness: &Tool,
     threshold: Option<u32>,
 ) -> Result<()> {
     let threshold = threshold.unwrap_or(80);

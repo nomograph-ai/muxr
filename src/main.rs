@@ -3,9 +3,9 @@
 mod claude_status;
 mod completions;
 mod config;
-mod harness;
 mod init;
 mod primitives;
+mod tool;
 mod remote;
 mod state;
 mod switcher;
@@ -54,7 +54,7 @@ enum Commands {
     Save,
     /// Restore sessions after reboot
     Restore,
-    /// Generate tmux status-left config from verticals
+    /// Generate tmux status-left config from harnesses
     #[command(name = "tmux-status")]
     TmuxStatus,
     /// Claude Code statusline (reads JSON from stdin, outputs ANSI)
@@ -132,12 +132,12 @@ fn main() -> Result<()> {
             if cli.args.is_empty() {
                 cmd_control_plane(&tmux)
             } else {
-                // Check if first arg is a harness name before treating as vertical
+                // Check if first arg is a harness name before treating as harness
                 let first = &cli.args[0];
                 let config = Config::load().ok();
                 let is_harness = config
                     .as_ref()
-                    .map(|c| c.harness_names().contains(&first.to_string()))
+                    .map(|c| c.tool_names().contains(&first.to_string()))
                     .unwrap_or(false);
 
                 if is_harness {
@@ -171,65 +171,30 @@ fn cmd_open(tmux: &Tmux, args: &[String], tool_override: Option<&str>) -> Result
     let config = Config::load()?;
     let name = &args[0];
 
-    // Route to remote handler if this is a remote vertical
+    // Route to remote handler if this is a remote harness
     if config.is_remote(name) {
         return cmd_open_remote(tmux, &config, name, args);
     }
 
-    let tool = config.resolve_tool(name, tool_override);
-    let harness = config.harness_for(&tool);
-
-    if !config.verticals.contains_key(name) {
+    if !config.harnesses.contains_key(name) {
         let names = config.all_names().join(", ");
-        anyhow::bail!("Unknown vertical or remote: {name}\nKnown: {names}");
+        anyhow::bail!("Unknown harness or remote: {name}\nKnown: {names}");
     }
 
-    let dir = config.resolve_dir(name)?;
-
-    // Campaign/session primitives: if args[1] names a real campaign
-    // (campaigns/<name>/campaign.md exists), route to the v1 composition
-    // path. Otherwise fall back to legacy <vertical>/<context> behavior.
-    if args.len() >= 2 {
-        let maybe_campaign = &args[1];
-        let campaign_md = dir
-            .join("campaigns")
-            .join(maybe_campaign)
-            .join("campaign.md");
-        if campaign_md.is_file() {
-            let date = args
-                .get(2)
-                .cloned()
-                .unwrap_or_else(primitives::today);
-            return cmd_open_campaign(tmux, &config, name, maybe_campaign, &date);
-        }
-    }
-
-    let session = if args.len() >= 2 {
-        let context = args[1..].join("/");
-        format!("{name}/{context}")
-    } else {
-        format!("{name}/default")
-    };
-
-    if tmux.session_exists(&session) {
-        eprintln!("Attaching to {session}");
-        tmux.attach(&session)?;
-    } else {
-        let vertical = config.verticals.get(name);
-        let session_dir = dir.clone();
-        eprintln!("Creating {session} in {} ({})", dir.display(), tool);
-
-        config.run_pre_create_hooks(&session_dir);
-        let tool_cmd = match (&harness, vertical) {
-            (Some(h), Some(v)) => h.launch_command_with_settings(Some(&session), None, None, &v.harness),
-            (Some(h), None) => h.launch_command(Some(&session), None, None),
-            _ => tool.clone(),
-        };
-        tmux.create_session(&session, &session_dir, &tool_cmd)?;
-        tmux.attach(&session)?;
-    }
-
-    Ok(())
+    // Every launch requires a campaign. No more legacy <harness>/<context>.
+    let campaign = args.get(1).with_context(|| {
+        format!(
+            "Usage: muxr {name} <campaign> [<date>]\n\
+             Campaign is required. List campaigns: muxr {name} ls"
+        )
+    })?;
+    let date = args
+        .get(2)
+        .cloned()
+        .unwrap_or_else(primitives::today);
+    // tool_override propagates through config.resolve_tool inside cmd_open_campaign
+    let _ = tool_override;
+    cmd_open_campaign(tmux, &config, name, campaign, &date)
 }
 
 /// Open or attach to a campaign session: muxr <harness> <campaign> [<date>]
@@ -263,13 +228,13 @@ fn cmd_open_campaign(
     }
 
     let tool = config.resolve_tool(harness_name, None);
-    let tool_config = config.harness_for(&tool);
-    let vertical = config.verticals.get(harness_name);
+    let tool_config = config.tool_for(&tool);
+    let harness = config.harnesses.get(harness_name);
 
-    // Start from the vertical's existing launch settings; layer campaign
+    // Start from the harness's existing launch settings; layer campaign
     // paths and the composed prompt on top.
-    let mut settings = vertical
-        .map(|v| v.harness.clone())
+    let mut settings = harness
+        .map(|v| v.launch.clone())
         .unwrap_or_default();
 
     let (campaign_data, campaign_body) = primitives::load_campaign(&campaign_md)?;
@@ -428,26 +393,26 @@ fn cmd_new(tmux: &Tmux, args: &[String], tool_override: Option<&str>) -> Result<
         let home = dirs::home_dir().context("No home directory")?;
         tmux.create_session(&session, &home, &connect_cmd)?;
         eprintln!("Created {session} -> {instance} (remote)");
-    } else if config.verticals.contains_key(name) {
+    } else if config.harnesses.contains_key(name) {
         let tool = config.resolve_tool(name, tool_override);
-        let harness = config.harness_for(&tool);
-        let vertical = config.verticals.get(name);
+        let tool_def = config.tool_for(&tool);
+        let harness = config.harnesses.get(name);
         let dir = config.resolve_dir(name)?;
         let session_dir = dir.clone();
 
         config.run_pre_create_hooks(&session_dir);
-        let tool_cmd = match (&harness, vertical) {
-            (Some(h), Some(v)) => {
-                h.launch_command_with_settings(Some(&session), None, None, &v.harness)
+        let tool_cmd = match (&tool_def, harness) {
+            (Some(t), Some(h)) => {
+                t.launch_command_with_settings(Some(&session), None, None, &h.launch)
             }
-            (Some(h), None) => h.launch_command(Some(&session), None, None),
+            (Some(t), None) => t.launch_command(Some(&session), None, None),
             _ => tool.clone(),
         };
         tmux.create_session(&session, &session_dir, &tool_cmd)?;
         eprintln!("Created {session} ({tool})");
     } else {
         let names = config.all_names().join(", ");
-        anyhow::bail!("Unknown vertical or remote: {name}\nKnown: {names}");
+        anyhow::bail!("Unknown harness or remote: {name}\nKnown: {names}");
     }
 
     Ok(())
@@ -477,15 +442,15 @@ pub(crate) fn rename_session_by_name(
         anyhow::bail!("Session '{new}' already exists");
     }
 
-    let vertical = old.split('/').next().unwrap_or("default");
+    let harness = old.split('/').next().unwrap_or("default");
 
     tmux.rename_session(Some(old), new)?;
     eprintln!("Renamed {old} -> {new}");
 
     // Flow rename through to the harness if configured
     if let Ok(config) = Config::load() {
-        let tool = config.resolve_tool(vertical, tool_override);
-        if let Some(harness) = config.harness_for(&tool)
+        let tool = config.resolve_tool(harness, tool_override);
+        if let Some(harness) = config.tool_for(&tool)
             && let Some(cmd) = harness.build_rename_command(new)
         {
             let new_target = Tmux::target(new);
@@ -532,9 +497,9 @@ fn cmd_retire(tmux: &Tmux, name: &str) -> Result<()> {
     let retire_one = |sname: &str| {
         // 1. Graceful harness exit if something is running in the pane.
         if let Some(ref cfg) = config {
-            let vertical = sname.split('/').next().unwrap_or(sname);
-            let tool = cfg.resolve_tool(vertical, None);
-            if let Some(harness) = cfg.harness_for(&tool)
+            let harness = sname.split('/').next().unwrap_or(sname);
+            let tool = cfg.resolve_tool(harness, None);
+            if let Some(harness) = cfg.tool_for(&tool)
                 && state::has_harness_process(tmux, sname, &harness.bin)
             {
                 let target = Tmux::target(sname);
@@ -635,28 +600,28 @@ fn cmd_ls(tmux: &Tmux, active_only: bool) -> Result<()> {
     let config = Config::load().ok();
     let sessions = tmux.list_sessions()?;
 
-    // Pre-resolve harness for each vertical so we can detect running harness
+    // Pre-resolve harness for each harness so we can detect running harness
     // processes when --active is requested. Done once outside the loop since
-    // Config::harness_for is a map lookup but feels cheaper to cache.
-    let harness_for = |vertical: &str| -> Option<config::HarnessConfig> {
+    // Config::tool_for is a map lookup but feels cheaper to cache.
+    let tool_for = |harness: &str| -> Option<config::Tool> {
         let cfg = config.as_ref()?;
-        let tool = cfg.resolve_tool(vertical, None);
-        cfg.harness_for(&tool)
+        let tool = cfg.resolve_tool(harness, None);
+        cfg.tool_for(&tool)
     };
 
     let mut shown = 0;
     for (name, path) in &sessions {
-        let vertical = name.split('/').next().unwrap_or(name);
+        let harness = name.split('/').next().unwrap_or(name);
 
         if active_only {
             // Skip muxr control-plane sessions and any session without a
             // running harness process. The detection mirrors
-            // harness::upgrade's check, so --active and `upgrade` target
+            // tool::upgrade's check, so --active and `upgrade` target
             // the same set.
             if name == "muxr" {
                 continue;
             }
-            let Some(harness) = harness_for(vertical) else {
+            let Some(harness) = tool_for(harness) else {
                 continue;
             };
             if !state::has_harness_process(tmux, name, &harness.bin) {
@@ -666,7 +631,7 @@ fn cmd_ls(tmux: &Tmux, active_only: bool) -> Result<()> {
 
         let is_remote = config
             .as_ref()
-            .map(|c| c.is_remote(vertical))
+            .map(|c| c.is_remote(harness))
             .unwrap_or(false);
 
         if is_remote {
@@ -712,7 +677,7 @@ fn cmd_harness_dispatch(tmux: &Tmux, config: &Config, args: &[String]) -> Result
     let harness_name = args.first().context("Missing harness name")?;
 
     let harness = config
-        .harness_for(harness_name)
+        .tool_for(harness_name)
         .with_context(|| format!("Unknown harness: {harness_name}"))?;
 
     let sub = args.get(1).map(|s| s.as_str()).unwrap_or("status");
@@ -720,18 +685,18 @@ fn cmd_harness_dispatch(tmux: &Tmux, config: &Config, args: &[String]) -> Result
     match sub {
         "upgrade" => {
             let model = find_flag_value(&args[2..], "--model");
-            harness::upgrade(tmux, config, harness_name, &harness, model.as_deref())
+            tool::upgrade(tmux, config, harness_name, &harness, model.as_deref())
         }
         "model" => {
             let model = args.get(2).map(|s| s.as_str());
-            harness::model_switch(tmux, config, harness_name, &harness, model)
+            tool::model_switch(tmux, config, harness_name, &harness, model)
         }
         "compact" => {
             let threshold = find_flag_value(&args[2..], "--threshold")
                 .and_then(|v| v.parse::<u32>().ok());
-            harness::compact(tmux, config, harness_name, &harness, threshold)
+            tool::compact(tmux, config, harness_name, &harness, threshold)
         }
-        "status" => harness::status(tmux, config, harness_name, &harness),
+        "status" => tool::status(tmux, config, harness_name, &harness),
         other => {
             anyhow::bail!(
                 "Unknown {harness_name} subcommand: {other}\nAvailable: model, compact, upgrade, status"
@@ -748,17 +713,17 @@ fn find_flag_value(args: &[String], flag: &str) -> Option<String> {
         .cloned()
 }
 
-/// Generate tmux status-left format string from config verticals.
+/// Generate tmux status-left format string from config harnesses.
 /// Used by tmux.conf: set -g status-left "#(muxr tmux-status)"
 fn cmd_tmux_status(tmux: &Tmux) -> Result<()> {
     let session_name = tmux.display_message("#{session_name}")?;
 
-    let vertical = session_name.split('/').next().unwrap_or(&session_name);
+    let harness = session_name.split('/').next().unwrap_or(&session_name);
 
     let config = Config::load().ok();
     let color = config
         .as_ref()
-        .map(|c| c.color_for(vertical).to_string())
+        .map(|c| c.color_for(harness).to_string())
         .unwrap_or_else(|| "#8a7f83".to_string());
 
     // Output tmux format string
@@ -773,13 +738,13 @@ mod tests {
 
     #[test]
     fn resolve_tool_uses_override() {
-        let config: Config = toml::from_str("[verticals]").unwrap();
+        let config: Config = toml::from_str("[harnesses]").unwrap();
         assert_eq!(config.resolve_tool("work", Some("opencode")), "opencode");
     }
 
     #[test]
     fn resolve_tool_falls_back_to_config() {
-        let config: Config = toml::from_str("[verticals]").unwrap();
+        let config: Config = toml::from_str("[harnesses]").unwrap();
         assert_eq!(config.resolve_tool("work", None), "claude");
     }
 }

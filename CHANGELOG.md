@@ -48,14 +48,30 @@ opinionated harness manager with first-class campaign/session primitives.
 - All `use_worktree` branching in `cmd_open`, `cmd_new`, `cmd_kill`,
   `cmd_retire`.
 
-### Unchanged (but note)
-- Legacy `muxr <vertical> <context>` launch path is preserved for
-  verticals that have not yet adopted campaigns. When `campaigns/` does
-  not exist under a vertical's directory, muxr behaves as it always has.
-- Config schema still uses `[verticals.*]` for backward compatibility.
-  The name alignment (`Vertical` → `Harness`) is deferred to a later
-  release to keep this one focused on ripping worktrees and landing
-  composition.
+### Renamed (breaking)
+- Type `Vertical` → `Harness`. The thing that maps to a directory is now
+  called a harness everywhere -- in code, in config, in the CLI.
+- Type `HarnessConfig` → `Tool`. Tool definitions (claude, opencode)
+  were previously called "harnesses" internally; that name moved to
+  the named project estate.
+- Type `HarnessLaunchSettings` → `LaunchSettings`.
+- Config key `[verticals.<name>]` → `[harnesses.<name>]`.
+- Config key `[verticals.<name>.harness]` → `[harnesses.<name>.launch]`.
+- Config key `[harnesses.<name>]` (tool defs) → `[tools.<name>]`.
+- Module `src/harness.rs` → `src/tool.rs` (tool operations:
+  upgrade, compact, model switch, status).
+- Methods `Config::harness_for` → `Config::tool_for`,
+  `Config::harness_names` → `Config::tool_names`.
+- Legacy `muxr <harness> <context>` launch path is **removed**.
+  Every launch now requires a campaign: `muxr <harness> <campaign>`.
+
+### Config migration
+
+Rewrite `~/.config/muxr/config.toml`:
+- Rename `[verticals.X]` table headers to `[harnesses.X]`
+- Rename `[verticals.X.harness]` to `[harnesses.X.launch]`
+- If you had `[harnesses.<tool>]` tool definitions, rename to `[tools.<tool>]`
+- Remove any `worktree = true|false` lines (no-op)
 
 ## [v0.9.7] - 2026-04-21
 

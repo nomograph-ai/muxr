@@ -43,7 +43,7 @@ fn generate_zsh() -> Result<()> {
         .unwrap_or_default();
     let harness_names = config
         .as_ref()
-        .map(|c| c.harness_names())
+        .map(|c| c.tool_names())
         .unwrap_or_default();
     let sessions = Tmux::new(None).list_sessions().unwrap_or_default();
 
@@ -127,7 +127,7 @@ fn generate_bash() -> Result<()> {
         .unwrap_or_default();
     let harness_names = config
         .as_ref()
-        .map(|c| c.harness_names())
+        .map(|c| c.tool_names())
         .unwrap_or_default();
     let sessions = Tmux::new(None).list_sessions().unwrap_or_default();
 
@@ -207,7 +207,7 @@ fn generate_fish() -> Result<()> {
         .unwrap_or_default();
     let harness_names = config
         .as_ref()
-        .map(|c| c.harness_names())
+        .map(|c| c.tool_names())
         .unwrap_or_default();
 
     println!("# muxr fish completions");
@@ -219,7 +219,7 @@ fn generate_fish() -> Result<()> {
         println!("complete -c muxr -n '__fish_use_subcommand' -a '{name}' -d '{desc}'");
     }
 
-    // Verticals -- from runtime config
+    // Harnesses -- from runtime config
     for v in &verticals {
         println!("complete -c muxr -n '__fish_use_subcommand' -a '{v}' -d 'Open {v} session'");
     }

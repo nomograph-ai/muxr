@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::Command;
 
-use crate::config::{Config, HarnessConfig, SessionDiscovery};
+use crate::config::{Config, Tool, SessionDiscovery};
 use crate::remote;
 use crate::tmux::Tmux;
 
@@ -70,7 +70,7 @@ fn read_session_id_from_file(pid: u32, pattern: &str, id_key: &str) -> Option<St
 pub fn discover_session_id(
     tmux: &Tmux,
     tmux_session: &str,
-    harness: Option<&HarnessConfig>,
+    harness: Option<&Tool>,
 ) -> Option<String> {
     let harness = harness?;
     let (pattern, id_key) = match &harness.session_discovery {
@@ -132,7 +132,7 @@ impl SavedState {
             };
 
             let tool = config.resolve_tool(vertical, None);
-            let harness = config.harness_for(&tool);
+            let harness = config.tool_for(&tool);
             let session_id = discover_session_id(tmux, &name, harness.as_ref());
 
             if let Some(ref id) = session_id {
@@ -225,7 +225,7 @@ impl SavedState {
                     continue;
                 }
 
-                let harness = config.harness_for(&s.tool);
+                let harness = config.tool_for(&s.tool);
                 let tool_cmd = match &harness {
                     Some(h) => h.restore_command(Some(&s.name), s.session_id.as_deref()),
                     None => s.tool.clone(),
