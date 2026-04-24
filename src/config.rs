@@ -34,9 +34,6 @@ pub struct Vertical {
     /// Override default_tool for this vertical.
     #[serde(default)]
     pub tool: Option<String>,
-    /// Create git worktrees for session isolation. Default: true for harness sessions.
-    #[serde(default = "default_true")]
-    pub worktree: bool,
     /// Harness-specific launch settings. Only read when a harness is active.
     #[serde(default)]
     pub harness: HarnessLaunchSettings,
@@ -67,10 +64,6 @@ pub struct HarnessLaunchSettings {
     /// Move cwd/git/env info out of system prompt for better cache hits.
     #[serde(default)]
     pub exclude_dynamic_prompt: bool,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 /// How to discover harness session IDs from running processes.

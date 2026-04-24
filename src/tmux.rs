@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 /// Tmux client with optional server isolation.
@@ -248,102 +248,6 @@ pub struct SessionInfo {
     pub activity: u64,
 }
 
-// -- Git worktree management --
-
-/// Check if a directory is a git repository.
-pub fn is_git_repo(dir: &Path) -> bool {
-    Command::new("git")
-        .args(["-C", dir.to_str().unwrap_or("."), "rev-parse", "--git-dir"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-/// Derive the worktree directory path for a session context.
-/// Places worktrees in a sibling directory: `<repo>-worktrees/<context>`
-pub fn worktree_path(repo_dir: &Path, context: &str) -> PathBuf {
-    let repo_name = repo_dir
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("repo");
-    let slug = context.replace('/', "-");
-    repo_dir
-        .parent()
-        .unwrap_or(repo_dir)
-        .join(format!("{repo_name}-worktrees"))
-        .join(slug)
-}
-
-/// Create a git worktree for a session. Returns the worktree path.
-/// Creates branch `muxr/<context>` from HEAD.
-pub fn create_worktree(repo_dir: &Path, context: &str) -> Result<PathBuf> {
-    let wt_path = worktree_path(repo_dir, context);
-    let branch = format!("muxr/{}", context.replace('/', "-"));
-
-    // If worktree already exists, just return the path
-    if wt_path.exists() {
-        return Ok(wt_path);
-    }
-
-    // Ensure parent directory exists
-    if let Some(parent) = wt_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let status = Command::new("git")
-        .args([
-            "-C",
-            repo_dir.to_str().context("Invalid repo path")?,
-            "worktree",
-            "add",
-            wt_path.to_str().context("Invalid worktree path")?,
-            "-B",
-            &branch,
-        ])
-        .status()
-        .context("Failed to run git worktree add")?;
-
-    if !status.success() {
-        anyhow::bail!("git worktree add failed for {}", wt_path.display());
-    }
-
-    Ok(wt_path)
-}
-
-/// Remove a git worktree and optionally delete its branch.
-pub fn remove_worktree(repo_dir: &Path, context: &str) -> Result<()> {
-    let wt_path = worktree_path(repo_dir, context);
-
-    if !wt_path.exists() {
-        return Ok(());
-    }
-
-    let _ = Command::new("git")
-        .args([
-            "-C",
-            repo_dir.to_str().unwrap_or("."),
-            "worktree",
-            "remove",
-            wt_path.to_str().unwrap_or(""),
-            "--force",
-        ])
-        .status();
-
-    // Clean up the branch
-    let branch = format!("muxr/{}", context.replace('/', "-"));
-    let _ = Command::new("git")
-        .args([
-            "-C",
-            repo_dir.to_str().unwrap_or("."),
-            "branch",
-            "-D",
-            &branch,
-        ])
-        .status();
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,19 +256,5 @@ mod tests {
     fn target_wraps_with_equals_colon() {
         assert_eq!(Tmux::target("work/api"), "=work/api:");
         assert_eq!(Tmux::target("muxr"), "=muxr:");
-    }
-
-    #[test]
-    fn worktree_path_simple() {
-        let repo = std::path::Path::new("/home/user/projects/den");
-        let wt = worktree_path(repo, "opus");
-        assert_eq!(wt, std::path::PathBuf::from("/home/user/projects/den-worktrees/opus"));
-    }
-
-    #[test]
-    fn worktree_path_nested_context() {
-        let repo = std::path::Path::new("/home/user/projects/den");
-        let wt = worktree_path(repo, "api/auth");
-        assert_eq!(wt, std::path::PathBuf::from("/home/user/projects/den-worktrees/api-auth"));
     }
 }

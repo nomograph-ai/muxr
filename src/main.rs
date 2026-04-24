@@ -79,16 +79,13 @@ enum Commands {
         /// Session name (e.g., work/default) or "all"
         name: String,
     },
-    /// Retire a session: gracefully /exit the harness, kill the tmux session,
-    /// and remove the worktree if the vertical uses worktrees. Drops the
-    /// session from the saved state so future `muxr restore` won't recreate it.
+    /// Retire a session: gracefully /exit the harness, kill the tmux
+    /// session. Drops the session from the saved state so future
+    /// `muxr restore` won't recreate it.
     Retire {
-        /// Session name (e.g. tanuki/agentshaped) or "all" to retire every
+        /// Session name (e.g. tanuki/2026-04-24) or "all" to retire every
         /// tmux session.
         name: String,
-        /// Keep the git worktree on disk after killing the session.
-        #[arg(long)]
-        keep_worktree: bool,
     },
     /// Interactive session switcher (TUI)
     Switch,
@@ -124,10 +121,7 @@ fn main() -> Result<()> {
         Some(Commands::New { tool, args }) => cmd_new(&tmux, &args, tool.as_deref()),
         Some(Commands::Rename { name }) => cmd_rename(&tmux, &name, cli.tool.as_deref()),
         Some(Commands::Kill { name }) => cmd_kill(&tmux, &name),
-        Some(Commands::Retire {
-            name,
-            keep_worktree,
-        }) => cmd_retire(&tmux, &name, keep_worktree),
+        Some(Commands::Retire { name }) => cmd_retire(&tmux, &name),
         Some(Commands::Completions { shell }) => completions::generate(&shell),
         Some(Commands::External(args)) => {
             let config = Config::load()?;
@@ -203,23 +197,8 @@ fn cmd_open(tmux: &Tmux, args: &[String], tool_override: Option<&str>) -> Result
         tmux.attach(&session)?;
     } else {
         let vertical = config.verticals.get(name);
-        let use_worktree = vertical.map(|v| v.worktree).unwrap_or(false)
-            && harness.is_some()
-            && tmux::is_git_repo(&dir);
-
-        let session_dir = if use_worktree {
-            let context = if args.len() >= 2 {
-                args[1..].join("/")
-            } else {
-                "default".to_string()
-            };
-            let wt = tmux::create_worktree(&dir, &context)?;
-            eprintln!("Creating {session} in {} (worktree, {})", wt.display(), tool);
-            wt
-        } else {
-            eprintln!("Creating {session} in {} ({})", dir.display(), tool);
-            dir.clone()
-        };
+        let session_dir = dir.clone();
+        eprintln!("Creating {session} in {} ({})", dir.display(), tool);
 
         config.run_pre_create_hooks(&session_dir);
         let tool_cmd = match (&harness, vertical) {
@@ -337,16 +316,7 @@ fn cmd_new(tmux: &Tmux, args: &[String], tool_override: Option<&str>) -> Result<
         let harness = config.harness_for(&tool);
         let vertical = config.verticals.get(name);
         let dir = config.resolve_dir(name)?;
-
-        let use_worktree = vertical.map(|v| v.worktree).unwrap_or(false)
-            && harness.is_some()
-            && tmux::is_git_repo(&dir);
-
-        let session_dir = if use_worktree {
-            tmux::create_worktree(&dir, &context)?
-        } else {
-            dir.clone()
-        };
+        let session_dir = dir.clone();
 
         config.run_pre_create_hooks(&session_dir);
         let tool_cmd = match (&harness, vertical) {
@@ -357,8 +327,7 @@ fn cmd_new(tmux: &Tmux, args: &[String], tool_override: Option<&str>) -> Result<
             _ => tool.clone(),
         };
         tmux.create_session(&session, &session_dir, &tool_cmd)?;
-        let wt_label = if use_worktree { " (worktree)" } else { "" };
-        eprintln!("Created {session} ({tool}){wt_label}");
+        eprintln!("Created {session} ({tool})");
     } else {
         let names = config.all_names().join(", ");
         anyhow::bail!("Unknown vertical or remote: {name}\nKnown: {names}");
@@ -413,35 +382,11 @@ pub(crate) fn rename_session_by_name(
     Ok(())
 }
 
-/// Kill a session or all sessions. Cleans up worktrees if configured.
+/// Kill a session or all sessions.
 fn cmd_kill(tmux: &Tmux, name: &str) -> Result<()> {
-    let config = Config::load().ok();
-
     let kill_one = |sname: &str| {
         tmux.kill_session(sname).ok();
         eprintln!("Killed {sname}");
-
-        // Clean up worktree if this vertical uses worktrees
-        if let Some(ref config) = config {
-            let vertical = sname.split('/').next().unwrap_or(sname);
-            let context = sname.split('/').skip(1).collect::<Vec<_>>().join("/");
-            if let Ok(dir) = config.resolve_dir(vertical)
-                && config
-                    .verticals
-                    .get(vertical)
-                    .map(|v| v.worktree)
-                    .unwrap_or(false)
-            {
-                let ctx = if context.is_empty() {
-                    "default"
-                } else {
-                    &context
-                };
-                if let Err(e) = tmux::remove_worktree(&dir, ctx) {
-                    eprintln!("  worktree cleanup: {e}");
-                }
-            }
-        }
     };
 
     if name == "all" {
@@ -461,11 +406,10 @@ fn cmd_kill(tmux: &Tmux, name: &str) -> Result<()> {
 /// 1. If a harness is running in the pane, send `/exit` and wait for the
 ///    process to terminate (up to 10s, then SIGKILL).
 /// 2. Kill the tmux session.
-/// 3. Remove the associated git worktree unless `keep_worktree` is set.
-/// 4. Drop the session from `state.json` so `muxr restore` won't resurrect it.
+/// 3. Drop the session from `state.json` so `muxr restore` won't resurrect it.
 ///
 /// This is the counterpart to `new`: retire deletes everything new creates.
-fn cmd_retire(tmux: &Tmux, name: &str, keep_worktree: bool) -> Result<()> {
+fn cmd_retire(tmux: &Tmux, name: &str) -> Result<()> {
     let config = Config::load().ok();
 
     let retire_one = |sname: &str| {
@@ -499,36 +443,6 @@ fn cmd_retire(tmux: &Tmux, name: &str, keep_worktree: bool) -> Result<()> {
 
         // 2. Kill the tmux session.
         tmux.kill_session(sname).ok();
-
-        // 3. Remove the worktree if configured and not opted-out.
-        if !keep_worktree
-            && let Some(ref cfg) = config
-        {
-            let vertical = sname.split('/').next().unwrap_or(sname);
-            let context = sname.split('/').skip(1).collect::<Vec<_>>().join("/");
-            let uses_worktree = cfg
-                .verticals
-                .get(vertical)
-                .map(|v| v.worktree)
-                .unwrap_or(false);
-            if uses_worktree
-                && let Ok(dir) = cfg.resolve_dir(vertical)
-            {
-                let ctx = if context.is_empty() {
-                    "default"
-                } else {
-                    &context
-                };
-                // Main checkout ("default") is NOT a worktree for any vertical.
-                // remove_worktree is no-op-safe in that case, but guard anyway
-                // so we don't accidentally prune the primary checkout.
-                if ctx != "default"
-                    && let Err(e) = tmux::remove_worktree(&dir, ctx)
-                {
-                    eprintln!("  worktree cleanup: {e}");
-                }
-            }
-        }
 
         eprintln!("Retired {sname}");
     };
@@ -700,11 +614,10 @@ fn cmd_harness_dispatch(tmux: &Tmux, config: &Config, args: &[String]) -> Result
                 .and_then(|v| v.parse::<u32>().ok());
             harness::compact(tmux, config, harness_name, &harness, threshold)
         }
-        "fork" => harness::fork(tmux, config, harness_name, &harness),
         "status" => harness::status(tmux, config, harness_name, &harness),
         other => {
             anyhow::bail!(
-                "Unknown {harness_name} subcommand: {other}\nAvailable: model, compact, fork, upgrade, status"
+                "Unknown {harness_name} subcommand: {other}\nAvailable: model, compact, upgrade, status"
             )
         }
     }
