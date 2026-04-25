@@ -429,8 +429,13 @@ pub(crate) fn rename_session_by_name(
     tmux.rename_session(Some(old), new)?;
     eprintln!("Renamed {old} -> {new}");
 
-    // Flow rename through to the harness if configured
+    // Move the session file on disk so muxr stays comprehensive about
+    // harness state. Best-effort: if the file or harness dir can't be
+    // resolved, the tmux rename still landed.
     if let Ok(config) = Config::load() {
+        try_move_session_file(&config, old, new);
+
+        // Flow rename through to the harness if configured
         let tool = config.resolve_tool(harness, tool_override);
         if let Some(harness) = config.tool_for(&tool)
             && let Some(cmd) = harness.build_rename_command(new)
@@ -444,6 +449,73 @@ pub(crate) fn rename_session_by_name(
     }
 
     Ok(())
+}
+
+/// Move the session file on disk to match a tmux rename.
+///
+/// Convention (set by the `serialize` skill): each session file lives at
+/// `<harness_dir>/campaigns/<campaign>/sessions/<segment>.md`, where
+/// `<segment>` is the trailing component of the tmux session name
+/// (e.g. `2026-04-24-foo` from `tanuki/harness/2026-04-24-foo`).
+///
+/// Both old and new tmux session names must follow `<harness>/<campaign>/<segment>`
+/// for the move to fire. Anything else (bare names, mismatched harnesses,
+/// missing source file) is silently skipped — this is a hint, not a
+/// correctness requirement.
+fn try_move_session_file(config: &Config, old: &str, new: &str) {
+    let Some((old_h, old_campaign, old_seg)) = parse_three_part(old) else {
+        return;
+    };
+    let Some((new_h, new_campaign, new_seg)) = parse_three_part(new) else {
+        return;
+    };
+    if old_h != new_h || old_campaign != new_campaign {
+        // We don't move files across harnesses or campaigns from a rename.
+        return;
+    }
+    let dir = match config.resolve_dir(old_h) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let base = dir
+        .join("campaigns")
+        .join(old_campaign)
+        .join("sessions");
+    let old_path = base.join(format!("{old_seg}.md"));
+    let new_path = base.join(format!("{new_seg}.md"));
+    if !old_path.exists() {
+        return;
+    }
+    if new_path.exists() {
+        eprintln!(
+            "Session file at {} already exists; not overwriting",
+            new_path.display()
+        );
+        return;
+    }
+    match std::fs::rename(&old_path, &new_path) {
+        Ok(()) => eprintln!(
+            "Moved session file: {} -> {}",
+            old_path.display(),
+            new_path.display()
+        ),
+        Err(e) => eprintln!(
+            "Could not move session file {} -> {}: {e}",
+            old_path.display(),
+            new_path.display()
+        ),
+    }
+}
+
+fn parse_three_part(name: &str) -> Option<(&str, &str, &str)> {
+    let mut parts = name.splitn(3, '/');
+    let h = parts.next()?;
+    let c = parts.next()?;
+    let s = parts.next()?;
+    if h.is_empty() || c.is_empty() || s.is_empty() {
+        return None;
+    }
+    Some((h, c, s))
 }
 
 /// Kill a session or all sessions.
@@ -728,5 +800,111 @@ mod tests {
     fn resolve_tool_falls_back_to_config() {
         let config: Config = toml::from_str("[harnesses]").unwrap();
         assert_eq!(config.resolve_tool("work", None), "claude");
+    }
+
+    #[test]
+    fn parse_three_part_splits_on_two_slashes() {
+        assert_eq!(
+            parse_three_part("tanuki/harness/2026-04-24-foo"),
+            Some(("tanuki", "harness", "2026-04-24-foo"))
+        );
+    }
+
+    #[test]
+    fn parse_three_part_keeps_extra_slashes_in_segment() {
+        assert_eq!(
+            parse_three_part("tanuki/harness/2026/04/24"),
+            Some(("tanuki", "harness", "2026/04/24"))
+        );
+    }
+
+    #[test]
+    fn parse_three_part_rejects_two_part_names() {
+        assert_eq!(parse_three_part("tanuki/harness"), None);
+        assert_eq!(parse_three_part("just-a-name"), None);
+    }
+
+    #[test]
+    fn parse_three_part_rejects_empty_components() {
+        assert_eq!(parse_three_part("/harness/foo"), None);
+        assert_eq!(parse_three_part("tanuki//foo"), None);
+        assert_eq!(parse_three_part("tanuki/harness/"), None);
+    }
+
+    #[test]
+    fn try_move_session_file_moves_when_source_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join("campaigns/lab/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let old_path = sessions.join("2026-04-24.md");
+        std::fs::write(&old_path, "session body").unwrap();
+
+        let toml = format!(
+            "[harnesses.tanuki]\ndir = {dir:?}\ncolor = \"#fff\"\n",
+            dir = dir.path()
+        );
+        let config: Config = toml::from_str(&toml).unwrap();
+
+        try_move_session_file(&config, "tanuki/lab/2026-04-24", "tanuki/lab/2026-04-24-named");
+
+        assert!(!old_path.exists(), "old should be gone");
+        let new_path = sessions.join("2026-04-24-named.md");
+        assert!(new_path.exists(), "new should exist");
+        assert_eq!(std::fs::read_to_string(new_path).unwrap(), "session body");
+    }
+
+    #[test]
+    fn try_move_session_file_silent_when_source_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml = format!(
+            "[harnesses.tanuki]\ndir = {dir:?}\ncolor = \"#fff\"\n",
+            dir = dir.path()
+        );
+        let config: Config = toml::from_str(&toml).unwrap();
+        // No file at the expected location. Should not panic, should not create anything.
+        try_move_session_file(&config, "tanuki/lab/2026-04-24", "tanuki/lab/2026-04-24-named");
+        let sessions = dir.path().join("campaigns/lab/sessions");
+        assert!(!sessions.exists() || std::fs::read_dir(&sessions).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn try_move_session_file_refuses_to_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join("campaigns/lab/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let old_path = sessions.join("2026-04-24.md");
+        let new_path = sessions.join("2026-04-24-named.md");
+        std::fs::write(&old_path, "old").unwrap();
+        std::fs::write(&new_path, "existing").unwrap();
+
+        let toml = format!(
+            "[harnesses.tanuki]\ndir = {dir:?}\ncolor = \"#fff\"\n",
+            dir = dir.path()
+        );
+        let config: Config = toml::from_str(&toml).unwrap();
+
+        try_move_session_file(&config, "tanuki/lab/2026-04-24", "tanuki/lab/2026-04-24-named");
+
+        assert!(old_path.exists(), "old must not have been clobbered");
+        assert_eq!(std::fs::read_to_string(new_path).unwrap(), "existing");
+    }
+
+    #[test]
+    fn try_move_session_file_skips_cross_campaign() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join("campaigns/lab/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let old_path = sessions.join("2026-04-24.md");
+        std::fs::write(&old_path, "x").unwrap();
+        let toml = format!(
+            "[harnesses.tanuki]\ndir = {dir:?}\ncolor = \"#fff\"\n",
+            dir = dir.path()
+        );
+        let config: Config = toml::from_str(&toml).unwrap();
+
+        try_move_session_file(&config, "tanuki/lab/2026-04-24", "tanuki/different/2026-04-24");
+
+        // Cross-campaign move is not supported; old file stays.
+        assert!(old_path.exists());
     }
 }
