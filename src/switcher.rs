@@ -1,12 +1,12 @@
 use anyhow::{Context, Result};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
+use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState};
-use ratatui::Terminal;
 use std::io;
 
 use crate::claude_status::{self, SessionHealth};
@@ -103,7 +103,8 @@ fn build_entries(config: &Config, tmux: &Tmux) -> Result<Vec<Entry>> {
     group_order.sort_by(|a, b| b.1.cmp(&a.1));
 
     // Build final list: muxr first, then groups with separators
-    let mut entries: Vec<Entry> = Vec::with_capacity(groups.values().map(|g| g.len()).sum::<usize>() + group_order.len() + 1);
+    let mut entries: Vec<Entry> =
+        Vec::with_capacity(groups.values().map(|g| g.len()).sum::<usize>() + group_order.len() + 1);
 
     if let Some(muxr) = muxr_entry {
         entries.push(muxr);
@@ -193,9 +194,7 @@ pub fn run(tmux: &Tmux) -> Result<Action> {
         anyhow::bail!("No active tmux sessions");
     }
 
-    let current = tmux
-        .display_message("#{session_name}")
-        .unwrap_or_default();
+    let current = tmux.display_message("#{session_name}").unwrap_or_default();
 
     terminal::enable_raw_mode().context("Failed to enable raw mode")?;
     let mut stdout = io::stdout();
@@ -219,8 +218,7 @@ pub fn run(tmux: &Tmux) -> Result<Action> {
     let result = loop {
         terminal.draw(|f| {
             let area = f.area();
-            let chunks =
-                Layout::vertical([Constraint::Min(3), Constraint::Length(3)]).split(area);
+            let chunks = Layout::vertical([Constraint::Min(3), Constraint::Length(3)]).split(area);
 
             draw_table(
                 f,
@@ -267,10 +265,7 @@ pub fn run(tmux: &Tmux) -> Result<Action> {
                             rename_error = Some(format!("'{new}' already exists"));
                         } else {
                             terminal::disable_raw_mode()?;
-                            crossterm::execute!(
-                                terminal.backend_mut(),
-                                LeaveAlternateScreen
-                            )?;
+                            crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
                             return Ok(Action::Rename(old, new));
                         }
                     }
@@ -383,12 +378,7 @@ pub fn run(tmux: &Tmux) -> Result<Action> {
 }
 
 /// Move selection by delta, skipping separator rows.
-fn move_selection(
-    entries: &[Entry],
-    filtered: &[usize],
-    state: &mut TableState,
-    delta: i32,
-) {
+fn move_selection(entries: &[Entry], filtered: &[usize], state: &mut TableState, delta: i32) {
     if filtered.is_empty() {
         return;
     }
@@ -597,7 +587,7 @@ fn draw_table(
         .collect();
 
     let widths = [
-        Constraint::Length(16),  // session (marker + vertical)
+        Constraint::Length(16), // session (marker + vertical)
         Constraint::Min(12),    // context
         Constraint::Length(8),  // bar
         Constraint::Length(7),  // pct (+ 1M badge)
@@ -817,4 +807,3 @@ mod tests {
         assert_eq!(filter_entries(&entries, "api"), vec![0]);
     }
 }
-

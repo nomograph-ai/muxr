@@ -28,9 +28,7 @@ fn campaigns_by_harness(config: &Config) -> BTreeMap<String, Vec<String>> {
             .filter_map(|e| e.file_name().into_string().ok())
             .filter(|name| name != "TEMPLATE")
             .filter(|name| !name.starts_with('_'))
-            .filter(|name| {
-                campaigns_dir.join(name).join("campaign.md").is_file()
-            })
+            .filter(|name| campaigns_dir.join(name).join("campaign.md").is_file())
             .collect();
         slugs.sort();
         out.insert(harness_name.clone(), slugs);
@@ -46,10 +44,7 @@ fn derived_commands() -> Vec<(String, String)> {
     cmd.get_subcommands()
         .map(|sub| {
             let name = sub.get_name().to_string();
-            let about = sub
-                .get_about()
-                .map(|a| a.to_string())
-                .unwrap_or_default();
+            let about = sub.get_about().map(|a| a.to_string()).unwrap_or_default();
             (name, about)
         })
         .collect()
@@ -76,10 +71,7 @@ fn generate_zsh() -> Result<()> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let tool_names = config
-        .as_ref()
-        .map(|c| c.tool_names())
-        .unwrap_or_default();
+    let tool_names = config.as_ref().map(|c| c.tool_names()).unwrap_or_default();
     let campaigns = config
         .as_ref()
         .map(campaigns_by_harness)
@@ -164,10 +156,7 @@ fn generate_bash() -> Result<()> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let tool_names = config
-        .as_ref()
-        .map(|c| c.tool_names())
-        .unwrap_or_default();
+    let tool_names = config.as_ref().map(|c| c.tool_names()).unwrap_or_default();
     let campaigns = config
         .as_ref()
         .map(campaigns_by_harness)
@@ -215,9 +204,7 @@ fn generate_bash() -> Result<()> {
     // Emit per-harness campaign assignments
     for (h, slugs) in &campaigns {
         let list = slugs.join(" ");
-        println!(
-            "            [[ \"$harness\" == \"{h}\" ]] && campaigns=\"{list}\""
-        );
+        println!("            [[ \"$harness\" == \"{h}\" ]] && campaigns=\"{list}\"");
     }
 
     print!(
@@ -245,10 +232,7 @@ fn generate_fish() -> Result<()> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let harness_names = config
-        .as_ref()
-        .map(|c| c.tool_names())
-        .unwrap_or_default();
+    let harness_names = config.as_ref().map(|c| c.tool_names()).unwrap_or_default();
 
     println!("# muxr fish completions");
     println!("complete -c muxr -f");
@@ -267,8 +251,12 @@ fn generate_fish() -> Result<()> {
     // Harnesses -- from config + built-ins
     for h in &harness_names {
         println!("complete -c muxr -n '__fish_use_subcommand' -a '{h}' -d '{h} harness'");
-        println!("complete -c muxr -n '__fish_seen_subcommand_from {h}' -a 'upgrade' -d 'Restart sessions'");
-        println!("complete -c muxr -n '__fish_seen_subcommand_from {h}' -a 'status' -d 'Show status'");
+        println!(
+            "complete -c muxr -n '__fish_seen_subcommand_from {h}' -a 'upgrade' -d 'Restart sessions'"
+        );
+        println!(
+            "complete -c muxr -n '__fish_seen_subcommand_from {h}' -a 'status' -d 'Show status'"
+        );
     }
 
     Ok(())

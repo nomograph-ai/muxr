@@ -46,31 +46,29 @@ fn split_frontmatter(content: &str) -> Option<(&str, &str)> {
     let end_marker = after_opening.find("\n---")?;
     let fm = &after_opening[..end_marker];
     let rest = &after_opening[end_marker + 4..];
-    let body = rest.strip_prefix("\r\n").unwrap_or_else(|| rest.strip_prefix('\n').unwrap_or(rest));
+    let body = rest
+        .strip_prefix("\r\n")
+        .unwrap_or_else(|| rest.strip_prefix('\n').unwrap_or(rest));
     Some((fm, body))
 }
 
 pub fn load_campaign(path: &Path) -> Result<(Campaign, String)> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("Failed to read campaign file: {}", path.display()))?;
-    let (fm, body) = split_frontmatter(&content).with_context(|| {
-        format!("No YAML frontmatter in {}", path.display())
-    })?;
-    let campaign: Campaign = serde_yaml_ng::from_str(fm).with_context(|| {
-        format!("Failed to parse campaign frontmatter: {}", path.display())
-    })?;
+    let (fm, body) = split_frontmatter(&content)
+        .with_context(|| format!("No YAML frontmatter in {}", path.display()))?;
+    let campaign: Campaign = serde_yaml_ng::from_str(fm)
+        .with_context(|| format!("Failed to parse campaign frontmatter: {}", path.display()))?;
     Ok((campaign, body.to_string()))
 }
 
 pub fn load_session(path: &Path) -> Result<(Session, String)> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("Failed to read session file: {}", path.display()))?;
-    let (fm, body) = split_frontmatter(&content).with_context(|| {
-        format!("No YAML frontmatter in {}", path.display())
-    })?;
-    let session: Session = serde_yaml_ng::from_str(fm).with_context(|| {
-        format!("Failed to parse session frontmatter: {}", path.display())
-    })?;
+    let (fm, body) = split_frontmatter(&content)
+        .with_context(|| format!("No YAML frontmatter in {}", path.display()))?;
+    let session: Session = serde_yaml_ng::from_str(fm)
+        .with_context(|| format!("Failed to parse session frontmatter: {}", path.display()))?;
     Ok((session, body.to_string()))
 }
 
@@ -82,10 +80,7 @@ pub fn campaign_file(harness_dir: &Path, campaign: &str) -> Result<PathBuf> {
         .join(campaign)
         .join("campaign.md");
     if !path.is_file() {
-        anyhow::bail!(
-            "Campaign '{campaign}' not found at {}.",
-            path.display()
-        );
+        anyhow::bail!("Campaign '{campaign}' not found at {}.", path.display());
     }
     Ok(path)
 }
@@ -379,10 +374,7 @@ mod tests {
 
         let path = resolve_or_scaffold_session(harness_dir, "gkg", "2026-04-24").unwrap();
         assert!(path.exists());
-        assert_eq!(
-            path.file_name().unwrap().to_str().unwrap(),
-            "2026-04-24.md"
-        );
+        assert_eq!(path.file_name().unwrap().to_str().unwrap(), "2026-04-24.md");
         let contents = fs::read_to_string(&path).unwrap();
         assert!(contents.contains("campaign: gkg"));
     }

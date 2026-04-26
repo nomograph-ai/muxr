@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- `muxr rename` now also moves the on-disk session file at
+  `<harness>/campaigns/<campaign>/sessions/<segment>.md` and triggers
+  the configured runtime relink, so the harness/campaign/session/segment
+  address stays coherent across tmux state, the filesystem, and the AI
+  runtime in one operation. Best-effort: refuses to clobber an existing
+  target file. Six new tests cover missing source, target-already-exists
+  clobber refusal, cross-campaign skip, and same-campaign rename. Total
+  test count went from 74 to 80.
+- Hero and avatar iconography in the nomograph paper-palette OV-1 style:
+  `hero.svg` shows harness inputs, the multiplexer junction, and three
+  coupled output rows for tmux session / session file / runtime id;
+  `avatar.svg` is four nested rectangles for harness > campaign >
+  session > segment.
+- `CODEOWNERS`.
+
+### Changed
+- README rewritten to lead with the harness-multiplexer scope. The
+  commands table now reflects that `rename` touches tmux state, the
+  session file, and the runtime id together.
+
 ## [v1.1.1] - 2026-04-24
 
 ### Fixed

@@ -101,8 +101,7 @@ impl Tmux {
         } else {
             let t = Self::target(name);
             if let Some(ref server) = self.server {
-                let err =
-                    exec::execvp("tmux", &["tmux", "-L", server, "attach", "-t", &t]);
+                let err = exec::execvp("tmux", &["tmux", "-L", server, "attach", "-t", &t]);
                 anyhow::bail!("Failed to exec tmux attach: {err}");
             } else {
                 let err = exec::execvp("tmux", &["tmux", "attach", "-t", &t]);

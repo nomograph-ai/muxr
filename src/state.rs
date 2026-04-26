@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::Command;
 
-use crate::config::{Config, Tool, SessionDiscovery};
+use crate::config::{Config, SessionDiscovery, Tool};
 use crate::remote;
 use crate::tmux::Tmux;
 
@@ -228,12 +228,19 @@ impl SavedState {
             if let Some(ref remote_name) = s.remote {
                 // Remote proxy session -- reconnect via mosh/ssh
                 let Some(remote) = config.remote(remote_name) else {
-                    eprintln!("  {} -- remote '{}' not in config, skipping", s.name, remote_name);
+                    eprintln!(
+                        "  {} -- remote '{}' not in config, skipping",
+                        s.name, remote_name
+                    );
                     continue;
                 };
 
                 let context = s.name.split('/').skip(1).collect::<Vec<_>>().join("/");
-                let context = if context.is_empty() { "default" } else { &context };
+                let context = if context.is_empty() {
+                    "default"
+                } else {
+                    &context
+                };
                 let instance = remote.instance_name(context);
 
                 match remote::connect_command(remote, &instance, context) {

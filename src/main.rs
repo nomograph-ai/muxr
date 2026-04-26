@@ -5,11 +5,11 @@ mod completions;
 mod config;
 mod init;
 mod primitives;
-mod tool;
 mod remote;
 mod state;
 mod switcher;
 mod tmux;
+mod tool;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -183,10 +183,7 @@ fn cmd_open(tmux: &Tmux, args: &[String], tool_override: Option<&str>) -> Result
         &switchboard_slug
     };
 
-    let date = args
-        .get(2)
-        .cloned()
-        .unwrap_or_else(primitives::today);
+    let date = args.get(2).cloned().unwrap_or_else(primitives::today);
     let _ = tool_override;
     cmd_open_campaign(tmux, &config, name, campaign, &date)
 }
@@ -216,8 +213,7 @@ fn cmd_open_campaign(
         primitives::scaffold_campaign_stub(&harness_dir, campaign)?;
     }
     let campaign_md = primitives::campaign_file(&harness_dir, campaign)?;
-    let session_path =
-        primitives::resolve_or_scaffold_session(&harness_dir, campaign, date)?;
+    let session_path = primitives::resolve_or_scaffold_session(&harness_dir, campaign, date)?;
 
     let session_basename = session_path
         .file_stem()
@@ -237,9 +233,7 @@ fn cmd_open_campaign(
 
     // Start from the harness's existing launch settings; layer campaign
     // paths and the composed prompt on top.
-    let mut settings = harness
-        .map(|v| v.launch.clone())
-        .unwrap_or_default();
+    let mut settings = harness.map(|v| v.launch.clone()).unwrap_or_default();
 
     let (campaign_data, campaign_body) = primitives::load_campaign(&campaign_md)?;
     let (session_data, session_body) = primitives::load_session(&session_path)?;
@@ -284,9 +278,7 @@ fn cmd_open_campaign(
 
     let tmp_path = std::env::temp_dir().join(format!(
         "muxr-prompt-{}-{}-{}.md",
-        harness_name,
-        campaign,
-        session_basename
+        harness_name, campaign, session_basename
     ));
     std::fs::write(&tmp_path, &full_prompt)?;
 
@@ -305,9 +297,7 @@ fn cmd_open_campaign(
     config.run_pre_create_hooks(&session_dir);
 
     let tool_cmd = match &tool_config {
-        Some(h) => {
-            h.launch_command_with_settings(Some(&session_name), None, None, &settings)
-        }
+        Some(h) => h.launch_command_with_settings(Some(&session_name), None, None, &settings),
         None => tool.clone(),
     };
 
@@ -331,12 +321,7 @@ fn cmd_open_campaign(
 }
 
 /// Open or attach to a remote proxy session: muxr lab bootc
-fn cmd_open_remote(
-    tmux: &Tmux,
-    config: &Config,
-    remote_name: &str,
-    args: &[String],
-) -> Result<()> {
+fn cmd_open_remote(tmux: &Tmux, config: &Config, remote_name: &str, args: &[String]) -> Result<()> {
     let remote = config
         .remote(remote_name)
         .context("Remote not found in config")?;
@@ -366,10 +351,7 @@ fn cmd_open_remote(
         }
 
         let connect_cmd = remote::connect_command(remote, &instance, &context)?;
-        eprintln!(
-            "Creating {session} -> {instance} via {}",
-            remote.connect
-        );
+        eprintln!("Creating {session} -> {instance} via {}", remote.connect);
         let home = dirs::home_dir().context("No home directory")?;
         tmux.create_session(&session, &home, &connect_cmd)?;
         tmux.attach(&session)?;
@@ -477,10 +459,7 @@ fn try_move_session_file(config: &Config, old: &str, new: &str) {
         Ok(p) => p,
         Err(_) => return,
     };
-    let base = dir
-        .join("campaigns")
-        .join(old_campaign)
-        .join("sessions");
+    let base = dir.join("campaigns").join(old_campaign).join("sessions");
     let old_path = base.join(format!("{old_seg}.md"));
     let new_path = base.join(format!("{new_seg}.md"));
     if !old_path.exists() {
@@ -746,8 +725,8 @@ fn cmd_harness_dispatch(tmux: &Tmux, config: &Config, args: &[String]) -> Result
             tool::model_switch(tmux, config, harness_name, &harness, model)
         }
         "compact" => {
-            let threshold = find_flag_value(&args[2..], "--threshold")
-                .and_then(|v| v.parse::<u32>().ok());
+            let threshold =
+                find_flag_value(&args[2..], "--threshold").and_then(|v| v.parse::<u32>().ok());
             tool::compact(tmux, config, harness_name, &harness, threshold)
         }
         "status" => tool::status(tmux, config, harness_name, &harness),
@@ -845,7 +824,11 @@ mod tests {
         );
         let config: Config = toml::from_str(&toml).unwrap();
 
-        try_move_session_file(&config, "tanuki/lab/2026-04-24", "tanuki/lab/2026-04-24-named");
+        try_move_session_file(
+            &config,
+            "tanuki/lab/2026-04-24",
+            "tanuki/lab/2026-04-24-named",
+        );
 
         assert!(!old_path.exists(), "old should be gone");
         let new_path = sessions.join("2026-04-24-named.md");
@@ -862,7 +845,11 @@ mod tests {
         );
         let config: Config = toml::from_str(&toml).unwrap();
         // No file at the expected location. Should not panic, should not create anything.
-        try_move_session_file(&config, "tanuki/lab/2026-04-24", "tanuki/lab/2026-04-24-named");
+        try_move_session_file(
+            &config,
+            "tanuki/lab/2026-04-24",
+            "tanuki/lab/2026-04-24-named",
+        );
         let sessions = dir.path().join("campaigns/lab/sessions");
         assert!(!sessions.exists() || std::fs::read_dir(&sessions).unwrap().next().is_none());
     }
@@ -883,7 +870,11 @@ mod tests {
         );
         let config: Config = toml::from_str(&toml).unwrap();
 
-        try_move_session_file(&config, "tanuki/lab/2026-04-24", "tanuki/lab/2026-04-24-named");
+        try_move_session_file(
+            &config,
+            "tanuki/lab/2026-04-24",
+            "tanuki/lab/2026-04-24-named",
+        );
 
         assert!(old_path.exists(), "old must not have been clobbered");
         assert_eq!(std::fs::read_to_string(new_path).unwrap(), "existing");
@@ -902,7 +893,11 @@ mod tests {
         );
         let config: Config = toml::from_str(&toml).unwrap();
 
-        try_move_session_file(&config, "tanuki/lab/2026-04-24", "tanuki/different/2026-04-24");
+        try_move_session_file(
+            &config,
+            "tanuki/lab/2026-04-24",
+            "tanuki/different/2026-04-24",
+        );
 
         // Cross-campaign move is not supported; old file stays.
         assert!(old_path.exists());

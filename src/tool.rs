@@ -91,9 +91,7 @@ pub fn upgrade(
         upgraded += 1;
     }
 
-    eprintln!(
-        "\nUpgraded {upgraded} session(s), skipped {skipped}."
-    );
+    eprintln!("\nUpgraded {upgraded} session(s), skipped {skipped}.");
     if let Some(m) = model {
         eprintln!("Model: {m}");
     }
@@ -102,19 +100,11 @@ pub fn upgrade(
 }
 
 /// Show harness status across all sessions.
-pub fn status(
-    tmux: &Tmux,
-    config: &Config,
-    harness_name: &str,
-    _harness: &Tool,
-) -> Result<()> {
+pub fn status(tmux: &Tmux, config: &Config, harness_name: &str, _harness: &Tool) -> Result<()> {
     let sessions = tmux.list_sessions()?;
 
     eprintln!("{harness_name} sessions:\n");
-    eprintln!(
-        "  {:30} {:6} {:10}",
-        "SESSION", "CTX %", "COST"
-    );
+    eprintln!("  {:30} {:6} {:10}", "SESSION", "CTX %", "COST");
     eprintln!("  {}", "-".repeat(50));
 
     let mut count = 0;
@@ -130,10 +120,7 @@ pub fn status(
 
         let health = claude_status::read_health(name);
         let (ctx, cost) = match health {
-            Some(h) => (
-                format!("{}%", h.context_pct),
-                format!("${:.2}", h.cost_usd),
-            ),
+            Some(h) => (format!("{}%", h.context_pct), format!("${:.2}", h.cost_usd)),
             None => ("--".to_string(), "--".to_string()),
         };
 
@@ -273,9 +260,7 @@ fn wait_for_exit(pid: u32, timeout_secs: u32) {
 
     // Still alive after timeout -- SIGKILL
     eprintln!("    process {pid} did not exit, sending SIGKILL");
-    let _ = Command::new("kill")
-        .args(["-9", &pid.to_string()])
-        .status();
+    let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
 }
 
 /// Wait for a shell prompt to appear in the pane.

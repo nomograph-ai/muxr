@@ -216,11 +216,19 @@ fn format_duration(ms: u64) -> String {
     if s >= 3600 {
         let h = s / 3600;
         let m = (s % 3600) / 60;
-        if m == 0 { format!("{h}h") } else { format!("{h}h{m}m") }
+        if m == 0 {
+            format!("{h}h")
+        } else {
+            format!("{h}h{m}m")
+        }
     } else if s >= 60 {
         let m = s / 60;
         let sec = s % 60;
-        if sec == 0 { format!("{m}m") } else { format!("{m}m{sec}s") }
+        if sec == 0 {
+            format!("{m}m")
+        } else {
+            format!("{m}m{sec}s")
+        }
     } else {
         format!("{s}s")
     }
@@ -247,9 +255,7 @@ pub fn run(tmux: &Tmux) -> Result<()> {
     let status: StatusInput = serde_json::from_str(&input).unwrap_or_default();
 
     // Get muxr session name from tmux
-    let session_name = tmux
-        .display_message("#{session_name}")
-        .unwrap_or_default();
+    let session_name = tmux.display_message("#{session_name}").unwrap_or_default();
 
     // Resolve vertical color from muxr config
     let vertical = session_name.split('/').next().unwrap_or(&session_name);

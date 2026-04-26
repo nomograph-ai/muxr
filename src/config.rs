@@ -118,8 +118,17 @@ fn default_discovery_none() -> SessionDiscovery {
 
 /// Reserved command names that cannot be used as harness names.
 const RESERVED_NAMES: &[&str] = &[
-    "init", "ls", "save", "restore", "new", "rename", "kill",
-    "switch", "tmux-status", "claude-status", "completions",
+    "init",
+    "ls",
+    "save",
+    "restore",
+    "new",
+    "rename",
+    "kill",
+    "switch",
+    "tmux-status",
+    "claude-status",
+    "completions",
 ];
 
 impl Tool {
@@ -177,11 +186,7 @@ impl Tool {
 
     /// Build the resume command for restore. Uses --continue as fallback
     /// when session ID is lost.
-    pub fn restore_command(
-        &self,
-        session_name: Option<&str>,
-        resume_id: Option<&str>,
-    ) -> String {
+    pub fn restore_command(&self, session_name: Option<&str>, resume_id: Option<&str>) -> String {
         if resume_id.is_some() {
             return self.launch_command(session_name, resume_id, None);
         }
@@ -210,7 +215,10 @@ impl Tool {
 
         if let Some(ref prompts) = settings.append_system_prompt {
             let joined = prompts.join("\n");
-            cmd.push_str(&format!(" --append-system-prompt {}", shell_escape(&joined)));
+            cmd.push_str(&format!(
+                " --append-system-prompt {}",
+                shell_escape(&joined)
+            ));
         }
         if let Some(ref file) = settings.append_system_prompt_file {
             // Absolute/~ paths expand. Relative paths resolve from cwd
@@ -335,9 +343,7 @@ impl Config {
                 );
             }
             if config.remotes.contains_key(name) {
-                anyhow::bail!(
-                    "Name collision: '{name}' is defined as both a remote and a harness"
-                );
+                anyhow::bail!("Name collision: '{name}' is defined as both a remote and a harness");
             }
             if RESERVED_NAMES.contains(&name.as_str()) {
                 anyhow::bail!(
@@ -763,7 +769,11 @@ session_discovery = { type = "none" }
     #[test]
     fn launch_command_with_resume_and_model() {
         let h = Tool::builtin_claude();
-        let cmd = h.launch_command(Some("tanuki/opus"), Some("abc-123"), Some("claude-opus-4-7"));
+        let cmd = h.launch_command(
+            Some("tanuki/opus"),
+            Some("abc-123"),
+            Some("claude-opus-4-7"),
+        );
         assert_eq!(
             cmd,
             "claude --name 'tanuki/opus' --resume 'abc-123' --model 'claude-opus-4-7'"
