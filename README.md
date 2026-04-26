@@ -7,8 +7,9 @@
 [![built with GitLab](https://img.shields.io/badge/built_with-GitLab-FC6D26?logo=gitlab)](https://gitlab.com/nomograph/muxr)
 [![crates.io](https://img.shields.io/crates/v/nomograph-muxr.svg)](https://crates.io/crates/nomograph-muxr)
 
-Tmux session manager for AI coding workflows. One command to open a
-session, one keybind to switch between them, survives reboots.
+Harness session multiplexer for AI coding workflows. Owns the address
+`harness/campaign/session/segment` across tmux, the filesystem, and your
+AI runtime, so a rename or move stays coherent in all three.
 
 ## The problem
 
@@ -144,7 +145,7 @@ Remote sessions re-establish connections.
 | `muxr restore` | Recreate sessions after reboot |
 | `muxr kill <name>` | Kill a session |
 | `muxr kill all` | Kill all sessions |
-| `muxr rename <name>` | Rename current session |
+| `muxr rename <name>` | Rename: tmux + session file on disk + runtime relink |
 | `muxr init` | Create default config |
 | `muxr completions <shell>` | Shell completions (zsh, bash, fish) |
 | `muxr tmux-status` | tmux status bar integration |
