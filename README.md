@@ -34,13 +34,18 @@ Pre-built binaries for macOS arm64 and Linux amd64 are available in
 ## Quick start
 
 ```bash
-muxr init                       # create config
-muxr work api                   # open work/api session
-muxr personal blog              # open personal/blog session
-muxr switch                     # TUI picker to jump between them
-muxr save                       # snapshot before reboot
-muxr restore                    # bring everything back
+muxr init                                # create config
+muxr work                                # open the work harness switchboard
+muxr work api topic-flag                 # open work/api/topic-flag campaign session
+muxr switch                              # TUI picker to jump between them
+muxr save                                # snapshot before reboot
+muxr restore                             # bring everything back
 ```
+
+Sessions are addressed as `<harness>/<campaign>/<topic>`. Topics are
+kebab-case and describe the work (e.g. `cicd-stub-fix`,
+`retrieval-precision`); they are not date-stamped. The per-harness
+switchboard is a singleton at `<harness>/_switchboard/switchboard`.
 
 ## Config
 
@@ -77,15 +82,15 @@ muxr is a thin layer over tmux. Each session gets a named tmux session,
 the right working directory, and your default tool running.
 
 ```
-muxr work api
-  tmux new-session -s "work/api" -c ~/projects/work
+muxr work api topic-flag
+  tmux new-session -s "work/api/topic-flag" -c ~/projects/work
   tmux send-keys "claude" Enter
-  tmux attach -t "work/api"
+  tmux attach -t "work/api/topic-flag"
 ```
 
-Session names follow the pattern `vertical/context`. You can nest
-further: `muxr work api auth` creates `work/api/auth`. Sessions persist
-across terminal restarts because tmux keeps them alive.
+Session names follow the pattern `harness/campaign/topic`. The topic is
+mandatory and validated as kebab-case. Sessions persist across terminal
+restarts because tmux keeps them alive.
 
 ## TUI switcher
 
@@ -136,9 +141,9 @@ Remote sessions re-establish connections.
 | Command | What it does |
 |---------|-------------|
 | `muxr` | Control plane (bare shell) |
-| `muxr <vertical> [context...]` | Create or attach to a local session |
+| `muxr <harness>` | Open the harness switchboard singleton |
+| `muxr <harness> <campaign> <topic>` | Open or attach to a campaign session |
 | `muxr <remote> [context...]` | Create or attach to a remote session |
-| `muxr new <vertical> [context...]` | Create session in background |
 | `muxr switch` | Interactive TUI session picker |
 | `muxr ls` | List active sessions |
 | `muxr save` | Snapshot session state |

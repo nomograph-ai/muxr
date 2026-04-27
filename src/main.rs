@@ -155,7 +155,7 @@ fn cmd_control_plane(tmux: &Tmux) -> Result<()> {
     Ok(())
 }
 
-/// Open or attach to a session: muxr work api auth
+/// Open or attach to a session: muxr <harness> [<campaign> <topic>]
 fn cmd_open(tmux: &Tmux, args: &[String], tool_override: Option<&str>) -> Result<()> {
     let config = Config::load()?;
     let name = &args[0];
@@ -171,35 +171,57 @@ fn cmd_open(tmux: &Tmux, args: &[String], tool_override: Option<&str>) -> Result
     }
 
     let dir = config.resolve_dir(name)?;
-
-    // No campaign arg -> route to the harness switchboard (auto-scaffold
-    // on first launch).
-    let switchboard_slug: String;
-    let campaign: &str = if let Some(arg) = args.get(1) {
-        arg.as_str()
-    } else {
-        primitives::scaffold_switchboard(&dir)?;
-        switchboard_slug = primitives::SWITCHBOARD.to_string();
-        &switchboard_slug
-    };
-
-    let date = args.get(2).cloned().unwrap_or_else(primitives::today);
     let _ = tool_override;
-    cmd_open_campaign(tmux, &config, name, campaign, &date)
+
+    // No campaign arg -> route to the per-harness switchboard singleton.
+    if args.get(1).is_none() {
+        primitives::scaffold_switchboard(&dir)?;
+        return cmd_open_campaign(
+            tmux,
+            &config,
+            name,
+            primitives::SWITCHBOARD,
+            primitives::SWITCHBOARD_TOPIC,
+        );
+    }
+
+    let campaign = args[1].as_str();
+    if campaign.starts_with('_') {
+        anyhow::bail!(
+            "Campaign slug '{campaign}' is reserved (leading underscore).\n\
+             The switchboard is launched via `muxr {name}` with no campaign arg."
+        );
+    }
+    let topic = args.get(2).map(|s| s.as_str()).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Topic required: muxr {name} {campaign} <topic>.\n\
+             Topic is kebab-case and describes the work (e.g. 'cicd-stub-fix')."
+        )
+    })?;
+    primitives::validate_topic(topic)?;
+    if args.len() > 3 {
+        let extras = args[3..].join(" ");
+        anyhow::bail!(
+            "Unexpected extra args: {extras}\n\
+             Launch shape is: muxr <harness> <campaign> <topic>."
+        );
+    }
+
+    cmd_open_campaign(tmux, &config, name, campaign, topic)
 }
 
-/// Open or attach to a campaign session: muxr <harness> <campaign> [<date>]
+/// Open or attach to a campaign session: muxr <harness> <campaign> <topic>
 ///
-/// Resolves `campaigns/<campaign>/sessions/<date>[-<suffix>].md`, scaffolding
-/// from `campaigns/TEMPLATE/sessions/TEMPLATE.md` if no same-day file exists.
-/// Composes system prompt from the campaign body + session body; passes each
-/// campaign `paths:` entry as `--add-dir`.
+/// Resolves `campaigns/<campaign>/sessions/<topic>.md`, scaffolding from
+/// `campaigns/TEMPLATE/sessions/TEMPLATE.md` if missing. Composes system
+/// prompt from the campaign body + session body; passes each campaign
+/// `paths:` entry as `--add-dir`.
 fn cmd_open_campaign(
     tmux: &Tmux,
     config: &Config,
     harness_name: &str,
     campaign: &str,
-    date: &str,
+    topic: &str,
 ) -> Result<()> {
     let harness_dir = config.resolve_dir(harness_name)?;
     // If the campaign doesn't exist yet, prompt interactively so the
@@ -210,16 +232,12 @@ fn cmd_open_campaign(
         .join(campaign)
         .join("campaign.md");
     if !campaign_md_path.is_file() {
-        primitives::scaffold_campaign_stub(&harness_dir, campaign)?;
+        primitives::scaffold_campaign_stub(&harness_dir, campaign, topic)?;
     }
     let campaign_md = primitives::campaign_file(&harness_dir, campaign)?;
-    let session_path = primitives::resolve_or_scaffold_session(&harness_dir, campaign, date)?;
+    let session_path = primitives::resolve_or_scaffold_session(&harness_dir, campaign, topic)?;
 
-    let session_basename = session_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or(date);
-    let session_name = format!("{harness_name}/{campaign}/{session_basename}");
+    let session_name = format!("{harness_name}/{campaign}/{topic}");
 
     if tmux.session_exists(&session_name) {
         eprintln!("Attaching to {session_name}");
@@ -276,10 +294,8 @@ fn cmd_open_campaign(
         format!("{}\n\n---\n\n{}", harness_md_content.trim_end(), composed)
     };
 
-    let tmp_path = std::env::temp_dir().join(format!(
-        "muxr-prompt-{}-{}-{}.md",
-        harness_name, campaign, session_basename
-    ));
+    let tmp_path =
+        std::env::temp_dir().join(format!("muxr-prompt-{harness_name}-{campaign}-{topic}.md"));
     std::fs::write(&tmp_path, &full_prompt)?;
 
     // Clear the inline and replace the file with our composed temp file.

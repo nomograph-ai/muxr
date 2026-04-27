@@ -89,6 +89,47 @@ pub fn campaign_file(harness_dir: &Path, campaign: &str) -> Result<PathBuf> {
 /// Launched by `muxr <harness>` with no campaign arg.
 pub const SWITCHBOARD: &str = "_switchboard";
 
+/// Singleton topic used for the switchboard session file. The switchboard
+/// is one accumulating log per harness, not per-topic.
+pub const SWITCHBOARD_TOPIC: &str = "switchboard";
+
+/// Validate a topic slug. Topics name session files and tmux sessions, so
+/// they must be filesystem- and tmux-safe.
+///
+/// Rules: kebab-case (lowercase letters, digits, hyphens), 1-64 chars,
+/// no leading/trailing/consecutive hyphens.
+pub fn validate_topic(topic: &str) -> Result<()> {
+    if topic.is_empty() {
+        anyhow::bail!(
+            "Topic required: muxr <harness> <campaign> <topic>.\n\
+             Topic is kebab-case and describes the work (e.g. 'cicd-stub-fix')."
+        );
+    }
+    if topic.len() > 64 {
+        anyhow::bail!(
+            "Topic too long: {} chars (max 64). Pick something shorter.",
+            topic.len()
+        );
+    }
+    for c in topic.chars() {
+        if !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+            anyhow::bail!(
+                "Topic must be kebab-case (lowercase letters, digits, hyphens).\n\
+                 Invalid char: '{c}'. Try kebab-case like 'cicd-stub-fix'."
+            );
+        }
+    }
+    // Reject empty segments: catches leading hyphen, trailing hyphen, and
+    // consecutive hyphens in one rule.
+    if topic.split('-').any(|s| s.is_empty()) {
+        anyhow::bail!(
+            "Topic must not have leading, trailing, or consecutive hyphens.\n\
+             Got '{topic}'. Try kebab-case like 'cicd-stub-fix'."
+        );
+    }
+    Ok(())
+}
+
 /// Scaffold the switchboard campaign for a harness if it doesn't exist.
 ///
 /// The switchboard is the per-harness orchestrator AI. It lives at
@@ -131,15 +172,15 @@ pub fn scaffold_switchboard(harness_dir: &Path) -> Result<PathBuf> {
         fs::write(&campaign_md, content)?;
     }
 
-    // Seed today's session if missing
-    let today = today();
-    let session_path = sessions_dir.join(format!("{today}.md"));
+    // Seed the singleton switchboard session if missing. The switchboard
+    // is one accumulating log per harness, never date- or topic-keyed.
+    let session_path = sessions_dir.join(format!("{SWITCHBOARD_TOPIC}.md"));
     if !session_path.exists() {
         let content = format!(
             "---\ncampaign: {SWITCHBOARD}\nentrypoint: \"Switchboard ready. First-glance: run `synthesist status` and ls campaigns/ so you know what's live. Then wait for the human's intent.\"\n---\n\n\
-             # Switchboard {today}\n\n\
-             ## {today}\n\
-             Switchboard session opened.\n"
+             # Switchboard\n\n\
+             ## Log\n\
+             Switchboard scaffolded.\n"
         );
         fs::write(&session_path, content)?;
     }
@@ -156,7 +197,7 @@ pub fn scaffold_switchboard(harness_dir: &Path) -> Result<PathBuf> {
 /// is about and populate campaign.md via Edit. This keeps the launch
 /// command single-keystroke and moves the onboarding into a natural
 /// LLM conversation where typos, ambiguity, and defaults are cheap.
-pub fn scaffold_campaign_stub(harness_dir: &Path, campaign: &str) -> Result<PathBuf> {
+pub fn scaffold_campaign_stub(harness_dir: &Path, campaign: &str, topic: &str) -> Result<PathBuf> {
     let campaign_dir = harness_dir.join("campaigns").join(campaign);
     let sessions_dir = campaign_dir.join("sessions");
     fs::create_dir_all(&sessions_dir)?;
@@ -172,10 +213,9 @@ pub fn scaffold_campaign_stub(harness_dir: &Path, campaign: &str) -> Result<Path
     let campaign_md = campaign_dir.join("campaign.md");
     fs::write(&campaign_md, campaign_content)?;
 
-    // Seed today's session file with a bootstrap entrypoint so Claude
+    // Seed the topic's session file with a bootstrap entrypoint so Claude
     // knows to run the onboarding conversation on first response.
-    let today = today();
-    let session_path = sessions_dir.join(format!("{today}.md"));
+    let session_path = sessions_dir.join(format!("{topic}.md"));
     if !session_path.exists() {
         let entrypoint = format!(
             "Bootstrap campaign '{campaign}'. campaign.md is a stub. \
@@ -189,8 +229,8 @@ pub fn scaffold_campaign_stub(harness_dir: &Path, campaign: &str) -> Result<Path
         );
         let session_content = format!(
             "---\ncampaign: {campaign}\nentrypoint: \"{entrypoint}\"\n---\n\n\
-             # Session {today}\n\n\
-             ## {today}\n\
+             # {topic}\n\n\
+             ## Log\n\
              Freshly scaffolded campaign. Awaiting onboarding conversation.\n"
         );
         fs::write(&session_path, session_content)?;
@@ -204,32 +244,22 @@ pub fn scaffold_campaign_stub(harness_dir: &Path, campaign: &str) -> Result<Path
     Ok(campaign_md)
 }
 
-/// Find or scaffold a session file for the given campaign and date.
-/// If a file at `campaigns/<campaign>/sessions/<date>.md` exists, returns
+/// Find or scaffold a session file for the given campaign and topic.
+/// If a file at `campaigns/<campaign>/sessions/<topic>.md` exists, returns
 /// it. Otherwise scaffolds from `campaigns/TEMPLATE/sessions/TEMPLATE.md`
 /// (or a built-in fallback) and returns the new path.
 pub fn resolve_or_scaffold_session(
     harness_dir: &Path,
     campaign: &str,
-    date: &str,
+    topic: &str,
 ) -> Result<PathBuf> {
     let campaign_dir = harness_dir.join("campaigns").join(campaign);
     let sessions_dir = campaign_dir.join("sessions");
-
-    // If a same-date file already exists, prefer the plain one; if only
-    // suffixed variants exist (e.g. 2026-04-24-cicd.md), return the first
-    // one found so muxr attaches to ongoing work.
-    let plain = sessions_dir.join(format!("{date}.md"));
-    if plain.is_file() {
-        return Ok(plain);
-    }
-    if sessions_dir.is_dir()
-        && let Some(suffixed) = first_matching_session(&sessions_dir, date)?
-    {
-        return Ok(suffixed);
+    let path = sessions_dir.join(format!("{topic}.md"));
+    if path.is_file() {
+        return Ok(path);
     }
 
-    // Not found: scaffold at <date>.md
     fs::create_dir_all(&sessions_dir)?;
     let template_path = harness_dir
         .join("campaigns")
@@ -238,41 +268,16 @@ pub fn resolve_or_scaffold_session(
         .join("TEMPLATE.md");
     let content = if template_path.is_file() {
         let tpl = fs::read_to_string(&template_path)?;
+        // `<date>[-<suffix>]` is the legacy placeholder kept here so existing
+        // TEMPLATE.md files in user harnesses keep working without a rewrite.
         tpl.replace("<slug>", campaign)
-            .replace("<date>[-<suffix>]", date)
+            .replace("<topic>", topic)
+            .replace("<date>[-<suffix>]", topic)
     } else {
-        format!(
-            "---\ncampaign: {campaign}\nentrypoint: \"\"\n---\n\n# Session {date}\n\n## {date}\n\n"
-        )
+        format!("---\ncampaign: {campaign}\nentrypoint: \"\"\n---\n\n# {topic}\n\n## Log\n\n")
     };
-    fs::write(&plain, content)?;
-    Ok(plain)
-}
-
-/// Find the first `<date>[-<suffix>].md` file in `sessions_dir` whose
-/// basename begins with `<date>`. Skips files in `archive/`.
-fn first_matching_session(sessions_dir: &Path, date: &str) -> Result<Option<PathBuf>> {
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    for entry in fs::read_dir(sessions_dir)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_file() {
-            continue;
-        }
-        let name = entry.file_name();
-        let Some(name_str) = name.to_str() else {
-            continue;
-        };
-        if !name_str.ends_with(".md") {
-            continue;
-        }
-        let exact = format!("{date}.md");
-        let with_suffix = format!("{date}-");
-        if name_str == exact || name_str.starts_with(&with_suffix) {
-            candidates.push(entry.path());
-        }
-    }
-    candidates.sort();
-    Ok(candidates.into_iter().next())
+    fs::write(&path, content)?;
+    Ok(path)
 }
 
 /// Compose the system prompt addition from campaign + session bodies.
@@ -287,11 +292,6 @@ pub fn compose_prompt(campaign: &str, campaign_body: &str, session_body: &str) -
 /// Expand `~` in a path string to the user's home directory.
 pub fn expand_home(path: &str) -> String {
     shellexpand::tilde(path).to_string()
-}
-
-/// Today's date as `YYYY-MM-DD`.
-pub fn today() -> String {
-    chrono::Local::now().format("%Y-%m-%d").to_string()
 }
 
 #[cfg(test)]
@@ -354,14 +354,7 @@ mod tests {
     }
 
     #[test]
-    fn today_has_iso_shape() {
-        let t = today();
-        assert_eq!(t.len(), 10);
-        assert!(t.chars().filter(|c| *c == '-').count() == 2);
-    }
-
-    #[test]
-    fn resolve_or_scaffold_creates_file() {
+    fn resolve_or_scaffold_creates_file_at_topic() {
         let tmp = tempfile::tempdir().unwrap();
         let harness_dir = tmp.path();
         let campaign_dir = harness_dir.join("campaigns").join("gkg");
@@ -372,15 +365,35 @@ mod tests {
         )
         .unwrap();
 
-        let path = resolve_or_scaffold_session(harness_dir, "gkg", "2026-04-24").unwrap();
+        let path = resolve_or_scaffold_session(harness_dir, "gkg", "topic-flag").unwrap();
         assert!(path.exists());
-        assert_eq!(path.file_name().unwrap().to_str().unwrap(), "2026-04-24.md");
+        assert_eq!(path.file_name().unwrap().to_str().unwrap(), "topic-flag.md");
         let contents = fs::read_to_string(&path).unwrap();
         assert!(contents.contains("campaign: gkg"));
+        assert!(contents.contains("# topic-flag"));
     }
 
     #[test]
-    fn resolve_or_scaffold_prefers_suffixed_same_day() {
+    fn resolve_or_scaffold_attaches_to_existing_topic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let harness_dir = tmp.path();
+        let sessions_dir = harness_dir.join("campaigns").join("gkg").join("sessions");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        let existing = sessions_dir.join("retrieval.md");
+        fs::write(
+            &existing,
+            "---\ncampaign: gkg\nentrypoint: x\n---\n\n# retrieval\n",
+        )
+        .unwrap();
+
+        let path = resolve_or_scaffold_session(harness_dir, "gkg", "retrieval").unwrap();
+        assert_eq!(path, existing);
+    }
+
+    #[test]
+    fn resolve_or_scaffold_does_not_match_legacy_dated_files() {
+        // Legacy `2026-04-24-cicd.md` files do not satisfy a `2026-04-24`
+        // topic lookup. The new world is exact-match only.
         let tmp = tempfile::tempdir().unwrap();
         let harness_dir = tmp.path();
         let sessions_dir = harness_dir.join("campaigns").join("gkg").join("sessions");
@@ -392,9 +405,122 @@ mod tests {
         .unwrap();
 
         let path = resolve_or_scaffold_session(harness_dir, "gkg", "2026-04-24").unwrap();
-        assert_eq!(
-            path.file_name().unwrap().to_str().unwrap(),
-            "2026-04-24-cicd.md"
-        );
+        assert_eq!(path.file_name().unwrap().to_str().unwrap(), "2026-04-24.md");
+    }
+
+    #[test]
+    fn validate_topic_accepts_kebab_case() {
+        assert!(validate_topic("cicd-stub-fix").is_ok());
+        assert!(validate_topic("a").is_ok());
+        assert!(validate_topic("topic-flag").is_ok());
+        assert!(validate_topic("v2-rewrite").is_ok());
+        assert!(validate_topic("0-warmup").is_ok());
+    }
+
+    #[test]
+    fn validate_topic_rejects_empty() {
+        let err = validate_topic("").unwrap_err().to_string();
+        assert!(err.contains("Topic required"));
+    }
+
+    #[test]
+    fn validate_topic_rejects_uppercase() {
+        assert!(validate_topic("Topic").is_err());
+        assert!(validate_topic("MyTopic").is_err());
+    }
+
+    #[test]
+    fn validate_topic_rejects_slash_and_space() {
+        assert!(validate_topic("foo/bar").is_err());
+        assert!(validate_topic("foo bar").is_err());
+        assert!(validate_topic("foo.bar").is_err());
+    }
+
+    #[test]
+    fn validate_topic_rejects_leading_hyphen_or_underscore() {
+        assert!(validate_topic("-foo").is_err());
+        assert!(validate_topic("_foo").is_err());
+    }
+
+    #[test]
+    fn validate_topic_rejects_trailing_hyphen() {
+        assert!(validate_topic("foo-").is_err());
+    }
+
+    #[test]
+    fn validate_topic_rejects_consecutive_hyphens() {
+        assert!(validate_topic("foo--bar").is_err());
+        assert!(validate_topic("a---b").is_err());
+    }
+
+    #[test]
+    fn validate_topic_rejects_lone_hyphen() {
+        assert!(validate_topic("-").is_err());
+    }
+
+    #[test]
+    fn validate_topic_rejects_too_long() {
+        let long = "a".repeat(65);
+        assert!(validate_topic(&long).is_err());
+        let max = "a".repeat(64);
+        assert!(validate_topic(&max).is_ok());
+    }
+
+    #[test]
+    fn scaffold_switchboard_creates_singleton() {
+        let tmp = tempfile::tempdir().unwrap();
+        let harness_dir = tmp.path();
+        scaffold_switchboard(harness_dir).unwrap();
+
+        let session_path = harness_dir
+            .join("campaigns")
+            .join(SWITCHBOARD)
+            .join("sessions")
+            .join(format!("{SWITCHBOARD_TOPIC}.md"));
+        assert!(session_path.is_file(), "switchboard.md should exist");
+
+        let contents = fs::read_to_string(&session_path).unwrap();
+        assert!(contents.contains(&format!("campaign: {SWITCHBOARD}")));
+        assert!(contents.contains("# Switchboard"));
+    }
+
+    #[test]
+    fn scaffold_campaign_stub_writes_topic_keyed_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let harness_dir = tmp.path();
+        scaffold_campaign_stub(harness_dir, "gkg", "retrieval-precision").unwrap();
+
+        let campaign_md = harness_dir
+            .join("campaigns")
+            .join("gkg")
+            .join("campaign.md");
+        assert!(campaign_md.is_file());
+
+        let session_path = harness_dir
+            .join("campaigns")
+            .join("gkg")
+            .join("sessions")
+            .join("retrieval-precision.md");
+        assert!(session_path.is_file(), "topic-keyed session should exist");
+        let body = fs::read_to_string(&session_path).unwrap();
+        assert!(body.contains("campaign: gkg"));
+        assert!(body.contains("# retrieval-precision"));
+        assert!(body.contains("Bootstrap campaign 'gkg'"));
+    }
+
+    #[test]
+    fn scaffold_switchboard_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let harness_dir = tmp.path();
+        scaffold_switchboard(harness_dir).unwrap();
+        let session_path = harness_dir
+            .join("campaigns")
+            .join(SWITCHBOARD)
+            .join("sessions")
+            .join(format!("{SWITCHBOARD_TOPIC}.md"));
+        fs::write(&session_path, "custom content").unwrap();
+
+        scaffold_switchboard(harness_dir).unwrap();
+        assert_eq!(fs::read_to_string(&session_path).unwrap(), "custom content");
     }
 }

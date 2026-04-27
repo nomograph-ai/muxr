@@ -2,6 +2,60 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.3.0] (2026-04-27)
+
+### Changed (breaking)
+- Sessions are topic-keyed, not date-keyed. `muxr <harness> <campaign>
+  <topic>` is the launch shape; `<topic>` is mandatory and validated as
+  kebab-case (lowercase letters, digits, hyphens; 1-64 chars; must start
+  with a letter or digit). Session files live at
+  `campaigns/<campaign>/sessions/<topic>.md` -- no date prefix, no
+  date-based glob fallback. The previous `muxr <harness> <campaign>
+  [<date>]` shape is gone.
+- The switchboard is now a per-harness singleton, not a date-stamped
+  session. `muxr <harness>` (no campaign) opens
+  `campaigns/_switchboard/sessions/switchboard.md` -- one accumulating
+  log per harness, scaffolded once on first launch.
+
+### Removed
+- `primitives::today()` and the `chrono` dependency. Muxr no longer
+  reads the wall clock to compose session filenames.
+- `primitives::first_matching_session()` and the `<date>-<suffix>.md`
+  glob fallback in `resolve_or_scaffold_session`. Topic lookup is
+  exact-match only.
+
+### Added
+- `primitives::validate_topic()` -- topic format gate run at every
+  campaign launch. Rejects empty, too-long, slash, space, uppercase,
+  and any topic with leading, trailing, or consecutive hyphens, with
+  prescriptive errors that name the next action.
+- `primitives::SWITCHBOARD_TOPIC` constant for the singleton switchboard
+  session filename.
+- Reserved-slug guard. Explicit campaign args beginning with `_` are
+  rejected; the switchboard is still launched via `muxr <harness>` with
+  no campaign arg. Prevents accidental collision with the
+  `_switchboard` singleton.
+- Extra-positional-arg check. `muxr <harness> <campaign> <topic>
+  <extra>` now bails with a usage hint instead of silently dropping
+  the extra arg.
+
+### Migration
+- Existing dated session files (`2026-04-24.md`, `2026-04-24-cicd.md`)
+  are not migrated. They keep working as exact-match topic lookups if
+  the date string is passed as a topic, but new launches should pick
+  topical names. Rename a live session and its file together with
+  `muxr rename <harness>/<campaign>/<topic>` -- e.g. inside a session
+  named `tanuki/harness/2026-04-24`, run
+  `muxr rename tanuki/harness/topic-flag` to align tmux state, the
+  session file on disk, and the runtime label.
+- Existing dated switchboard sessions are orphaned by the singleton
+  scaffold. The new `switchboard.md` is created alongside on first
+  launch; the old dated files remain on disk untouched.
+- TEMPLATE.md backward compatibility: `resolve_or_scaffold_session`
+  replaces both `<topic>` (new) and `<date>[-<suffix>]` (legacy)
+  placeholders. Existing TEMPLATE.md files keep working; new ones
+  should use `<topic>`.
+
 ## [1.2.0] (2026-04-26)
 
 ### Added
