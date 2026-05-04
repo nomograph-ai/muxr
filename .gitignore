@@ -1,2 +1,11 @@
 /target/
 .cargo/
+
+# rune-managed: materialized by `rune sync` from the source-of-truth
+# registry (nomograph/runes). Tracking the synced copy creates a drift
+# class where every rune update produces a "sync" commit on this repo,
+# and the committed copy can fall behind the registry between syncs.
+# `.claude/rune.lock` (when present) pins which registry version each
+# skill came from.
+.claude/skills/
+.agent/skills
