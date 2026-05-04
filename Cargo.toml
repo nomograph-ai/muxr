@@ -20,6 +20,9 @@ exclude = [
     "demo.tape",
     "specs/*",
     "scripts/*",
+    # agent-shape rubric + reports are local/CI artifacts.
+    "agent-shape.toml",
+    "agent-shape-reports/",
 ]
 license = "MIT"
 

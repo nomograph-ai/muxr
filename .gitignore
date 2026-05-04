@@ -1,11 +1,11 @@
 /target/
 .cargo/
 
-# rune-managed: materialized by `rune sync` from the source-of-truth
-# registry (nomograph/runes). Tracking the synced copy creates a drift
-# class where every rune update produces a "sync" commit on this repo,
-# and the committed copy can fall behind the registry between syncs.
-# `.claude/rune.lock` (when present) pins which registry version each
-# skill came from.
-.claude/skills/
+# `.claude/` is local-only: rune subscriptions, lockfile, and synced skill
+# content are all per-developer state. Run `rune setup` then `rune sync` on
+# a fresh clone to materialize.
+.claude/
 .agent/skills
+
+# AGENTS.md is rune-managed local agent context; not part of the source repo.
+AGENTS.md

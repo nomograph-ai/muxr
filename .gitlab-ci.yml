@@ -6,6 +6,9 @@ include:
       project_description: "Tmux session manager for AI coding workflows."
       audit_allow_failure: false
       crates_publish: true
+  - component: gitlab.com/nomograph/pipeline/agent-shape@v2.6.0
+    inputs:
+      binary_name: muxr
 
 stages: [test, build, sign, publish, release, notify]
 
