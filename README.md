@@ -11,6 +11,13 @@ Harness session multiplexer for AI coding workflows. Owns the address
 `harness/campaign/session/segment` across tmux, the filesystem, and your
 AI runtime, so a rename or move stays coherent in all three.
 
+## What it is
+
+muxr is a tmux + AI runtime session manager. Sessions live as
+typed records on disk; tmux state and the runtime command stay in
+lockstep with that record. `muxr save` snapshots; `muxr restore`
+brings everything back.
+
 ## The problem
 
 You work across multiple projects. Each one needs its own terminal
