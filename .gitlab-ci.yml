@@ -1,13 +1,13 @@
 # gitlab.com/nomograph/muxr .gitlab-ci.yml
 #
-# Pipeline structure provided by nomograph/pipeline tool-rust@v4.1.2.
+# Pipeline structure provided by nomograph/pipeline tool-rust@v4.1.7.
 
 default:
   tags: [storr]
 
 include:
   - template: Jobs/Secret-Detection.gitlab-ci.yml
-  - component: gitlab.com/nomograph/pipeline/tool-rust@v4.1.2
+  - component: gitlab.com/nomograph/pipeline/tool-rust@v4.1.7
     inputs:
       binary_name: muxr
       project_description: "Tmux session manager for AI coding workflows."
