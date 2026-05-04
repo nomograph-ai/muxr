@@ -168,4 +168,4 @@ MIT
 
 ---
 
-Built in the Den by Tanuki and Andrew Dunn, 2026.
+Part of [Nomograph Labs](https://nomograph.ai).
