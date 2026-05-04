@@ -1,6 +1,6 @@
 include:
   - template: Jobs/Secret-Detection.gitlab-ci.yml
-  - component: gitlab.com/nomograph/pipeline/rust-cli@v2.4.6
+  - component: gitlab.com/nomograph/pipeline/rust-cli@v2.6.0
     inputs:
       binary_name: muxr
       project_description: "Tmux session manager for AI coding workflows."
@@ -8,6 +8,16 @@ include:
       crates_publish: true
 
 stages: [test, build, sign, publish, release, notify]
+
+# Backstop against absolute symlinks landing in the tree. See
+# scripts/check-symlinks.sh for rationale.
+check-symlinks:
+  stage: test
+  image: alpine:3.19
+  before_script:
+    - apk add --no-cache bash git
+  script:
+    - bash scripts/check-symlinks.sh
 
 # Nudge the kits registry to re-sense on tag push, so own-tier updates
 # land in an MR immediately instead of waiting for the twice-daily
