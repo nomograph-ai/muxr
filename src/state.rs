@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::process::Command;
+use sysinfo::{Pid, ProcessesToUpdate, System};
 
 use crate::config::{Config, SessionDiscovery, Tool};
 use crate::remote;
@@ -26,31 +26,25 @@ pub struct SavedSession {
 
 /// List child PIDs of a given parent process.
 ///
-/// Uses `ps -A -o pid,ppid` and filters in-process. Cross-platform:
-/// Linux's pgrep accepts `-P <ppid>` alone, but macOS pgrep requires
-/// a pattern argument alongside `-P` -- it returns nothing silently
-/// if only `-P` is given. That silent failure broke muxr save's
-/// Claude session discovery on macOS.
+/// Uses sysinfo (libproc on macOS, /proc on Linux) instead of shelling
+/// out to `ps`. The previous `ps -A -o pid,ppid` approach had two
+/// problems:
+///   1. Sandboxes (e.g. nono's `dangerous_commands_macos` group) can
+///      block /bin/ps, leaving every save with sessionId=null.
+///   2. macOS pgrep's `-P` flag silently failed without a pattern arg.
+///
+/// Native API avoids both. sysinfo refreshes process metadata in-process,
+/// so callers running inside a sandbox still see the full process tree
+/// they own.
 pub fn child_pids(parent: u32) -> Vec<u32> {
-    let output = Command::new("ps")
-        .args(["-A", "-o", "pid=,ppid="])
-        .output()
-        .ok();
-
-    let Some(o) = output else { return vec![] };
-    if !o.status.success() {
-        return vec![];
-    }
-
-    let parent_str = parent.to_string();
-    String::from_utf8_lossy(&o.stdout)
-        .lines()
-        .filter_map(|line| {
-            let mut tokens = line.split_whitespace();
-            let pid = tokens.next()?;
-            let ppid = tokens.next()?;
-            if ppid == parent_str {
-                pid.parse().ok()
+    let mut sys = System::new();
+    sys.refresh_processes(ProcessesToUpdate::All, true);
+    let parent_pid = Pid::from_u32(parent);
+    sys.processes()
+        .iter()
+        .filter_map(|(pid, p)| {
+            if p.parent() == Some(parent_pid) {
+                Some(pid.as_u32())
             } else {
                 None
             }
@@ -110,24 +104,29 @@ pub fn discover_session_id(
 /// Matches against the full argv (not just comm) because node-based
 /// harnesses like claude-code run as `node /path/to/claude ...` -- the
 /// executable's comm is `node`, but one of the args ends with `/claude`.
+///
+/// Uses sysinfo for process metadata so this stays sandbox-safe (no
+/// /bin/ps shell-out).
 #[allow(dead_code)] // used by harness.rs and switcher.rs
 pub fn has_harness_process(tmux: &Tmux, tmux_session: &str, bin: &str) -> bool {
     let Some(Ok(Some(shell_pid))) = Some(tmux.pane_pid(tmux_session)) else {
         return false;
     };
     let suffix = format!("/{bin}");
+
+    let mut sys = System::new();
+    sys.refresh_processes(ProcessesToUpdate::All, true);
+
     for pid in descendant_pids(shell_pid) {
-        if let Ok(output) = Command::new("ps")
-            .args(["-p", &pid.to_string(), "-o", "args="])
-            .output()
-        {
-            let args_str = String::from_utf8_lossy(&output.stdout);
-            if args_str
-                .split_whitespace()
-                .any(|tok| tok == bin || tok.ends_with(&suffix))
-            {
-                return true;
-            }
+        let Some(proc) = sys.process(Pid::from_u32(pid)) else {
+            continue;
+        };
+        let cmd_matches = proc.cmd().iter().any(|arg| {
+            let s = arg.to_string_lossy();
+            s == bin || s.ends_with(&suffix)
+        });
+        if cmd_matches {
+            return true;
         }
     }
     false

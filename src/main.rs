@@ -80,6 +80,30 @@ enum Commands {
     },
     /// Interactive session switcher (TUI)
     Switch,
+    /// Broadcast a slash command to every harness session.
+    ///
+    /// Default command is `/reload` -- useful when you've shipped an
+    /// extension change and want every running Pi session to pick it
+    /// up without manually relaunching each one.
+    ///
+    /// Filters: by default applies to every active harness session.
+    /// Pass --tool to limit to one runtime (e.g. --tool pi),
+    /// --harness to limit to one harness (e.g. --harness tanuki).
+    /// Pass --dry-run to print the targets without sending keys.
+    Broadcast {
+        /// Slash command to send (with leading /). Defaults to "/reload".
+        #[arg(default_value = "/reload")]
+        cmd: String,
+        /// Limit to sessions running this tool (e.g. "pi", "claude").
+        #[arg(long)]
+        tool: Option<String>,
+        /// Limit to sessions in this harness (e.g. "tanuki", "dunn").
+        #[arg(long)]
+        harness: Option<String>,
+        /// List targets without sending the command.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Generate shell completions (zsh, bash, fish)
     Completions {
         /// Shell to generate completions for
@@ -109,6 +133,12 @@ fn main() -> Result<()> {
         Some(Commands::TmuxStatus) => cmd_tmux_status(&tmux),
         Some(Commands::ClaudeStatus) => claude_status::run(&tmux),
         Some(Commands::Switch) => cmd_switch(&tmux),
+        Some(Commands::Broadcast {
+            cmd,
+            tool,
+            harness,
+            dry_run,
+        }) => cmd_broadcast(&tmux, &cmd, tool.as_deref(), harness.as_deref(), dry_run),
         Some(Commands::Rename { name }) => cmd_rename(&tmux, &name, cli.tool.as_deref()),
         Some(Commands::Kill { name }) => cmd_kill(&tmux, &name),
         Some(Commands::Retire { name }) => cmd_retire(&tmux, &name),
@@ -237,7 +267,17 @@ fn cmd_open_campaign(
     let campaign_md = primitives::campaign_file(&harness_dir, campaign)?;
     let session_path = primitives::resolve_or_scaffold_session(&harness_dir, campaign, topic)?;
 
-    let session_name = format!("{harness_name}/{campaign}/{topic}");
+    // Switchboard is a singleton; collapse the slug from
+    // `<harness>/_switchboard/switchboard` to just `<harness>/switchboard`.
+    // Filesystem stays at campaigns/_switchboard/sessions/switchboard.md
+    // so we don't have to migrate existing harnesses; only the tmux
+    // session name (and downstream switcher display, health-cache
+    // filename, statusline) changes.
+    let session_name = if campaign == primitives::SWITCHBOARD {
+        format!("{harness_name}/{}", primitives::SWITCHBOARD_TOPIC)
+    } else {
+        format!("{harness_name}/{campaign}/{topic}")
+    };
 
     if tmux.session_exists(&session_name) {
         eprintln!("Attaching to {session_name}");
@@ -313,7 +353,7 @@ fn cmd_open_campaign(
     config.run_pre_create_hooks(&session_dir);
 
     let tool_cmd = match &tool_config {
-        Some(h) => h.launch_command_with_settings(Some(&session_name), None, None, &settings),
+        Some(h) => h.launch_command_with_settings(Some(&session_name), None, None, &settings)?,
         None => tool.clone(),
     };
 
@@ -540,6 +580,96 @@ fn cmd_kill(tmux: &Tmux, name: &str) -> Result<()> {
 /// 3. Drop the session from `state.json` so `muxr restore` won't resurrect it.
 ///
 /// This is the counterpart to `new`: retire deletes everything new creates.
+/// Broadcast a slash command to every harness session.
+///
+/// Use case: ship an extension change in pi-stack, then
+/// `muxr broadcast` (defaults to /reload) to make every running Pi
+/// session pick it up without manually relaunching each one.
+///
+/// Targets every tmux session whose first segment is a configured
+/// harness AND that has the harness binary running in the pane.
+/// Skips the muxr control plane. Filters: --tool, --harness.
+fn cmd_broadcast(
+    tmux: &Tmux,
+    cmd: &str,
+    tool_filter: Option<&str>,
+    harness_filter: Option<&str>,
+    dry_run: bool,
+) -> Result<()> {
+    let config = Config::load()?;
+
+    if !cmd.starts_with('/') {
+        anyhow::bail!(
+            "Broadcast command must start with '/'. Got: {cmd:?}\n\
+             Example: muxr broadcast /reload"
+        );
+    }
+
+    let sessions = tmux.list_sessions()?;
+    let mut targets: Vec<(String, String)> = Vec::new(); // (session_name, tool)
+
+    for (sname, _) in &sessions {
+        if sname == "muxr" {
+            continue;
+        }
+        let harness_name = sname.split('/').next().unwrap_or(sname);
+        if let Some(want) = harness_filter
+            && want != harness_name
+        {
+            continue;
+        }
+        let tool = config.resolve_tool(harness_name, None);
+        if let Some(want) = tool_filter
+            && want != tool
+        {
+            continue;
+        }
+        let Some(harness) = config.tool_for(&tool) else {
+            continue;
+        };
+        if !state::has_harness_process(tmux, sname, &harness.bin) {
+            continue;
+        }
+        targets.push((sname.clone(), tool.clone()));
+    }
+
+    if targets.is_empty() {
+        eprintln!("No matching harness sessions found.");
+        return Ok(());
+    }
+
+    eprintln!("Broadcasting {cmd:?} to {} session(s):", targets.len());
+    for (sname, tool) in &targets {
+        eprintln!("  {sname} [{tool}]");
+    }
+
+    if dry_run {
+        eprintln!("(dry-run; not sending keys)");
+        return Ok(());
+    }
+
+    let mut errors = 0;
+    for (sname, _) in &targets {
+        let target = Tmux::target(sname);
+        let status = std::process::Command::new("tmux")
+            .args(["send-keys", "-t", &target, cmd, "Enter"])
+            .status();
+        match status {
+            Ok(s) if s.success() => {}
+            _ => {
+                eprintln!("  send-keys failed: {sname}");
+                errors += 1;
+            }
+        }
+    }
+
+    if errors > 0 {
+        anyhow::bail!("{errors} session(s) failed to receive the broadcast");
+    }
+    eprintln!("Done.");
+    Ok(())
+}
+
 fn cmd_retire(tmux: &Tmux, name: &str) -> Result<()> {
     let config = Config::load().ok();
 
