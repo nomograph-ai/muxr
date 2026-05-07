@@ -503,13 +503,25 @@ fn draw_table(
             };
 
             let kill_style = Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
+            // Switchboard sessions are the per-harness dispatcher;
+            // visually distinguish them so the eye lands on the
+            // singleton without scanning. Cyan + bold across vertical
+            // and context cells; current/kill states still take
+            // precedence.
+            let is_switchboard = e.context == "switchboard";
             let vs = if is_kill_target {
                 kill_style
+            } else if is_switchboard {
+                Style::default().fg(e.color).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(e.color)
             };
             let cs = if is_kill_target {
                 kill_style
+            } else if is_switchboard {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
             } else if is_current {
                 Style::default()
                     .fg(Color::White)

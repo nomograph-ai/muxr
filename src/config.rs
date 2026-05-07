@@ -110,6 +110,28 @@ pub struct Tool {
     /// External command for status display.
     #[serde(default)]
     pub status_command: Option<String>,
+    /// Optional command prefix prepended to the launch command.
+    /// Example: `"nono run --profile ~/.config/nono/profiles/pi --"`.
+    /// The wrapper is inserted ahead of `bin` so the resulting command
+    /// becomes `<wrapper> <bin> <args...>`.
+    #[serde(default)]
+    pub wrapper: Option<String>,
+    /// How to deliver the appended system prompt to the tool.
+    /// `File` (default) passes `--append-system-prompt-file <path>` (Claude Code).
+    /// `String` reads the file and passes `--append-system-prompt <content>` (Pi).
+    #[serde(default)]
+    pub prompt_mode: PromptMode,
+}
+
+/// How a tool consumes the appended system prompt.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum PromptMode {
+    /// Pass `--append-system-prompt-file <path>`. Default; matches Claude Code.
+    #[default]
+    File,
+    /// Read the file and pass `--append-system-prompt <content>`. Used by Pi.
+    String,
 }
 
 fn default_discovery_none() -> SessionDiscovery {
@@ -150,6 +172,38 @@ impl Tool {
                 id_key: "sessionId".to_string(),
             },
             status_command: Some("muxr claude-status".to_string()),
+            wrapper: None,
+            prompt_mode: PromptMode::File,
+        }
+    }
+
+    /// Built-in Pi harness definition.
+    ///
+    /// Pi reads `.pi/settings.json` from cwd, so launch args stay empty;
+    /// the model is selected via `--model {model}` like Claude.
+    /// Session discovery references `~/.pi/sessions/{pid}.json`, which is
+    /// written by an external Pi extension (not Pi itself).
+    /// `wrapper` defaults to None and is overridable in user config (e.g.
+    /// to wrap launch in a sandboxing tool).
+    pub fn builtin_pi() -> Self {
+        Self {
+            bin: "pi".to_string(),
+            args: vec![],
+            resume_args: vec!["--resume".to_string(), "{session_id}".to_string()],
+            model_args: vec!["--model".to_string(), "{model}".to_string()],
+            rename_command: Some("/name {name}".to_string()),
+            model_switch_command: Some("/model {model}".to_string()),
+            compact_command: Some("/compact".to_string()),
+            exit_command: Some("/quit".to_string()),
+            continue_args: vec!["--continue".to_string()],
+            fork_args: vec!["--fork".to_string(), "{session_id}".to_string()],
+            session_discovery: SessionDiscovery::File {
+                pattern: "~/.pi/sessions/{pid}.json".to_string(),
+                id_key: "sessionId".to_string(),
+            },
+            status_command: None,
+            wrapper: None,
+            prompt_mode: PromptMode::String,
         }
     }
 
@@ -204,13 +258,22 @@ impl Tool {
     }
 
     /// Build the launch command with harness-specific settings from the vertical.
+    ///
+    /// If the tool has a `wrapper` set, the final command is
+    /// `<wrapper> <launch_command> <settings flags...>`.
+    /// `prompt_mode` controls how `append_system_prompt_file` is delivered:
+    /// File (default) passes `--append-system-prompt-file <path>` (Claude),
+    /// String reads the file contents and inlines them into
+    /// `--append-system-prompt <content>` (Pi, which lacks a file variant).
+    /// Pi additionally has no `--add-dir` flag, so `add_dirs` are skipped
+    /// when `bin == "pi"`.
     pub fn launch_command_with_settings(
         &self,
         session_name: Option<&str>,
         resume_id: Option<&str>,
         model: Option<&str>,
         settings: &LaunchSettings,
-    ) -> String {
+    ) -> Result<String> {
         let mut cmd = self.launch_command(session_name, resume_id, model);
 
         if let Some(ref prompts) = settings.append_system_prompt {
@@ -228,20 +291,50 @@ impl Tool {
             } else {
                 file.clone()
             };
-            cmd.push_str(&format!(
-                " --append-system-prompt-file {}",
-                shell_escape(&path)
-            ));
+            match self.prompt_mode {
+                PromptMode::File => {
+                    cmd.push_str(&format!(
+                        " --append-system-prompt-file {}",
+                        shell_escape(&path)
+                    ));
+                }
+                PromptMode::String => {
+                    // Pi has no file variant. Read the prompt and inline it.
+                    // Fail loud on read error -- a missing prompt file silently
+                    // strips the harness directives, which is worse than
+                    // refusing to launch.
+                    let content = std::fs::read_to_string(&path).with_context(|| {
+                        format!(
+                            "failed to read append_system_prompt_file at {} for tool {} (prompt_mode = string)",
+                            path, self.bin
+                        )
+                    })?;
+                    cmd.push_str(&format!(
+                        " --append-system-prompt {}",
+                        shell_escape(&content)
+                    ));
+                }
+            }
         }
-        for dir in &settings.add_dirs {
-            let expanded = shellexpand::tilde(dir);
-            cmd.push_str(&format!(" --add-dir {}", shell_escape(&expanded)));
+        // Pi has no --add-dir equivalent; sandboxing is external (e.g. nono).
+        // Other tools (claude) keep getting --add-dir as today.
+        if self.bin != "pi" {
+            for dir in &settings.add_dirs {
+                let expanded = shellexpand::tilde(dir);
+                cmd.push_str(&format!(" --add-dir {}", shell_escape(&expanded)));
+            }
         }
         if settings.exclude_dynamic_prompt {
             cmd.push_str(" --exclude-dynamic-system-prompt-sections");
         }
 
-        cmd
+        // Prepend the wrapper last so the rest of the command lines up
+        // behind it: `<wrapper> <bin> <args...>`.
+        if let Some(ref wrap) = self.wrapper {
+            cmd = format!("{} {}", wrap.trim(), cmd);
+        }
+
+        Ok(cmd)
     }
 
     /// Build the rename command to send to the pane.
@@ -413,6 +506,9 @@ impl Config {
         if tool == "claude" {
             return Some(Tool::builtin_claude());
         }
+        if tool == "pi" {
+            return Some(Tool::builtin_pi());
+        }
         None
     }
 
@@ -422,6 +518,9 @@ impl Config {
         // Add built-in claude if not overridden
         if !names.contains(&"claude".to_string()) {
             names.push("claude".to_string());
+        }
+        if !names.contains(&"pi".to_string()) {
+            names.push("pi".to_string());
         }
         names.sort();
         names
@@ -853,6 +952,162 @@ session_discovery = { type = "none" }
         let names = config.tool_names();
         assert!(names.contains(&"claude".to_string()));
         assert!(names.contains(&"opencode".to_string()));
+    }
+
+    // -- Pi runtime tests --
+
+    #[test]
+    fn builtin_pi_harness() {
+        let h = Tool::builtin_pi();
+        assert_eq!(h.bin, "pi");
+        assert!(h.args.is_empty());
+        assert_eq!(h.continue_args, vec!["--continue".to_string()]);
+        assert_eq!(h.prompt_mode, PromptMode::String);
+        assert!(h.wrapper.is_none());
+        match h.session_discovery {
+            SessionDiscovery::File {
+                ref pattern,
+                ref id_key,
+            } => {
+                assert_eq!(pattern, "~/.pi/sessions/{pid}.json");
+                assert_eq!(id_key, "sessionId");
+            }
+            _ => panic!("expected file-based session discovery"),
+        }
+    }
+
+    #[test]
+    fn tool_for_returns_builtin_pi() {
+        let config: Config = toml::from_str("[harnesses]").unwrap();
+        let h = config.tool_for("pi").unwrap();
+        assert_eq!(h.bin, "pi");
+        assert_eq!(h.prompt_mode, PromptMode::String);
+    }
+
+    #[test]
+    fn tool_names_includes_pi_builtin() {
+        let config: Config = toml::from_str("[harnesses]").unwrap();
+        let names = config.tool_names();
+        assert!(names.contains(&"pi".to_string()));
+        assert!(names.contains(&"claude".to_string()));
+    }
+
+    #[test]
+    fn pi_tool_config_overrides_builtin_with_wrapper() {
+        let toml_str = r##"
+[harnesses]
+
+[tools.pi]
+bin = "pi"
+wrapper = "nono run --profile X --"
+prompt_mode = "string"
+session_discovery = { type = "none" }
+"##;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let h = config.tool_for("pi").unwrap();
+        assert_eq!(h.wrapper.as_deref(), Some("nono run --profile X --"));
+        assert_eq!(h.prompt_mode, PromptMode::String);
+    }
+
+    #[test]
+    fn launch_command_pi_with_wrapper_and_string_prompt() {
+        // Fixture prompt file with known content.
+        let dir = tempfile::tempdir().unwrap();
+        let prompt_path = dir.path().join("test-prompt.md");
+        let fixture = "fixture content here";
+        std::fs::write(&prompt_path, fixture).unwrap();
+
+        // Tool: bin=pi, wrapper set, prompt_mode=string (sandbox profile).
+        let tool = Tool {
+            bin: "pi".to_string(),
+            args: vec![],
+            resume_args: vec!["--resume".to_string(), "{session_id}".to_string()],
+            model_args: vec!["--model".to_string(), "{model}".to_string()],
+            rename_command: Some("/name {name}".to_string()),
+            model_switch_command: Some("/model {model}".to_string()),
+            compact_command: Some("/compact".to_string()),
+            exit_command: Some("/quit".to_string()),
+            continue_args: vec!["--continue".to_string()],
+            fork_args: vec!["--fork".to_string(), "{session_id}".to_string()],
+            session_discovery: SessionDiscovery::None,
+            status_command: None,
+            wrapper: Some("nono run --profile X --".to_string()),
+            prompt_mode: PromptMode::String,
+        };
+
+        let settings = LaunchSettings {
+            append_system_prompt: None,
+            append_system_prompt_file: Some(prompt_path.to_string_lossy().to_string()),
+            add_dirs: vec!["~/docs/should-not-appear".to_string()],
+            exclude_dynamic_prompt: false,
+        };
+
+        // Resume case: session_id provided -> --resume present, no --continue.
+        let cmd = tool
+            .launch_command_with_settings(
+                Some("tanuki/pi"),
+                Some("abc-123"),
+                None,
+                &settings,
+            )
+            .unwrap();
+        assert!(
+            cmd.starts_with("nono run --profile X -- pi"),
+            "wrapper missing or not first; got: {cmd}"
+        );
+        assert!(
+            cmd.contains("--resume 'abc-123'"),
+            "expected --resume; got: {cmd}"
+        );
+        assert!(
+            cmd.contains(&format!("--append-system-prompt '{fixture}'")),
+            "expected inlined prompt; got: {cmd}"
+        );
+        assert!(
+            !cmd.contains("--append-system-prompt-file"),
+            "Pi must not get the file flag; got: {cmd}"
+        );
+        assert!(
+            !cmd.contains("--add-dir"),
+            "Pi has no --add-dir; got: {cmd}"
+        );
+        assert!(
+            !cmd.contains("--continue"),
+            "should not fall back to --continue when session_id is set; got: {cmd}"
+        );
+
+        // Continue/restore case: no session_id -> restore_command falls back to --continue.
+        let restore = tool.restore_command(Some("tanuki/pi"), None);
+        assert!(
+            restore.contains("--continue"),
+            "expected --continue fallback; got: {restore}"
+        );
+        assert!(
+            !restore.contains("--resume"),
+            "no --resume without session id; got: {restore}"
+        );
+    }
+
+    #[test]
+    fn launch_command_claude_unaffected_by_new_fields() {
+        // Default (no wrapper, file prompt mode) keeps current Claude behavior.
+        let tool = Tool::builtin_claude();
+        let dir = tempfile::tempdir().unwrap();
+        let prompt_path = dir.path().join("hp.md");
+        std::fs::write(&prompt_path, "x").unwrap();
+        let settings = LaunchSettings {
+            append_system_prompt: None,
+            append_system_prompt_file: Some(prompt_path.to_string_lossy().to_string()),
+            add_dirs: vec!["/tmp/a".to_string()],
+            exclude_dynamic_prompt: false,
+        };
+        let cmd = tool
+            .launch_command_with_settings(Some("v/s"), None, None, &settings)
+            .unwrap();
+        assert!(cmd.starts_with("claude "), "no wrapper expected: {cmd}");
+        assert!(cmd.contains("--append-system-prompt-file"));
+        assert!(!cmd.contains("--append-system-prompt '"));
+        assert!(cmd.contains("--add-dir '/tmp/a'"));
     }
 
     #[test]
