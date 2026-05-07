@@ -2,6 +2,34 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.3.1] (2026-05-07)
+
+### Fixed
+- `muxr save` now correctly discovers session IDs under sandboxed
+  runtimes. Previously `descendant_pids` shelled out to `/bin/ps`,
+  which is denied by some sandbox profiles (e.g. `nono`'s
+  `dangerous_commands_macos` group). Switched to the `sysinfo`
+  crate (libproc on macOS, /proc on Linux) so process-tree walks
+  work in-process without shell-out. Same fix applies to
+  `has_harness_process`.
+- `tool_for(<builtin>)` now treats user `[tools.<builtin>]` config
+  as a PARTIAL override on top of the built-in definition. Previously
+  the user config replaced the builtin wholesale, which silently
+  collapsed every unspecified field to its type-default. The
+  customer-visible bug: a user's `[tools.pi]` block declaring only
+  `bin` and `prompt_mode` wiped `session_discovery`, `resume_args`,
+  `continue_args`, and the slash-command quartet. After this fix,
+  user-specified fields win and unspecified fields fall back to the
+  builtin (per-field heuristic on type-default-equivalence). Two
+  new tests pin the merge semantics:
+  `harness_config_partially_overrides_builtin` and
+  `pi_partial_override_keeps_session_discovery`.
+
+### Added
+- `sysinfo = "0.32"` dependency (default features off; `system`
+  feature only). Native process metadata replaces the `/bin/ps`
+  shell-out.
+
 ## [1.3.0] (2026-04-27)
 
 ### Changed (breaking)

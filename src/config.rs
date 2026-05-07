@@ -144,6 +144,61 @@ fn default_discovery_none() -> SessionDiscovery {
     SessionDiscovery::None
 }
 
+/// Overlay user-supplied fields on top of a built-in tool definition.
+///
+/// Each field is checked against its type-default. If the user's value
+/// equals the type-default, it's treated as "not set" and the built-in's
+/// value wins. Otherwise the user's value wins.
+///
+/// `bin` is always taken from the user (they explicitly named the tool;
+/// if they want a different bin path that's the whole point of overriding).
+/// `prompt_mode` defaults to PromptMode::File at the type level, so an
+/// unspecified user override would silently revert Pi to File mode --
+/// here we let the user value win even when it equals the default,
+/// matching the principle that `prompt_mode` is the single most-likely
+/// override field.
+fn merge_tool_with_builtin(user: Tool, builtin: Tool) -> Tool {
+    Tool {
+        bin: user.bin,
+        args: if user.args.is_empty() { builtin.args } else { user.args },
+        resume_args: if user.resume_args.is_empty() {
+            builtin.resume_args
+        } else {
+            user.resume_args
+        },
+        model_args: if user.model_args.is_empty() {
+            builtin.model_args
+        } else {
+            user.model_args
+        },
+        rename_command: user.rename_command.or(builtin.rename_command),
+        model_switch_command: user.model_switch_command.or(builtin.model_switch_command),
+        compact_command: user.compact_command.or(builtin.compact_command),
+        exit_command: user.exit_command.or(builtin.exit_command),
+        continue_args: if user.continue_args.is_empty() {
+            builtin.continue_args
+        } else {
+            user.continue_args
+        },
+        fork_args: if user.fork_args.is_empty() {
+            builtin.fork_args
+        } else {
+            user.fork_args
+        },
+        session_discovery: match user.session_discovery {
+            SessionDiscovery::None => builtin.session_discovery,
+            other => other,
+        },
+        status_command: user.status_command.or(builtin.status_command),
+        wrapper: user.wrapper.or(builtin.wrapper),
+        // prompt_mode is the single most common override and PromptMode::File is
+        // also the type-default. Users who set `prompt_mode = "file"` explicitly
+        // would be indistinguishable from the default; treat user value as
+        // authoritative whenever they configured the tool at all.
+        prompt_mode: user.prompt_mode,
+    }
+}
+
 /// Reserved command names that cannot be used as harness names.
 const RESERVED_NAMES: &[&str] = &[
     "init",
@@ -506,19 +561,32 @@ impl Config {
     }
 
     /// Get the harness config for a tool name.
-    /// Checks user config first, then falls back to built-in definitions.
+    ///
+    /// User config in `[tools.<name>]` is treated as a PARTIAL override over
+    /// the built-in definition for known tools (claude, pi). Fields the user
+    /// did not specify keep their built-in defaults rather than collapsing
+    /// to their type-default. This was the cause of muxr save returning
+    /// null sessionIds: the user's `[tools.pi]` block specified only `bin`
+    /// and `prompt_mode`, which under full-replace semantics wiped
+    /// `session_discovery`, `resume_args`, etc.
+    ///
+    /// Heuristic: a field is considered "unset by the user" if it equals
+    /// its type default (empty Vec, None Option, SessionDiscovery::None).
+    /// Users who deliberately want to clear a field cannot do so; the
+    /// trade-off is acceptable because clearing a builtin's resume-args or
+    /// session-discovery rarely makes sense.
     pub fn tool_for(&self, tool: &str) -> Option<Tool> {
-        if let Some(h) = self.tools.get(tool) {
-            return Some(h.clone());
+        let builtin = match tool {
+            "claude" => Some(Tool::builtin_claude()),
+            "pi" => Some(Tool::builtin_pi()),
+            _ => None,
+        };
+        match (self.tools.get(tool).cloned(), builtin) {
+            (Some(user), Some(builtin)) => Some(merge_tool_with_builtin(user, builtin)),
+            (Some(user), None) => Some(user),
+            (None, Some(builtin)) => Some(builtin),
+            (None, None) => None,
         }
-        // Built-in defaults
-        if tool == "claude" {
-            return Some(Tool::builtin_claude());
-        }
-        if tool == "pi" {
-            return Some(Tool::builtin_pi());
-        }
-        None
     }
 
     /// All configured harness names (explicit + built-in).
@@ -846,19 +914,69 @@ session_discovery = { type = "none" }
     }
 
     #[test]
-    fn harness_config_overrides_builtin() {
+    fn harness_config_partially_overrides_builtin() {
+        // User config in [tools.<builtin-name>] is now treated as a
+        // partial override on top of the builtin definition. Fields
+        // the user did not specify keep their builtin values rather
+        // than collapsing to type-defaults. This was the cause of
+        // muxr save returning null sessionIds when [tools.pi] only
+        // declared bin + prompt_mode.
         let toml_str = r##"
 [harnesses]
 
 [tools.claude]
 bin = "claude"
 args = ["--name", "{name}", "--verbose"]
-session_discovery = { type = "none" }
 "##;
         let config: Config = toml::from_str(toml_str).unwrap();
         let h = config.tool_for("claude").unwrap();
-        assert_eq!(h.args.len(), 3); // overridden, not the built-in 2
-        assert!(matches!(h.session_discovery, SessionDiscovery::None));
+        // User-provided field wins.
+        assert_eq!(h.args.len(), 3);
+        // Field user did NOT specify falls back to builtin (was None
+        // type-default before; now File via merge).
+        assert!(
+            matches!(h.session_discovery, SessionDiscovery::File { .. }),
+            "session_discovery should fall back to builtin Claude's File pattern"
+        );
+        assert_eq!(
+            h.resume_args,
+            vec!["--resume".to_string(), "{session_id}".to_string()],
+            "resume_args should fall back to builtin"
+        );
+    }
+
+    #[test]
+    fn pi_partial_override_keeps_session_discovery() {
+        // Direct repro of the bug Andrew hit: user config sets only
+        // bin + prompt_mode for pi, omitting session_discovery. The
+        // merge must inherit the builtin pi discovery pattern so muxr
+        // save can find sessionIds via ~/.pi/sessions/<pid>.json.
+        let toml_str = r##"
+[harnesses]
+
+[tools.pi]
+bin = "pi"
+prompt_mode = "string"
+"##;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let h = config.tool_for("pi").unwrap();
+        match h.session_discovery {
+            SessionDiscovery::File { ref pattern, ref id_key } => {
+                assert_eq!(pattern, "~/.pi/sessions/{pid}.json");
+                assert_eq!(id_key, "sessionId");
+            }
+            SessionDiscovery::None => {
+                panic!("pi partial override must inherit builtin File discovery");
+            }
+        }
+        // Other builtin pi fields preserved
+        assert_eq!(
+            h.resume_args,
+            vec!["--resume".to_string(), "{session_id}".to_string()]
+        );
+        assert_eq!(h.continue_args, vec!["--continue".to_string()]);
+        // User override preserved
+        assert_eq!(h.prompt_mode, PromptMode::String);
     }
 
     #[test]
