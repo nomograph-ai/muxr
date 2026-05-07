@@ -55,6 +55,12 @@ pub struct LaunchSettings {
     /// Move cwd/git/env info out of system prompt for better cache hits.
     #[serde(default)]
     pub exclude_dynamic_prompt: bool,
+    /// Per-harness wrapper override. When set, replaces the tool's
+    /// `wrapper` for this harness only. Lets each harness point at its
+    /// own nono profile without forcing one shared sandbox shape.
+    /// Example: `nono run --profile dunn --` for the dunn harness.
+    #[serde(default)]
+    pub wrapper: Option<String>,
 }
 
 /// How to discover harness session IDs from running processes.
@@ -329,9 +335,12 @@ impl Tool {
         }
 
         // Prepend the wrapper last so the rest of the command lines up
-        // behind it: `<wrapper> <bin> <args...>`.
-        if let Some(ref wrap) = self.wrapper {
-            cmd = format!("{} {}", wrap.trim(), cmd);
+        // behind it: `<wrapper> <bin> <args...>`. The per-harness
+        // settings.wrapper takes precedence over the tool default so
+        // each harness can point at its own nono profile.
+        let wrap = settings.wrapper.as_deref().or(self.wrapper.as_deref());
+        if let Some(w) = wrap {
+            cmd = format!("{} {}", w.trim(), cmd);
         }
 
         Ok(cmd)
@@ -1040,6 +1049,7 @@ session_discovery = { type = "none" }
             append_system_prompt_file: Some(prompt_path.to_string_lossy().to_string()),
             add_dirs: vec!["~/docs/should-not-appear".to_string()],
             exclude_dynamic_prompt: false,
+            wrapper: None,
         };
 
         // Resume case: session_id provided -> --resume present, no --continue.
@@ -1100,6 +1110,7 @@ session_discovery = { type = "none" }
             append_system_prompt_file: Some(prompt_path.to_string_lossy().to_string()),
             add_dirs: vec!["/tmp/a".to_string()],
             exclude_dynamic_prompt: false,
+            wrapper: None,
         };
         let cmd = tool
             .launch_command_with_settings(Some("v/s"), None, None, &settings)
