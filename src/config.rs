@@ -49,6 +49,13 @@ pub struct LaunchSettings {
     /// File to append to the system prompt (path supports ~).
     #[serde(default)]
     pub append_system_prompt_file: Option<String>,
+    /// Multiple files to append to the system prompt, in order. Each is read
+    /// and concatenated with `\n\n` before delivery. Takes precedence over
+    /// `append_system_prompt_file` if both are set. Use for base + overlay
+    /// prompt composition (e.g. shared HARNESS-base.md + harness-specific
+    /// HARNESS.md).
+    #[serde(default)]
+    pub append_system_prompt_files: Option<Vec<String>>,
     /// Additional directories the harness can access.
     #[serde(default)]
     pub add_dirs: Vec<String>,
@@ -344,35 +351,68 @@ impl Tool {
                 shell_escape(&joined)
             ));
         }
-        if let Some(ref file) = settings.append_system_prompt_file {
-            // Absolute/~ paths expand. Relative paths resolve from cwd
-            // (the vertical dir or worktree), passed as-is to claude.
-            let path = if file.starts_with('/') || file.starts_with('~') {
-                shellexpand::tilde(file).to_string()
+        // Determine which file-based prompt source to use. The array field
+        // takes precedence over the singular field when both are set.
+        let effective_files: Option<Vec<String>> =
+            if let Some(ref files) = settings.append_system_prompt_files {
+                if settings.append_system_prompt_file.is_some() {
+                    eprintln!(
+                        "muxr warning: both append_system_prompt_files and \
+                         append_system_prompt_file are set; using the array and \
+                         ignoring the singular field"
+                    );
+                }
+                Some(files.clone())
             } else {
-                file.clone()
+                settings
+                    .append_system_prompt_file
+                    .as_ref()
+                    .map(|f| vec![f.clone()])
             };
+
+        if let Some(files) = effective_files {
+            // Expand ~ / absolute paths; leave relative paths as-is so they
+            // resolve from the vertical's cwd at launch time.
+            let expanded_paths: Vec<String> = files
+                .iter()
+                .map(|f| {
+                    if f.starts_with('/') || f.starts_with('~') {
+                        shellexpand::tilde(f).to_string()
+                    } else {
+                        f.clone()
+                    }
+                })
+                .collect();
+
             match self.prompt_mode {
                 PromptMode::File => {
-                    cmd.push_str(&format!(
-                        " --append-system-prompt-file {}",
-                        shell_escape(&path)
-                    ));
+                    if expanded_paths.len() == 1 {
+                        // Single file -- pass directly to avoid temp-file churn.
+                        cmd.push_str(&format!(
+                            " --append-system-prompt-file {}",
+                            shell_escape(&expanded_paths[0])
+                        ));
+                    } else {
+                        // Multiple files -- compose into a temp file. Claude Code
+                        // (and similar) only accept a single --append-system-prompt-file
+                        // flag, so we materialise the composition.
+                        let composed = read_and_join(&expanded_paths, &self.bin)?;
+                        let tmp_path = write_composed_prompt(&composed)?;
+                        cmd.push_str(&format!(
+                            " --append-system-prompt-file {}",
+                            shell_escape(&tmp_path)
+                        ));
+                    }
                 }
                 PromptMode::String => {
-                    // Pi has no file variant. Read the prompt and inline it.
-                    // Fail loud on read error -- a missing prompt file silently
-                    // strips the harness directives, which is worse than
-                    // refusing to launch.
-                    let content = std::fs::read_to_string(&path).with_context(|| {
-                        format!(
-                            "failed to read append_system_prompt_file at {} for tool {} (prompt_mode = string)",
-                            path, self.bin
-                        )
-                    })?;
+                    // Pi has no file variant. Read every file and inline the
+                    // composition. Fail loud on read error -- a missing prompt
+                    // file silently strips harness directives, which is worse
+                    // than refusing to launch.
+                    let composed = read_and_join(&expanded_paths, &self.bin)?;
                     cmd.push_str(&format!(
                         " --append-system-prompt {}",
-                        shell_escape(&content)
+                        shell_escape(&composed)
                     ));
                 }
             }
@@ -428,6 +468,36 @@ pub fn interpolate(template: &str, key: &str, value: &str) -> String {
 pub fn interpolate_raw(template: &str, key: &str, value: &str) -> String {
     let placeholder = format!("{{{key}}}");
     template.replace(&placeholder, value)
+}
+
+/// Read a list of file paths and join their contents with `\n\n`.
+fn read_and_join(paths: &[String], bin: &str) -> Result<String> {
+    let mut parts = Vec::with_capacity(paths.len());
+    for path in paths {
+        let content = std::fs::read_to_string(path).with_context(|| {
+            format!(
+                "failed to read system-prompt file at {path} for tool {bin}"
+            )
+        })?;
+        parts.push(content);
+    }
+    Ok(parts.join("\n\n"))
+}
+
+/// Write composed prompt content to a temp file and return its path.
+/// The temp file is created in $TMPDIR with a deterministic-ish prefix
+/// so it can be inspected after launch if debugging is needed.
+fn write_composed_prompt(content: &str) -> Result<String> {
+    use std::io::Write;
+    let mut path = std::env::temp_dir();
+    // Use a fixed name; muxr runs single-threaded at launch time so
+    // concurrent overwrites are not a concern.
+    path.push("muxr-composed-system-prompt.md");
+    let mut f = std::fs::File::create(&path)
+        .with_context(|| format!("failed to create temp prompt file at {}", path.display()))?;
+    f.write_all(content.as_bytes())
+        .with_context(|| format!("failed to write temp prompt file at {}", path.display()))?;
+    Ok(path.to_string_lossy().to_string())
 }
 
 /// Shell-escape a value by wrapping in single quotes.
@@ -1165,6 +1235,7 @@ session_discovery = { type = "none" }
         let settings = LaunchSettings {
             append_system_prompt: None,
             append_system_prompt_file: Some(prompt_path.to_string_lossy().to_string()),
+            append_system_prompt_files: None,
             add_dirs: vec!["~/docs/should-not-appear".to_string()],
             exclude_dynamic_prompt: false,
             wrapper: None,
@@ -1226,6 +1297,7 @@ session_discovery = { type = "none" }
         let settings = LaunchSettings {
             append_system_prompt: None,
             append_system_prompt_file: Some(prompt_path.to_string_lossy().to_string()),
+            append_system_prompt_files: None,
             add_dirs: vec!["/tmp/a".to_string()],
             exclude_dynamic_prompt: false,
             wrapper: None,
@@ -1251,5 +1323,150 @@ path = ["~/.local/share/mise/shims"]
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.hooks.pre_create, vec!["mise install"]);
         assert_eq!(config.hooks.path, vec!["~/.local/share/mise/shims"]);
+    }
+
+    // -- append_system_prompt_files (array) tests --
+
+    #[test]
+    fn launch_settings_deserializes_files_array() {
+        // The new field round-trips through TOML correctly.
+        let toml_str = r##"
+[harnesses.work]
+dir = "~/work"
+color = "#fff"
+
+[harnesses.work.launch]
+append_system_prompt_files = ["base.md", "overlay.md"]
+"##;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let launch = &config.harnesses["work"].launch;
+        assert_eq!(
+            launch.append_system_prompt_files,
+            Some(vec!["base.md".to_string(), "overlay.md".to_string()])
+        );
+        // Singular field stays unset when only array is present.
+        assert!(launch.append_system_prompt_file.is_none());
+    }
+
+    #[test]
+    fn read_and_join_concatenates_with_double_newline() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.md");
+        let b = dir.path().join("b.md");
+        std::fs::write(&a, "# Base").unwrap();
+        std::fs::write(&b, "# Overlay").unwrap();
+        let result = read_and_join(
+            &[
+                a.to_string_lossy().to_string(),
+                b.to_string_lossy().to_string(),
+            ],
+            "pi",
+        )
+        .unwrap();
+        assert_eq!(result, "# Base\n\n# Overlay");
+    }
+
+    #[test]
+    fn pi_array_prompt_inlines_composition() {
+        // prompt_mode=String (Pi): two files joined and passed as
+        // --append-system-prompt (no temp file, no --append-system-prompt-file).
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("base.md");
+        let overlay = dir.path().join("overlay.md");
+        std::fs::write(&base, "base content").unwrap();
+        std::fs::write(&overlay, "overlay content").unwrap();
+
+        let tool = Tool::builtin_pi();
+        let settings = LaunchSettings {
+            append_system_prompt: None,
+            append_system_prompt_file: None,
+            append_system_prompt_files: Some(vec![
+                base.to_string_lossy().to_string(),
+                overlay.to_string_lossy().to_string(),
+            ]),
+            add_dirs: vec![],
+            exclude_dynamic_prompt: false,
+            wrapper: None,
+        };
+        let cmd = tool
+            .launch_command_with_settings(Some("dunn/test"), None, None, &settings)
+            .unwrap();
+        assert!(
+            cmd.contains("--append-system-prompt 'base content\n\noverlay content'"),
+            "expected composed inline prompt; got: {cmd}"
+        );
+        assert!(
+            !cmd.contains("--append-system-prompt-file"),
+            "Pi must not get the file flag; got: {cmd}"
+        );
+    }
+
+    #[test]
+    fn claude_array_prompt_writes_temp_file() {
+        // prompt_mode=File (Claude): two files → temp file → --append-system-prompt-file.
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("base.md");
+        let overlay = dir.path().join("overlay.md");
+        std::fs::write(&base, "base").unwrap();
+        std::fs::write(&overlay, "overlay").unwrap();
+
+        let tool = Tool::builtin_claude();
+        let settings = LaunchSettings {
+            append_system_prompt: None,
+            append_system_prompt_file: None,
+            append_system_prompt_files: Some(vec![
+                base.to_string_lossy().to_string(),
+                overlay.to_string_lossy().to_string(),
+            ]),
+            add_dirs: vec![],
+            exclude_dynamic_prompt: false,
+            wrapper: None,
+        };
+        let cmd = tool
+            .launch_command_with_settings(Some("v/s"), None, None, &settings)
+            .unwrap();
+        assert!(
+            cmd.contains("--append-system-prompt-file"),
+            "expected file flag; got: {cmd}"
+        );
+        assert!(
+            !cmd.contains("--append-system-prompt '"),
+            "Claude must not get the inline flag; got: {cmd}"
+        );
+        // Verify the temp file contains the joined content.
+        let tmp = std::env::temp_dir().join("muxr-composed-system-prompt.md");
+        let written = std::fs::read_to_string(&tmp).unwrap();
+        assert_eq!(written, "base\n\noverlay");
+    }
+
+    #[test]
+    fn array_takes_precedence_over_singular() {
+        // When both fields are set, the array wins and the singular is ignored.
+        let dir = tempfile::tempdir().unwrap();
+        let arr_file = dir.path().join("arr.md");
+        let sing_file = dir.path().join("sing.md");
+        std::fs::write(&arr_file, "from array").unwrap();
+        std::fs::write(&sing_file, "from singular").unwrap();
+
+        let tool = Tool::builtin_pi();
+        let settings = LaunchSettings {
+            append_system_prompt: None,
+            append_system_prompt_file: Some(sing_file.to_string_lossy().to_string()),
+            append_system_prompt_files: Some(vec![arr_file.to_string_lossy().to_string()]),
+            add_dirs: vec![],
+            exclude_dynamic_prompt: false,
+            wrapper: None,
+        };
+        let cmd = tool
+            .launch_command_with_settings(Some("v/s"), None, None, &settings)
+            .unwrap();
+        assert!(
+            cmd.contains("'from array'"),
+            "array content must win; got: {cmd}"
+        );
+        assert!(
+            !cmd.contains("from singular"),
+            "singular must be suppressed; got: {cmd}"
+        );
     }
 }

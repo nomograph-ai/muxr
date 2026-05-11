@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.0] (2026-05-10)
+
+### Added
+- `LaunchSettings.append_system_prompt_files` -- array of file paths
+  that are concatenated (newline-separated) before delivery to the
+  tool. Enables base + overlay prompt composition for harness shared
+  instructions (e.g. a shared `HARNESS-base.md` stacked with a
+  per-harness `HARNESS.md` overlay). For `prompt_mode = "string"` (Pi)
+  the composition is inlined into `--append-system-prompt`; for
+  `prompt_mode = "file"` (Claude Code) it is materialised into a single
+  temp file and passed via `--append-system-prompt-file`. Backward-
+  compatible: the singular `append_system_prompt_file` still works; the
+  array takes precedence when both are set (with a logged warning).
+
 ## [1.3.1] (2026-05-07)
 
 ### Fixed
