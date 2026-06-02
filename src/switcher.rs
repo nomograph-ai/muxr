@@ -14,7 +14,7 @@ use crate::config::Config;
 use crate::tmux::Tmux;
 
 struct Entry {
-    vertical: String,
+    harness: String,
     context: String,
     name: String,
     color: Color,
@@ -35,7 +35,7 @@ fn parse_hex_color(hex: &str) -> Color {
 }
 
 /// Build entries sorted by activity (most recent first), with muxr control plane pinned to top.
-/// Inserts separator rows between vertical groups.
+/// Inserts separator rows between harness groups.
 fn build_entries(config: &Config, tmux: &Tmux) -> Result<Vec<Entry>> {
     let sessions = tmux.list_sessions_detailed()?;
 
@@ -43,13 +43,13 @@ fn build_entries(config: &Config, tmux: &Tmux) -> Result<Vec<Entry>> {
     let raw: Vec<Entry> = sessions
         .into_iter()
         .map(|s| {
-            let (vertical, context) = match s.name.split_once('/') {
+            let (harness, context) = match s.name.split_once('/') {
                 Some((v, c)) => (v.to_string(), c.to_string()),
                 None => (s.name.clone(), String::new()),
             };
-            let color = parse_hex_color(config.color_for(&vertical));
+            let color = parse_hex_color(config.color_for(&harness));
             // Only show health for sessions that have a harness with status support
-            let tool = config.resolve_tool(&vertical, None);
+            let tool = config.resolve_tool(&harness, None);
             let has_harness = s.name != "muxr" && config.tool_for(&tool).is_some();
             let health = if has_harness {
                 claude_status::read_health(&s.name)
@@ -58,7 +58,7 @@ fn build_entries(config: &Config, tmux: &Tmux) -> Result<Vec<Entry>> {
             };
 
             Entry {
-                vertical,
+                harness,
                 context,
                 name: s.name,
                 color,
@@ -69,7 +69,7 @@ fn build_entries(config: &Config, tmux: &Tmux) -> Result<Vec<Entry>> {
         })
         .collect();
 
-    // Group by vertical, sort groups by most recent activity,
+    // Group by harness, sort groups by most recent activity,
     // sort sessions within each group by most recent activity.
     // muxr control plane is always pinned to top (ungrouped).
     let mut muxr_entry: Option<Entry> = None;
@@ -80,10 +80,7 @@ fn build_entries(config: &Config, tmux: &Tmux) -> Result<Vec<Entry>> {
         if entry.name == "muxr" {
             muxr_entry = Some(entry);
         } else {
-            groups
-                .entry(entry.vertical.clone())
-                .or_default()
-                .push(entry);
+            groups.entry(entry.harness.clone()).or_default().push(entry);
         }
     }
 
@@ -113,7 +110,7 @@ fn build_entries(config: &Config, tmux: &Tmux) -> Result<Vec<Entry>> {
     for (group_name, _) in &group_order {
         if !entries.is_empty() {
             entries.push(Entry {
-                vertical: String::new(),
+                harness: String::new(),
                 context: String::new(),
                 name: String::new(),
                 color: Color::DarkGray,
@@ -144,7 +141,7 @@ fn filter_entries(entries: &[Entry], query: &str) -> Vec<usize> {
         .filter(|(_, e)| {
             !e.is_separator
                 && (e.name.to_lowercase().contains(&q)
-                    || e.vertical.to_lowercase().contains(&q)
+                    || e.harness.to_lowercase().contains(&q)
                     || e.context.to_lowercase().contains(&q))
         })
         .map(|(i, _)| i)
@@ -505,7 +502,7 @@ fn draw_table(
             let kill_style = Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
             // Switchboard sessions are the per-harness dispatcher;
             // visually distinguish them so the eye lands on the
-            // singleton without scanning. Cyan + bold across vertical
+            // singleton without scanning. Cyan + bold across harness
             // and context cells; current/kill states still take
             // precedence.
             let is_switchboard = e.context == "switchboard";
@@ -586,7 +583,7 @@ fn draw_table(
             Row::new(vec![
                 Cell::from(Line::from(vec![
                     Span::styled(marker, vs),
-                    Span::styled(e.vertical.clone(), vs),
+                    Span::styled(e.harness.clone(), vs),
                 ])),
                 Cell::from(Span::styled(e.context.clone(), cs)),
                 bar_cell,
@@ -599,7 +596,7 @@ fn draw_table(
         .collect();
 
     let widths = [
-        Constraint::Length(16), // session (marker + vertical)
+        Constraint::Length(16), // session (marker + harness)
         Constraint::Min(12),    // context
         Constraint::Length(8),  // bar
         Constraint::Length(7),  // pct (+ 1M badge)
@@ -762,9 +759,9 @@ mod tests {
         assert_eq!(format_age(0), "");
     }
 
-    fn make_entry(name: &str, vertical: &str, context: &str, separator: bool) -> Entry {
+    fn make_entry(name: &str, harness: &str, context: &str, separator: bool) -> Entry {
         Entry {
-            vertical: vertical.to_string(),
+            harness: harness.to_string(),
             context: context.to_string(),
             name: name.to_string(),
             color: Color::Gray,
@@ -794,7 +791,7 @@ mod tests {
     }
 
     #[test]
-    fn filter_entries_matches_vertical() {
+    fn filter_entries_matches_harness() {
         let entries = vec![
             make_entry("work/api", "work", "api", false),
             make_entry("work/auth", "work", "auth", false),

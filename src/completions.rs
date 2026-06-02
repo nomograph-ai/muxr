@@ -223,7 +223,7 @@ complete -F _muxr_completions muxr
 fn generate_fish() -> Result<()> {
     let commands = derived_commands();
     let config = Config::load().ok();
-    let verticals = config
+    let harnesses = config
         .as_ref()
         .map(|c| {
             c.all_names()
@@ -244,8 +244,10 @@ fn generate_fish() -> Result<()> {
     }
 
     // Harnesses -- from runtime config
-    for v in &verticals {
-        println!("complete -c muxr -n '__fish_use_subcommand' -a '{v}' -d 'Open {v} session'");
+    for harness in &harnesses {
+        println!(
+            "complete -c muxr -n '__fish_use_subcommand' -a '{harness}' -d 'Open {harness} session'"
+        );
     }
 
     // Harnesses -- from config + built-ins

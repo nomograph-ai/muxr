@@ -147,18 +147,18 @@ impl SavedState {
                 continue;
             }
 
-            let vertical = name.split('/').next().unwrap_or(&name);
+            let harness = name.split('/').next().unwrap_or(&name);
 
             // Detect if this is a remote proxy session
-            let remote = if config.is_remote(vertical) {
-                Some(vertical.to_string())
+            let remote = if config.is_remote(harness) {
+                Some(harness.to_string())
             } else {
                 None
             };
 
-            let tool = config.resolve_tool(vertical, None);
-            let harness = config.tool_for(&tool);
-            let session_id = discover_session_id(tmux, &name, harness.as_ref());
+            let tool = config.resolve_tool(harness, None);
+            let tool_def = config.tool_for(&tool);
+            let session_id = discover_session_id(tmux, &name, tool_def.as_ref());
 
             if let Some(ref id) = session_id {
                 eprintln!("  {name}: {tool} session {id}");
@@ -261,10 +261,29 @@ impl SavedState {
                     continue;
                 }
 
-                let harness = config.tool_for(&s.tool);
-                let tool_cmd = match &harness {
-                    Some(h) => h.restore_command(Some(&s.name), s.session_id.as_deref()),
-                    None => s.tool.clone(),
+                // Rebuild the full launch (prompt + add-dirs + resume) through
+                // the shared composer so a restored session is identical to a
+                // freshly opened one. If the campaign/session files are gone
+                // (e.g. the session was archived), fall back to a name+resume
+                // relaunch rather than dropping the session.
+                let tool_cmd = match crate::compose_launch_command(
+                    config,
+                    &s.name,
+                    s.session_id.as_deref(),
+                    None,
+                    true,
+                ) {
+                    Ok((cmd, _)) => cmd,
+                    Err(e) => {
+                        eprintln!(
+                            "  {} -- full compose failed ({e}); restoring name+resume only",
+                            s.name
+                        );
+                        match config.tool_for(&s.tool) {
+                            Some(h) => h.restore_command(Some(&s.name), s.session_id.as_deref()),
+                            None => s.tool.clone(),
+                        }
+                    }
                 };
                 tmux.create_session(&s.name, &dir, &tool_cmd)?;
                 eprintln!("  {} -> {}", s.name, s.dir);

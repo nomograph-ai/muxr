@@ -257,12 +257,12 @@ pub fn run(tmux: &Tmux) -> Result<()> {
     // Get muxr session name from tmux
     let session_name = tmux.display_message("#{session_name}").unwrap_or_default();
 
-    // Resolve vertical color from muxr config
-    let vertical = session_name.split('/').next().unwrap_or(&session_name);
+    // Resolve harness color from muxr config
+    let harness = session_name.split('/').next().unwrap_or(&session_name);
     let config = Config::load().ok();
     let hex_color = config
         .as_ref()
-        .map(|c| c.color_for(vertical).to_string())
+        .map(|c| c.color_for(harness).to_string())
         .unwrap_or_else(|| "#8a7f83".to_string());
     let ansi_color = hex_to_ansi(&hex_color);
 

@@ -140,8 +140,28 @@ muxr save                       # snapshot all sessions to JSON
 muxr restore                    # recreate after reboot
 ```
 
-Restore recreates local sessions with the correct directory and tool.
+Restore recreates local sessions with the correct directory and tool,
+rebuilding each session's full launch command (system prompt + working
+dirs + resume) so a restored session is identical to a freshly opened one.
 Remote sessions re-establish connections.
+
+## Upgrading running sessions
+
+```bash
+muxr upgrade                    # move every claude session onto the
+                                # freshly installed binary, in place
+muxr upgrade --dry-run          # show what would happen, touch nothing
+muxr upgrade tanuki/factory/foo # upgrade just one session
+muxr upgrade --model opus-4-8   # also switch model on relaunch
+```
+
+For each target muxr discovers the session id, sends a graceful `/exit`,
+waits for the harness to quit, then relaunches it with the full composed
+command and `--resume`. Because the binary name is resolved fresh, the
+relaunch picks up a newly installed harness version (e.g. a new Claude
+Code release) without losing the conversation, harness rules, or working
+directories. Run it from the `muxr` control shell, not from inside an
+agent session.
 
 ## Commands
 
@@ -157,6 +177,9 @@ Remote sessions re-establish connections.
 | `muxr restore` | Recreate sessions after reboot |
 | `muxr kill <name>` | Kill a session |
 | `muxr kill all` | Kill all sessions |
+| `muxr retire <name>\|all` | Graceful `/exit` + kill; drops from saved state |
+| `muxr upgrade [name]` | Relaunch sessions in place on the new binary (`--dry-run`, `--tool`, `--model`) |
+| `muxr broadcast [/cmd]` | Send a slash command to every harness session |
 | `muxr rename <name>` | Rename: tmux + session file on disk + runtime relink |
 | `muxr init` | Create default config |
 | `muxr completions <shell>` | Shell completions (zsh, bash, fish) |

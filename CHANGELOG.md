@@ -2,6 +2,36 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- `muxr upgrade [NAME]` -- a top-level command to move running sessions
+  onto the freshly installed harness binary, resuming each conversation
+  in place. Graceful `/exit`, then relaunch on the binary the tool now
+  resolves to. Flags: `--tool` (default `claude`), `--model` (switch
+  model on relaunch), `--dry-run` (compose and print the relaunch
+  command for every target without touching any session). With no NAME
+  it upgrades every session running the selected tool; pass a NAME to
+  upgrade one. The previous `muxr <tool> upgrade` form still works and
+  now also accepts `--dry-run`.
+- `upgrade`, `retire`, and `broadcast` added to the reserved harness
+  names so a harness cannot shadow a built-in command (`retire` and
+  `broadcast` were already commands but were missing from the list).
+
+### Changed
+- `restore` and `upgrade` now rebuild the **full** launch command --
+  composed HARNESS/campaign/session system prompt plus the campaign's
+  `--add-dir` paths -- through a single shared `compose_launch_command`,
+  the same code that first-launch (`open`) uses. Previously both took a
+  lossy path (`restore_command` / `launch_command`) that emitted only
+  `--name` and `--resume`, so restored and upgraded sessions silently
+  lost their harness rules and working directories. All three lifecycle
+  paths now produce an identical command modulo the resume id. The
+  binary name is resolved fresh on each relaunch, which is what lets an
+  upgrade pick up a new harness version. If a session's campaign/session
+  files are missing (e.g. archived), the lossy path remains as a
+  graceful fallback rather than dropping the session.
+
 ## [1.4.0] (2026-05-10)
 
 ### Added

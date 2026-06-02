@@ -23,7 +23,7 @@ pub fn init() -> Result<()> {
         .with_context(|| format!("Failed to write {}", path.display()))?;
 
     eprintln!("Created config at {}", path.display());
-    eprintln!("Edit it to add your verticals, then run `muxr <vertical>`.");
+    eprintln!("Edit it to add your harnesses, then run `muxr <harness>`.");
 
     Ok(())
 }

@@ -11,19 +11,26 @@ use crate::config::{Config, Tool};
 use crate::state;
 use crate::tmux::Tmux;
 
-/// Upgrade all sessions running a harness to a new model.
+/// Upgrade running harness sessions onto the freshly resolved binary,
+/// resuming each conversation in place.
 ///
-/// For each session:
+/// For each matching session:
 /// 1. Discover the session ID
-/// 2. Send /exit to the harness (graceful exit)
-/// 3. Wait for the shell prompt
-/// 4. Send the new launch command with resume + model
+/// 2. Compose the full relaunch command (prompt + add-dirs + resume)
+/// 3. Send /exit to the harness (graceful exit), wait for it to quit
+/// 4. Wait for the shell prompt, then send the relaunch command
+///
+/// `name_filter` limits the run to a single session name; `None` upgrades
+/// every session running `harness_name`. `dry_run` composes and prints the
+/// relaunch command for each target without touching the session.
 pub fn upgrade(
     tmux: &Tmux,
     config: &Config,
     harness_name: &str,
-    harness: &Tool,
+    tool_def: &Tool,
     model: Option<&str>,
+    name_filter: Option<&str>,
+    dry_run: bool,
 ) -> Result<()> {
     let sessions = tmux.list_sessions()?;
     let mut upgraded = 0;
@@ -35,22 +42,29 @@ pub fn upgrade(
             continue;
         }
 
+        // Limit to a single named session when requested.
+        if let Some(filter) = name_filter
+            && name != filter
+        {
+            continue;
+        }
+
         // Check if this session runs the right tool
-        let vertical = name.split('/').next().unwrap_or(name);
-        let tool = config.resolve_tool(vertical, None);
+        let harness = name.split('/').next().unwrap_or(name);
+        let tool = config.resolve_tool(harness, None);
         if tool != harness_name {
             continue;
         }
 
         // Check if the harness process is actually running
-        if !state::has_harness_process(tmux, name, &harness.bin) {
+        if !state::has_harness_process(tmux, name, &tool_def.bin) {
             eprintln!("  {name}: no {harness_name} process, skipping");
             skipped += 1;
             continue;
         }
 
         // Discover session ID before killing
-        let session_id = state::discover_session_id(tmux, name, Some(harness));
+        let session_id = state::discover_session_id(tmux, name, Some(tool_def));
         if session_id.is_none() {
             eprintln!("  {name}: could not discover session ID, skipping");
             skipped += 1;
@@ -58,14 +72,36 @@ pub fn upgrade(
         }
         let session_id = session_id.unwrap();
 
+        // Compose the FULL relaunch up front (system prompt + campaign
+        // add-dirs + resume) so the resumed session keeps its harness rules
+        // and working directories on the freshly resolved binary, and so a
+        // dry run surfaces compose errors before any session is touched. Fall
+        // back to a bare name+resume relaunch if the campaign/session files
+        // can't be composed (e.g. an archived session).
+        let cmd = match crate::compose_launch_command(config, name, Some(&session_id), model, false)
+        {
+            Ok((cmd, _)) => cmd,
+            Err(e) => {
+                eprintln!("    full compose failed ({e}); relaunching name+resume only");
+                tool_def.launch_command(Some(name), Some(&session_id), model)
+            }
+        };
+
+        if dry_run {
+            eprintln!("  {name}: would upgrade (session {session_id})");
+            eprintln!("    -> {cmd}");
+            upgraded += 1;
+            continue;
+        }
+
         eprintln!("  {name}: upgrading (session {session_id})");
 
-        // Find the harness PID for SIGTERM
+        // Find the harness PID so we can wait for a clean exit.
         let shell_pid = tmux.pane_pid(name).ok().flatten();
         let harness_pid = shell_pid.and_then(|sp| {
             state::descendant_pids(sp)
                 .into_iter()
-                .find(|pid| is_harness_process(*pid, &harness.bin))
+                .find(|pid| is_harness_process(*pid, &tool_def.bin))
         });
 
         // Send /exit for graceful shutdown
@@ -82,8 +118,6 @@ pub fn upgrade(
         // Wait for shell prompt (up to 5s)
         wait_for_prompt(tmux, name, 5);
 
-        // Send new launch command
-        let cmd = harness.launch_command(Some(name), Some(&session_id), model);
         let _ = Command::new("tmux")
             .args(["send-keys", "-t", &target, &cmd, "Enter"])
             .status();
@@ -91,7 +125,11 @@ pub fn upgrade(
         upgraded += 1;
     }
 
-    eprintln!("\nUpgraded {upgraded} session(s), skipped {skipped}.");
+    if dry_run {
+        eprintln!("\n{upgraded} session(s) would be upgraded, {skipped} skipped (dry run).");
+    } else {
+        eprintln!("\nUpgraded {upgraded} session(s), skipped {skipped}.");
+    }
     if let Some(m) = model {
         eprintln!("Model: {m}");
     }
@@ -100,7 +138,7 @@ pub fn upgrade(
 }
 
 /// Show harness status across all sessions.
-pub fn status(tmux: &Tmux, config: &Config, harness_name: &str, _harness: &Tool) -> Result<()> {
+pub fn status(tmux: &Tmux, config: &Config, harness_name: &str, _tool_def: &Tool) -> Result<()> {
     let sessions = tmux.list_sessions()?;
 
     eprintln!("{harness_name} sessions:\n");
@@ -112,8 +150,8 @@ pub fn status(tmux: &Tmux, config: &Config, harness_name: &str, _harness: &Tool)
         if name == "muxr" {
             continue;
         }
-        let vertical = name.split('/').next().unwrap_or(name);
-        let tool = config.resolve_tool(vertical, None);
+        let harness = name.split('/').next().unwrap_or(name);
+        let tool = config.resolve_tool(harness, None);
         if tool != harness_name {
             continue;
         }
@@ -140,11 +178,11 @@ pub fn model_switch(
     tmux: &Tmux,
     config: &Config,
     harness_name: &str,
-    harness: &Tool,
+    tool_def: &Tool,
     model: Option<&str>,
 ) -> Result<()> {
     let model = model.context("Usage: muxr {harness_name} model <model-name>")?;
-    let cmd_template = harness
+    let cmd_template = tool_def
         .model_switch_command
         .as_ref()
         .context("Harness does not support live model switch")?;
@@ -157,8 +195,8 @@ pub fn model_switch(
         if name == "muxr" {
             continue;
         }
-        let vertical = name.split('/').next().unwrap_or(name);
-        let tool = config.resolve_tool(vertical, None);
+        let harness = name.split('/').next().unwrap_or(name);
+        let tool = config.resolve_tool(harness, None);
         if tool != harness_name {
             continue;
         }
@@ -180,11 +218,11 @@ pub fn compact(
     tmux: &Tmux,
     config: &Config,
     harness_name: &str,
-    harness: &Tool,
+    tool_def: &Tool,
     threshold: Option<u32>,
 ) -> Result<()> {
     let threshold = threshold.unwrap_or(80);
-    let cmd = harness
+    let cmd = tool_def
         .compact_command
         .as_ref()
         .context("Harness does not support compact")?;
@@ -196,8 +234,8 @@ pub fn compact(
         if name == "muxr" {
             continue;
         }
-        let vertical = name.split('/').next().unwrap_or(name);
-        let tool = config.resolve_tool(vertical, None);
+        let harness = name.split('/').next().unwrap_or(name);
+        let tool = config.resolve_tool(harness, None);
         if tool != harness_name {
             continue;
         }

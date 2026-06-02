@@ -167,7 +167,11 @@ fn default_discovery_none() -> SessionDiscovery {
 fn merge_tool_with_builtin(user: Tool, builtin: Tool) -> Tool {
     Tool {
         bin: user.bin,
-        args: if user.args.is_empty() { builtin.args } else { user.args },
+        args: if user.args.is_empty() {
+            builtin.args
+        } else {
+            user.args
+        },
         resume_args: if user.resume_args.is_empty() {
             builtin.resume_args
         } else {
@@ -216,6 +220,9 @@ const RESERVED_NAMES: &[&str] = &[
     "rename",
     "kill",
     "switch",
+    "upgrade",
+    "retire",
+    "broadcast",
     "tmux-status",
     "claude-status",
     "completions",
@@ -325,7 +332,7 @@ impl Tool {
         parts.join(" ")
     }
 
-    /// Build the launch command with harness-specific settings from the vertical.
+    /// Build the launch command with harness-specific settings from the harness.
     ///
     /// If the tool has a `wrapper` set, the final command is
     /// `<wrapper> <launch_command> <settings flags...>`.
@@ -372,7 +379,7 @@ impl Tool {
 
         if let Some(files) = effective_files {
             // Expand ~ / absolute paths; leave relative paths as-is so they
-            // resolve from the vertical's cwd at launch time.
+            // resolve from the harness's cwd at launch time.
             let expanded_paths: Vec<String> = files
                 .iter()
                 .map(|f| {
@@ -475,9 +482,7 @@ fn read_and_join(paths: &[String], bin: &str) -> Result<String> {
     let mut parts = Vec::with_capacity(paths.len());
     for path in paths {
         let content = std::fs::read_to_string(path).with_context(|| {
-            format!(
-                "failed to read system-prompt file at {path} for tool {bin}"
-            )
+            format!("failed to read system-prompt file at {path} for tool {bin}")
         })?;
         parts.push(content);
     }
@@ -525,6 +530,16 @@ fn default_tool() -> String {
     "claude".to_string()
 }
 
+/// Resolve the config path from an optional `MUXR_CONFIG` override and the
+/// home dir. Split out from `Config::path` so it is testable without
+/// mutating process env. An empty override is ignored (falls back to home).
+fn resolve_config_path(env_override: Option<String>, home: &std::path::Path) -> PathBuf {
+    match env_override {
+        Some(p) if !p.is_empty() => PathBuf::from(shellexpand::tilde(&p).to_string()),
+        _ => home.join(".config").join("muxr").join("config.toml"),
+    }
+}
+
 fn default_connect() -> String {
     "mosh".to_string()
 }
@@ -558,16 +573,12 @@ impl Config {
         // Validate no name collisions between harnesses, remotes, and tools
         for name in config.remotes.keys() {
             if config.harnesses.contains_key(name) {
-                anyhow::bail!(
-                    "Name collision: '{name}' is defined as both a vertical and a remote"
-                );
+                anyhow::bail!("Name collision: '{name}' is defined as both a harness and a remote");
             }
         }
         for name in config.tools.keys() {
             if config.harnesses.contains_key(name) {
-                anyhow::bail!(
-                    "Name collision: '{name}' is defined as both a vertical and a harness"
-                );
+                anyhow::bail!("Name collision: '{name}' is defined as both a tool and a harness");
             }
             if config.remotes.contains_key(name) {
                 anyhow::bail!("Name collision: '{name}' is defined as both a remote and a harness");
@@ -582,23 +593,31 @@ impl Config {
         Ok(config)
     }
 
+    /// Resolve the config file path. `MUXR_CONFIG`, when set and non-empty,
+    /// overrides the default `~/.config/muxr/config.toml`. The override lets
+    /// tests and jig fixtures point muxr at an isolated config without
+    /// hijacking `$HOME`. `~` in the override is expanded.
     pub fn path() -> Result<PathBuf> {
         let home = dirs::home_dir().context("Could not determine home directory")?;
-        let config_dir = home.join(".config").join("muxr");
-        Ok(config_dir.join("config.toml"))
+        Ok(resolve_config_path(std::env::var("MUXR_CONFIG").ok(), &home))
     }
 
+    /// State lives beside the config, so `MUXR_CONFIG` isolates both with a
+    /// single override: `state.json` is always the config file's sibling.
     pub fn state_path() -> Result<PathBuf> {
-        let home = dirs::home_dir().context("Could not determine home directory")?;
-        let config_dir = home.join(".config").join("muxr");
-        Ok(config_dir.join("state.json"))
+        let cfg = Self::path()?;
+        let dir = cfg
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+        Ok(dir.join("state.json"))
     }
 
-    pub fn resolve_dir(&self, vertical: &str) -> Result<PathBuf> {
+    pub fn resolve_dir(&self, harness: &str) -> Result<PathBuf> {
         let v = self
             .harnesses
-            .get(vertical)
-            .with_context(|| format!("Unknown vertical: {vertical}"))?;
+            .get(harness)
+            .with_context(|| format!("Unknown harness: {harness}"))?;
         let expanded = shellexpand::tilde(&v.dir);
         Ok(PathBuf::from(expanded.as_ref()))
     }
@@ -616,13 +635,13 @@ impl Config {
         names
     }
 
-    /// Resolve which tool to use for a vertical.
-    /// Priority: explicit override > vertical config > default_tool
-    pub fn resolve_tool(&self, vertical: &str, tool_override: Option<&str>) -> String {
+    /// Resolve which tool to use for a harness.
+    /// Priority: explicit override > harness config > default_tool
+    pub fn resolve_tool(&self, harness: &str, tool_override: Option<&str>) -> String {
         if let Some(t) = tool_override {
             return t.to_string();
         }
-        if let Some(v) = self.harnesses.get(vertical)
+        if let Some(v) = self.harnesses.get(harness)
             && let Some(ref t) = v.tool
         {
             return t.clone();
@@ -837,7 +856,7 @@ session_discovery = { type = "none" }
     }
 
     #[test]
-    fn color_for_vertical() {
+    fn color_for_harness() {
         let config = sample_config();
         assert_eq!(config.color_for("work"), "#7aa2f7");
     }
@@ -894,7 +913,7 @@ session_discovery = { type = "none" }
     }
 
     #[test]
-    fn name_collision_vertical_remote_rejected() {
+    fn name_collision_harness_remote_rejected() {
         let toml_str = r##"
 [harnesses.lab]
 dir = "~/lab"
@@ -915,7 +934,7 @@ color = "#fff"
     }
 
     #[test]
-    fn name_collision_harness_vertical_detected() {
+    fn name_collision_tool_harness_detected() {
         let toml_str = r##"
 [harnesses.opencode]
 dir = "~/oc"
@@ -937,7 +956,30 @@ session_discovery = { type = "none" }
     fn reserved_harness_name_detected() {
         assert!(RESERVED_NAMES.contains(&"save"));
         assert!(RESERVED_NAMES.contains(&"switch"));
+        assert!(RESERVED_NAMES.contains(&"upgrade"));
+        assert!(RESERVED_NAMES.contains(&"retire"));
+        assert!(RESERVED_NAMES.contains(&"broadcast"));
         assert!(!RESERVED_NAMES.contains(&"claude"));
+    }
+
+    #[test]
+    fn config_path_honors_muxr_config_override() {
+        let home = std::path::Path::new("/home/u");
+        // No override -> default under home.
+        assert_eq!(
+            resolve_config_path(None, home),
+            home.join(".config/muxr/config.toml")
+        );
+        // Empty override is ignored.
+        assert_eq!(
+            resolve_config_path(Some(String::new()), home),
+            home.join(".config/muxr/config.toml")
+        );
+        // Non-empty override wins verbatim (absolute path).
+        assert_eq!(
+            resolve_config_path(Some("/tmp/fix/config.toml".to_string()), home),
+            PathBuf::from("/tmp/fix/config.toml")
+        );
     }
 
     #[test]
@@ -1031,7 +1073,10 @@ prompt_mode = "string"
         let config: Config = toml::from_str(toml_str).unwrap();
         let h = config.tool_for("pi").unwrap();
         match h.session_discovery {
-            SessionDiscovery::File { ref pattern, ref id_key } => {
+            SessionDiscovery::File {
+                ref pattern,
+                ref id_key,
+            } => {
                 assert_eq!(pattern, "~/.pi/sessions/{pid}.json");
                 assert_eq!(id_key, "sessionId");
             }
@@ -1124,7 +1169,7 @@ prompt_mode = "string"
     }
 
     #[test]
-    fn resolve_tool_vertical_config() {
+    fn resolve_tool_harness_config() {
         let config = sample_config();
         assert_eq!(config.resolve_tool("personal", None), "opencode");
     }
@@ -1132,7 +1177,7 @@ prompt_mode = "string"
     #[test]
     fn resolve_tool_default_fallback() {
         let config = sample_config();
-        // Unknown vertical falls back to default_tool
+        // Unknown harness falls back to default_tool
         assert_eq!(config.resolve_tool("nonexistent", None), "claude");
     }
 
@@ -1243,12 +1288,7 @@ session_discovery = { type = "none" }
 
         // Resume case: session_id provided -> --resume present, no --continue.
         let cmd = tool
-            .launch_command_with_settings(
-                Some("tanuki/pi"),
-                Some("abc-123"),
-                None,
-                &settings,
-            )
+            .launch_command_with_settings(Some("tanuki/pi"), Some("abc-123"), None, &settings)
             .unwrap();
         assert!(
             cmd.starts_with("nono run --profile X -- pi"),

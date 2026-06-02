@@ -34,7 +34,7 @@ pub(crate) struct Cli {
     #[arg(long, env = "MUXR_TMUX_SERVER")]
     server: Option<String>,
 
-    /// Vertical name (e.g., work, personal, oss)
+    /// Harness name (e.g., work, personal, oss)
     #[arg(num_args = 0..)]
     args: Vec<String>,
 }
@@ -77,6 +77,29 @@ enum Commands {
         /// Session name (e.g. tanuki/2026-04-24) or "all" to retire every
         /// tmux session.
         name: String,
+    },
+    /// Move running sessions onto a newly installed harness binary, in place.
+    ///
+    /// Use this after upgrading Claude Code (or any harness) to migrate your
+    /// long-running sessions onto the new version WITHOUT losing their
+    /// conversation, harness rules, or working dirs. For each target: graceful
+    /// `/exit`, then relaunch with the full composed command (HARNESS prompt +
+    /// campaign --add-dir paths + --resume) on the binary the tool now
+    /// resolves to. Aliased as `migrate`.
+    #[command(visible_alias = "migrate")]
+    Upgrade {
+        /// Session name to upgrade (e.g. tanuki/factory/foo). Omit to
+        /// upgrade every session running the selected tool.
+        name: Option<String>,
+        /// Tool to upgrade (default: claude).
+        #[arg(long, default_value = "claude")]
+        tool: String,
+        /// Also switch model on relaunch (passes --model).
+        #[arg(long)]
+        model: Option<String>,
+        /// Print what would be upgraded without touching any session.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Interactive session switcher (TUI)
     Switch,
@@ -132,6 +155,26 @@ fn main() -> Result<()> {
         }
         Some(Commands::TmuxStatus) => cmd_tmux_status(&tmux),
         Some(Commands::ClaudeStatus) => claude_status::run(&tmux),
+        Some(Commands::Upgrade {
+            name,
+            tool,
+            model,
+            dry_run,
+        }) => {
+            let config = Config::load()?;
+            let harness = config
+                .tool_for(&tool)
+                .with_context(|| format!("Unknown tool: {tool}"))?;
+            tool::upgrade(
+                &tmux,
+                &config,
+                &tool,
+                &harness,
+                model.as_deref(),
+                name.as_deref(),
+                dry_run,
+            )
+        }
         Some(Commands::Switch) => cmd_switch(&tmux),
         Some(Commands::Broadcast {
             cmd,
@@ -286,17 +329,9 @@ fn cmd_open_campaign(
     }
 
     let tool = config.resolve_tool(harness_name, None);
-    let tool_config = config.tool_for(&tool);
-    let harness = config.harnesses.get(harness_name);
-
-    // Start from the harness's existing launch settings; layer campaign
-    // paths and the composed prompt on top.
-    let mut settings = harness.map(|v| v.launch.clone()).unwrap_or_default();
-
-    let (campaign_data, campaign_body) = primitives::load_campaign(&campaign_md)?;
-    let (session_data, session_body) = primitives::load_session(&session_path)?;
 
     // Schema validation: session's campaign must match requested campaign.
+    let (session_data, _session_body) = primitives::load_session(&session_path)?;
     if session_data.campaign != campaign {
         anyhow::bail!(
             "Session file {} declares campaign '{}' but was opened as '{}'.",
@@ -309,13 +344,115 @@ fn cmd_open_campaign(
         eprintln!("  entrypoint: {}", session_data.entrypoint);
     }
 
-    let composed = primitives::compose_prompt(campaign, &campaign_body, &session_body);
+    // Build the launch command through the single composer so that a freshly
+    // opened session, a restored session, and an upgraded session all receive
+    // an identical command (modulo the resume id). This is the one place that
+    // knows how to materialise a session's full launch: harness settings +
+    // composed HARNESS/campaign/session prompt + campaign --add-dir paths.
+    let (tool_cmd, session_dir) = compose_launch_command(config, &session_name, None, None, false)?;
+
+    // Campaign metadata, loaded only for the launch banner below.
+    let (campaign_data, _campaign_body) = primitives::load_campaign(&campaign_md)?;
+
+    config.run_pre_create_hooks(&session_dir);
+
+    eprintln!(
+        "Creating {session_name} in {} ({})",
+        session_dir.display(),
+        tool
+    );
+    if !campaign_data.synthesist_trees.is_empty() {
+        eprintln!(
+            "  synthesist trees: {}",
+            campaign_data.synthesist_trees.join(", ")
+        );
+    }
+    if !campaign_data.paths.is_empty() {
+        eprintln!("  paths: {} added as --add-dir", campaign_data.paths.len());
+    }
+    tmux.create_session(&session_name, &session_dir, &tool_cmd)?;
+    tmux.attach(&session_name)?;
+    Ok(())
+}
+
+/// Invert a tmux session name back into (harness, campaign, topic).
+///
+/// The launch path collapses the switchboard slug from
+/// `<harness>/_switchboard/switchboard` to `<harness>/switchboard`, so the
+/// inverse maps a bare `<harness>/switchboard` back to the `_switchboard`
+/// campaign. All other sessions are the straightforward
+/// `<harness>/<campaign>/<topic>` (topics are validated kebab-case, so they
+/// never contain a slash).
+pub(crate) fn parse_session_slug(session_name: &str) -> Option<(String, String, String)> {
+    let parts: Vec<&str> = session_name.split('/').collect();
+    match parts.as_slice() {
+        [harness, topic] if *topic == primitives::SWITCHBOARD_TOPIC => Some((
+            (*harness).to_string(),
+            primitives::SWITCHBOARD.to_string(),
+            primitives::SWITCHBOARD_TOPIC.to_string(),
+        )),
+        [harness, campaign, topic] => Some((
+            (*harness).to_string(),
+            (*campaign).to_string(),
+            (*topic).to_string(),
+        )),
+        _ => None,
+    }
+}
+
+/// Materialise the full launch command for a session: the single source of
+/// truth shared by `open`, `restore`, and `upgrade`.
+///
+/// Reconstructs harness launch settings, the composed HARNESS + campaign +
+/// session system prompt (written to a temp file), and the campaign's
+/// `--add-dir` paths, then asks the tool to assemble the command. The binary
+/// name is resolved fresh from config each call, so a relaunch picks up a
+/// newly installed harness version.
+///
+/// `resume_id` resumes a specific conversation; when it is `None` and
+/// `continue_fallback` is set, the tool's `--continue` args are appended so a
+/// restored session without a discovered id still re-attaches to its most
+/// recent conversation. Returns the command and the session directory.
+///
+/// The campaign and session files must already exist; callers that might not
+/// have them (restore/upgrade of an archived session) handle the error by
+/// falling back to a name+resume-only relaunch.
+pub(crate) fn compose_launch_command(
+    config: &Config,
+    session_name: &str,
+    resume_id: Option<&str>,
+    model: Option<&str>,
+    continue_fallback: bool,
+) -> Result<(String, std::path::PathBuf)> {
+    let (harness_name, campaign, topic) = parse_session_slug(session_name)
+        .with_context(|| format!("cannot derive campaign/topic from '{session_name}'"))?;
+
+    let harness_dir = config.resolve_dir(&harness_name)?;
+    let campaign_md = primitives::campaign_file(&harness_dir, &campaign)?;
+    let session_path = harness_dir
+        .join("campaigns")
+        .join(&campaign)
+        .join("sessions")
+        .join(format!("{topic}.md"));
+
+    let tool = config.resolve_tool(&harness_name, None);
+    let tool_config = config.tool_for(&tool);
+    let harness = config.harnesses.get(&harness_name);
+
+    // Start from the harness's existing launch settings; layer campaign
+    // paths and the composed prompt on top.
+    let mut settings = harness.map(|v| v.launch.clone()).unwrap_or_default();
+
+    let (campaign_data, campaign_body) = primitives::load_campaign(&campaign_md)?;
+    let (_session_data, session_body) = primitives::load_session(&session_path)?;
+
+    let composed = primitives::compose_prompt(&campaign, &campaign_body, &session_body);
 
     // Claude Code rejects --append-system-prompt and --append-system-prompt-file
-    // together. Also, multi-line content via shell send-keys breaks shell
-    // parsing. Solution: resolve any configured HARNESS.md-style file,
-    // combine with the composed campaign+session prompt, write to a single
-    // temp file, pass only --append-system-prompt-file.
+    // together, and multi-line content via shell send-keys breaks parsing.
+    // Resolve any configured HARNESS.md-style file, combine it with the
+    // composed campaign+session prompt, write to a single temp file, and pass
+    // only --append-system-prompt-file.
     let harness_md_content = if let Some(ref file) = settings.append_system_prompt_file {
         let expanded = shellexpand::tilde(file).to_string();
         let path = if expanded.starts_with('/') {
@@ -349,31 +486,24 @@ fn cmd_open_campaign(
         }
     }
 
-    let session_dir = harness_dir.clone();
-    config.run_pre_create_hooks(&session_dir);
-
     let tool_cmd = match &tool_config {
-        Some(h) => h.launch_command_with_settings(Some(&session_name), None, None, &settings)?,
+        Some(h) => {
+            let mut cmd =
+                h.launch_command_with_settings(Some(session_name), resume_id, model, &settings)?;
+            // No discovered id but a continue fallback was requested: re-attach
+            // to the most recent conversation rather than starting cold.
+            if resume_id.is_none() && continue_fallback {
+                for arg in &h.continue_args {
+                    cmd.push(' ');
+                    cmd.push_str(arg);
+                }
+            }
+            cmd
+        }
         None => tool.clone(),
     };
 
-    eprintln!(
-        "Creating {session_name} in {} ({})",
-        session_dir.display(),
-        tool
-    );
-    if !campaign_data.synthesist_trees.is_empty() {
-        eprintln!(
-            "  synthesist trees: {}",
-            campaign_data.synthesist_trees.join(", ")
-        );
-    }
-    if !campaign_data.paths.is_empty() {
-        eprintln!("  paths: {} added as --add-dir", campaign_data.paths.len());
-    }
-    tmux.create_session(&session_name, &session_dir, &tool_cmd)?;
-    tmux.attach(&session_name)?;
-    Ok(())
+    Ok((tool_cmd, harness_dir))
 }
 
 /// Open or attach to a remote proxy session: muxr lab bootc
@@ -864,7 +994,16 @@ fn cmd_harness_dispatch(tmux: &Tmux, config: &Config, args: &[String]) -> Result
     match sub {
         "upgrade" => {
             let model = find_flag_value(&args[2..], "--model");
-            tool::upgrade(tmux, config, harness_name, &harness, model.as_deref())
+            let dry_run = args[2..].iter().any(|a| a == "--dry-run");
+            tool::upgrade(
+                tmux,
+                config,
+                harness_name,
+                &harness,
+                model.as_deref(),
+                None,
+                dry_run,
+            )
         }
         "model" => {
             let model = args.get(2).map(|s| s.as_str());
@@ -954,6 +1093,137 @@ mod tests {
         assert_eq!(parse_three_part("/harness/foo"), None);
         assert_eq!(parse_three_part("tanuki//foo"), None);
         assert_eq!(parse_three_part("tanuki/harness/"), None);
+    }
+
+    #[test]
+    fn parse_session_slug_splits_three_part() {
+        assert_eq!(
+            parse_session_slug("tanuki/factory/in-place-updates"),
+            Some((
+                "tanuki".to_string(),
+                "factory".to_string(),
+                "in-place-updates".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_session_slug_inverts_switchboard_collapse() {
+        // muxr collapses _switchboard/switchboard to a bare <harness>/switchboard
+        // tmux name; the inverse must map it back to the _switchboard campaign.
+        assert_eq!(
+            parse_session_slug("tanuki/switchboard"),
+            Some((
+                "tanuki".to_string(),
+                "_switchboard".to_string(),
+                "switchboard".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_session_slug_rejects_other_two_part_and_one_part() {
+        assert_eq!(parse_session_slug("tanuki/harness"), None);
+        assert_eq!(parse_session_slug("solo"), None);
+    }
+
+    #[test]
+    fn compose_launch_command_carries_prompt_and_add_dirs() {
+        // Regression guard for the convergence fix: a resumed launch (restore /
+        // upgrade) must carry the composed system prompt AND the campaign's
+        // --add-dir paths, not just --name/--resume. The pre-convergence
+        // restore_command/launch_command paths dropped both.
+        let dir = tempfile::tempdir().unwrap();
+        let campaign_dir = dir.path().join("campaigns/factory");
+        let sessions = campaign_dir.join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let extra = dir.path().join("extra-workdir");
+        std::fs::create_dir_all(&extra).unwrap();
+
+        std::fs::write(
+            campaign_dir.join("campaign.md"),
+            format!(
+                "---\nsynthesist_trees: []\npaths:\n  - {}\n---\n\n# factory\nbody\n",
+                extra.display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            sessions.join("in-place-updates.md"),
+            "---\ncampaign: factory\nentrypoint: \"\"\n---\n\n# in-place-updates\nsession body\n",
+        )
+        .unwrap();
+
+        let toml = format!(
+            "[harnesses.nomograph]\ndir = {dir:?}\ncolor = \"#fff\"\n",
+            dir = dir.path()
+        );
+        let config: Config = toml::from_str(&toml).unwrap();
+
+        let (cmd, session_dir) = compose_launch_command(
+            &config,
+            "nomograph/factory/in-place-updates",
+            Some("ABC123"),
+            None,
+            false,
+        )
+        .unwrap();
+
+        // Flag values are shell-quoted, so assert flag and value separately.
+        assert!(cmd.contains("--name"));
+        assert!(
+            cmd.contains("nomograph/factory/in-place-updates"),
+            "name missing: {cmd}"
+        );
+        assert!(cmd.contains("--resume"), "resume flag missing: {cmd}");
+        assert!(cmd.contains("ABC123"), "resume id missing: {cmd}");
+        assert!(
+            cmd.contains("--append-system-prompt-file"),
+            "system prompt dropped: {cmd}"
+        );
+        assert!(cmd.contains("--add-dir"), "add-dir dropped: {cmd}");
+        assert!(
+            cmd.contains(&extra.display().to_string()),
+            "campaign path missing: {cmd}"
+        );
+        assert!(session_dir.join("campaigns/factory/campaign.md").is_file());
+    }
+
+    #[test]
+    fn compose_launch_command_continue_fallback_when_no_id() {
+        // restore passes continue_fallback=true; with no discovered id the
+        // command must re-attach via --continue rather than starting cold.
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join("campaigns/factory/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            dir.path().join("campaigns/factory/campaign.md"),
+            "---\nsynthesist_trees: []\npaths: []\n---\n\n# factory\nbody\n",
+        )
+        .unwrap();
+        std::fs::write(
+            sessions.join("topic.md"),
+            "---\ncampaign: factory\nentrypoint: \"\"\n---\n\nbody\n",
+        )
+        .unwrap();
+
+        let toml = format!(
+            "[harnesses.nomograph]\ndir = {dir:?}\ncolor = \"#fff\"\n",
+            dir = dir.path()
+        );
+        let config: Config = toml::from_str(&toml).unwrap();
+
+        let (cmd, _) =
+            compose_launch_command(&config, "nomograph/factory/topic", None, None, true).unwrap();
+
+        assert!(
+            cmd.contains("--continue"),
+            "continue fallback missing: {cmd}"
+        );
+        assert!(
+            !cmd.contains("--resume"),
+            "should not resume without id: {cmd}"
+        );
     }
 
     #[test]
