@@ -824,7 +824,7 @@ fn cmd_retire(tmux: &Tmux, name: &str) -> Result<()> {
                 let harness_pid = shell_pid.and_then(|sp| {
                     state::descendant_pids(sp)
                         .into_iter()
-                        .find(|pid| harness_proc_match(*pid, &harness.bin))
+                        .find(|pid| state::pid_runs_bin(*pid, &harness.bin))
                 });
                 if let Some(pid) = harness_pid {
                     wait_for_pid_exit(pid, 10);
@@ -885,24 +885,6 @@ fn wait_for_pid_exit(pid: u32, timeout_secs: u32) {
         .args(["-9", &pid.to_string()])
         .stderr(Stdio::null())
         .status();
-}
-
-/// Check if a PID is running the named harness binary. Matches against full
-/// argv, not just `comm`, because node-based harnesses (claude-code) run as
-/// `node /path/to/claude …` where comm is `node`.
-fn harness_proc_match(pid: u32, bin: &str) -> bool {
-    use std::process::Stdio;
-    let suffix = format!("/{bin}");
-    std::process::Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "args="])
-        .stderr(Stdio::null())
-        .output()
-        .map(|o| {
-            let args = String::from_utf8_lossy(&o.stdout);
-            args.split_whitespace()
-                .any(|tok| tok == bin || tok.ends_with(&suffix))
-        })
-        .unwrap_or(false)
 }
 
 fn cmd_ls(tmux: &Tmux, active_only: bool) -> Result<()> {

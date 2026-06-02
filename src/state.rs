@@ -100,36 +100,40 @@ pub fn discover_session_id(
 }
 
 /// Check if a harness process is running in a tmux session.
-///
-/// Matches against the full argv (not just comm) because node-based
-/// harnesses like claude-code run as `node /path/to/claude ...` -- the
-/// executable's comm is `node`, but one of the args ends with `/claude`.
-///
-/// Uses sysinfo for process metadata so this stays sandbox-safe (no
-/// /bin/ps shell-out).
 #[allow(dead_code)] // used by harness.rs and switcher.rs
 pub fn has_harness_process(tmux: &Tmux, tmux_session: &str, bin: &str) -> bool {
     let Some(Ok(Some(shell_pid))) = Some(tmux.pane_pid(tmux_session)) else {
         return false;
     };
+    descendant_pids(shell_pid)
+        .into_iter()
+        .any(|pid| pid_runs_bin(pid, bin))
+}
+
+/// True if process `pid`'s argv invokes `bin` -- either the bare name or a
+/// path ending in `/bin` (so node-wrapped harnesses like `node /…/claude`
+/// still match).
+///
+/// Reads argv via `ps`, NOT sysinfo: on macOS `sysinfo`'s `process.cmd()`
+/// is frequently empty for live processes (argv is not always introspectable
+/// through libproc), which made the previous sysinfo-based check report "no
+/// harness process" for every running session and silently broke
+/// `muxr upgrade` / `ls --active`. `ps -o args=` reads argv reliably. The PID
+/// tree itself still comes from sysinfo (`descendant_pids`), which only needs
+/// parent links and works fine.
+pub fn pid_runs_bin(pid: u32, bin: &str) -> bool {
+    use std::process::{Command, Stdio};
     let suffix = format!("/{bin}");
-
-    let mut sys = System::new();
-    sys.refresh_processes(ProcessesToUpdate::All, true);
-
-    for pid in descendant_pids(shell_pid) {
-        let Some(proc) = sys.process(Pid::from_u32(pid)) else {
-            continue;
-        };
-        let cmd_matches = proc.cmd().iter().any(|arg| {
-            let s = arg.to_string_lossy();
-            s == bin || s.ends_with(&suffix)
-        });
-        if cmd_matches {
-            return true;
-        }
-    }
-    false
+    Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "args="])
+        .stderr(Stdio::null())
+        .output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .split_whitespace()
+                .any(|tok| tok == bin || tok.ends_with(&suffix))
+        })
+        .unwrap_or(false)
 }
 
 impl SavedState {

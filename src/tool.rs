@@ -101,7 +101,7 @@ pub fn upgrade(
         let harness_pid = shell_pid.and_then(|sp| {
             state::descendant_pids(sp)
                 .into_iter()
-                .find(|pid| is_harness_process(*pid, &tool_def.bin))
+                .find(|pid| state::pid_runs_bin(*pid, &tool_def.bin))
         });
 
         // Send /exit for graceful shutdown
@@ -257,24 +257,6 @@ pub fn compact(
 
     eprintln!("\nCompacted {compacted} session(s) (threshold: {threshold}%).");
     Ok(())
-}
-
-/// Check if a PID is running a specific binary.
-///
-/// Matches against full argv -- node-based harnesses (claude-code) run
-/// as `node /path/to/claude ...` where comm is `node`.
-fn is_harness_process(pid: u32, bin: &str) -> bool {
-    let suffix = format!("/{bin}");
-    Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "args="])
-        .output()
-        .map(|o| {
-            let args_str = String::from_utf8_lossy(&o.stdout);
-            args_str
-                .split_whitespace()
-                .any(|tok| tok == bin || tok.ends_with(&suffix))
-        })
-        .unwrap_or(false)
 }
 
 /// Wait for a process to exit, escalating to SIGKILL after timeout.
