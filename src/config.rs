@@ -599,7 +599,10 @@ impl Config {
     /// hijacking `$HOME`. `~` in the override is expanded.
     pub fn path() -> Result<PathBuf> {
         let home = dirs::home_dir().context("Could not determine home directory")?;
-        Ok(resolve_config_path(std::env::var("MUXR_CONFIG").ok(), &home))
+        Ok(resolve_config_path(
+            std::env::var("MUXR_CONFIG").ok(),
+            &home,
+        ))
     }
 
     /// State lives beside the config, so `MUXR_CONFIG` isolates both with a

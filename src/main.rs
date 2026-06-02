@@ -428,7 +428,10 @@ pub(crate) fn compose_launch_command(
         .with_context(|| format!("cannot derive campaign/topic from '{session_name}'"))?;
 
     let harness_dir = config.resolve_dir(&harness_name)?;
-    let campaign_md = primitives::campaign_file(&harness_dir, &campaign)?;
+    let campaign_md = harness_dir
+        .join("campaigns")
+        .join(&campaign)
+        .join("campaign.md");
     let session_path = harness_dir
         .join("campaigns")
         .join(&campaign)
@@ -443,8 +446,21 @@ pub(crate) fn compose_launch_command(
     // paths and the composed prompt on top.
     let mut settings = harness.map(|v| v.launch.clone()).unwrap_or_default();
 
-    let (campaign_data, campaign_body) = primitives::load_campaign(&campaign_md)?;
-    let (_session_data, session_body) = primitives::load_session(&session_path)?;
+    // Campaign and session files are loaded best-effort. A relaunch must keep
+    // the harness-level prompt and campaign --add-dir paths even when the
+    // session body file is missing -- e.g. an archived-but-still-running
+    // session, whose `.md` has moved to sessions/archive/. Without this an
+    // in-place upgrade of such a session would silently drop its HARNESS
+    // rules and working dirs. Missing or unparseable files degrade the
+    // composition (empty body / no campaign paths) instead of failing the
+    // whole relaunch. Genuinely fatal errors (unknown harness, unparseable
+    // slug) are still surfaced above, so callers keep their name+resume
+    // fallback for the truly-unrecoverable case.
+    let (campaign_data, campaign_body) =
+        primitives::load_campaign(&campaign_md).unwrap_or_default();
+    let session_body = primitives::load_session(&session_path)
+        .map(|(_, body)| body)
+        .unwrap_or_default();
 
     let composed = primitives::compose_prompt(&campaign, &campaign_body, &session_body);
 
@@ -1169,6 +1185,57 @@ mod tests {
             "campaign path missing: {cmd}"
         );
         assert!(session_dir.join("campaigns/factory/campaign.md").is_file());
+    }
+
+    #[test]
+    fn compose_launch_command_degrades_when_session_file_missing() {
+        // Archived-but-running session: campaign.md (with paths) exists, but
+        // the session .md has been moved to archive/. The relaunch must still
+        // carry the campaign --add-dir paths and a prompt file -- NOT collapse
+        // to bare name+resume -- so an upgrade doesn't strip a live session's
+        // harness rules.
+        let dir = tempfile::tempdir().unwrap();
+        let campaign_dir = dir.path().join("campaigns/factory");
+        std::fs::create_dir_all(campaign_dir.join("sessions")).unwrap();
+        let extra = dir.path().join("extra-workdir");
+        std::fs::create_dir_all(&extra).unwrap();
+        std::fs::write(
+            campaign_dir.join("campaign.md"),
+            format!(
+                "---\nsynthesist_trees: []\npaths:\n  - {}\n---\n\n# factory\nbody\n",
+                extra.display()
+            ),
+        )
+        .unwrap();
+        // Deliberately do NOT write sessions/archived-topic.md.
+
+        let toml = format!(
+            "[harnesses.nomograph]\ndir = {dir:?}\ncolor = \"#fff\"\n",
+            dir = dir.path()
+        );
+        let config: Config = toml::from_str(&toml).unwrap();
+
+        let (cmd, _) = compose_launch_command(
+            &config,
+            "nomograph/factory/archived-topic",
+            Some("ZID9"),
+            None,
+            false,
+        )
+        .expect("missing session file should degrade, not error");
+
+        assert!(cmd.contains("--resume"), "resume flag missing: {cmd}");
+        assert!(cmd.contains("ZID9"), "resume id missing: {cmd}");
+        // Harness/campaign-level context survives even though the session
+        // body file is gone:
+        assert!(
+            cmd.contains("--append-system-prompt-file"),
+            "prompt dropped on missing session: {cmd}"
+        );
+        assert!(
+            cmd.contains("--add-dir") && cmd.contains(&extra.display().to_string()),
+            "campaign --add-dir dropped on missing session: {cmd}"
+        );
     }
 
     #[test]

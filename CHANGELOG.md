@@ -2,35 +2,59 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [1.5.0] (2026-06-02)
+
+In-place session upgrade: move long-running harness sessions onto a newly
+installed binary (e.g. a new Claude Code release) without losing their
+conversation, harness rules, or working directories.
 
 ### Added
-- `muxr upgrade [NAME]` -- a top-level command to move running sessions
-  onto the freshly installed harness binary, resuming each conversation
-  in place. Graceful `/exit`, then relaunch on the binary the tool now
-  resolves to. Flags: `--tool` (default `claude`), `--model` (switch
-  model on relaunch), `--dry-run` (compose and print the relaunch
-  command for every target without touching any session). With no NAME
-  it upgrades every session running the selected tool; pass a NAME to
-  upgrade one. The previous `muxr <tool> upgrade` form still works and
+- `muxr upgrade [NAME]` (visible alias `migrate`) -- move running sessions
+  onto the freshly installed harness binary, resuming each conversation in
+  place. Graceful `/exit`, then relaunch on the binary the tool now resolves
+  to. Flags: `--tool` (default `claude`), `--model` (switch model on
+  relaunch), `--dry-run` (compose and print every relaunch without touching
+  a session). No NAME upgrades every session running the selected tool; a
+  NAME upgrades one. The previous `muxr <tool> upgrade` form still works and
   now also accepts `--dry-run`.
-- `upgrade`, `retire`, and `broadcast` added to the reserved harness
-  names so a harness cannot shadow a built-in command (`retire` and
-  `broadcast` were already commands but were missing from the list).
+- `MUXR_CONFIG` env override for the config path (and `state.json` derives
+  from its directory), so tests and harness fixtures can isolate config
+  without hijacking `$HOME`.
+- `upgrade`, `retire`, and `broadcast` added to the reserved harness names
+  so a harness cannot shadow a built-in command (`retire`/`broadcast` were
+  already commands but were missing from the list).
+- jig agent-shape battery: `upgrade` + harness-selection probe tasks, a
+  launch-grammar / harness-vs-repo rubric, a standalone (out-of-repo)
+  fixture, and a `harness_arg_correct` judge field.
 
 ### Changed
-- `restore` and `upgrade` now rebuild the **full** launch command --
-  composed HARNESS/campaign/session system prompt plus the campaign's
-  `--add-dir` paths -- through a single shared `compose_launch_command`,
-  the same code that first-launch (`open`) uses. Previously both took a
+- **One launch composer for `open`, `restore`, and `upgrade`.** All three
+  now build the relaunch through a single `compose_launch_command`, so a
+  restored or upgraded session keeps its full composed HARNESS prompt and
+  every campaign `--add-dir` path. Previously `restore` and `upgrade` took a
   lossy path (`restore_command` / `launch_command`) that emitted only
-  `--name` and `--resume`, so restored and upgraded sessions silently
-  lost their harness rules and working directories. All three lifecycle
-  paths now produce an identical command modulo the resume id. The
-  binary name is resolved fresh on each relaunch, which is what lets an
-  upgrade pick up a new harness version. If a session's campaign/session
-  files are missing (e.g. archived), the lossy path remains as a
-  graceful fallback rather than dropping the session.
+  `--name` and `--resume`, silently dropping harness rules and working dirs.
+  The three paths now produce an identical command modulo the resume id, and
+  the binary is resolved fresh each relaunch (this is what lets an upgrade
+  pick up a new harness version).
+- Composition now **degrades gracefully** instead of all-or-nothing: an
+  archived-but-still-running session (its `.md` moved to `sessions/archive/`)
+  still relaunches with the harness-level prompt and campaign `--add-dir`s,
+  skipping only the missing session body. The bare name+resume relaunch
+  remains as a last-resort fallback for genuinely unrecoverable cases
+  (unknown harness, unparseable session name).
+- Renamed the internal concept `vertical` -> `harness` throughout (params,
+  `--help`, errors, comments) so the tool speaks one word; the field that
+  was a resolved `Tool` is now `tool_def`. The first slug component is a
+  harness *key*, which may differ from the repo directory name.
+
+### Fixed
+- Harness-process detection (`has_harness_process`, used by `upgrade` and
+  `ls --active`) read argv via `sysinfo`'s `process.cmd()`, which is
+  reliably EMPTY on macOS -- so every running session was reported as "no
+  harness process" and skipped, making `upgrade` inert. Detection now reads
+  argv via `ps -o args=` (the PID tree still comes from sysinfo). The three
+  copies of the per-pid argv check are unified onto `state::pid_runs_bin`.
 
 ## [1.4.0] (2026-05-10)
 
