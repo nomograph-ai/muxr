@@ -23,9 +23,17 @@ conversation, harness rules, or working directories.
 - `upgrade`, `retire`, and `broadcast` added to the reserved harness names
   so a harness cannot shadow a built-in command (`retire`/`broadcast` were
   already commands but were missing from the list).
+- `muxr skill` -- muxr now emits its OWN usage skill (launch grammar, the
+  harness-key vs repo-name mapping, lifecycle verbs), compiled in from
+  `resources/skill.md` so it never drifts from the binary. Replaces the
+  separate registry entry; the tool ships its skill with its tag, matching
+  `rune`/`kit`/`synthesist`.
 - jig agent-shape battery: `upgrade` + harness-selection probe tasks, a
   launch-grammar / harness-vs-repo rubric, a standalone (out-of-repo)
-  fixture, and a `harness_arg_correct` judge field.
+  fixture, and a `harness_arg_correct` judge field. The fixture now installs
+  the emitted skill into the trial workspace, so the battery measures the
+  agent WITH the skill loaded -- the real experience -- which is the gate
+  that closes the upgrade/retire/harness-selection discoverability cells.
 
 ### Changed
 - **One launch composer for `open`, `restore`, and `upgrade`.** All three

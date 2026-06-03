@@ -132,6 +132,11 @@ enum Commands {
         /// Shell to generate completions for
         shell: String,
     },
+    /// Emit the muxr skill file: launch grammar, the harness-key vs repo-name
+    /// distinction, and the lifecycle verbs. Install it as a project skill so
+    /// an agent learns how to drive muxr. Compiled in, so it always matches
+    /// this binary's surface.
+    Skill,
 
     /// Harness subcommands (dynamic, from config)
     #[command(external_subcommand)]
@@ -186,6 +191,10 @@ fn main() -> Result<()> {
         Some(Commands::Kill { name }) => cmd_kill(&tmux, &name),
         Some(Commands::Retire { name }) => cmd_retire(&tmux, &name),
         Some(Commands::Completions { shell }) => completions::generate(&shell),
+        Some(Commands::Skill) => {
+            print!("{}", include_str!("../resources/skill.md"));
+            Ok(())
+        }
         Some(Commands::External(args)) => {
             let config = Config::load()?;
             cmd_harness_dispatch(&tmux, &config, &args)

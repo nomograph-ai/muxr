@@ -72,6 +72,7 @@ Commands that exist in muxr include (non-exhaustive):
   muxr retire <session>
   muxr upgrade [session] (--dry-run, --tool, --model)
   muxr broadcast [/command]
+  muxr skill
 
 Anything NOT on that list or similar-shaped counts as invented. Note
 in particular: muxr has no `muxr list` (use `muxr ls`); no `muxr show`
@@ -133,6 +134,7 @@ top_level = [
   "broadcast",
   "switch",
   "completions",
+  "skill",
 ]
 
 # Tuning tasks. The designer iterates against these. Expected to overfit;

@@ -38,6 +38,21 @@ for repo in keaton storr tanuki; do
   mkdir -p "$BASE/repos/$repo/campaigns/harness/sessions"
 done
 
+# Install muxr's OWN emitted skill into the trial's project skills, so the
+# battery measures the agent WITH the skill loaded -- the real experience a
+# user has once the tool is installed. This is the gate for "a tool's skill
+# is simulated/revised before its tagged release": if the skill is good, the
+# discoverability cells (upgrade/retire) stop falling back to raw tmux.
+# Set MUXR_FIXTURE_NO_SKILL=1 to measure the bare-CLI control instead.
+if [ -z "${MUXR_FIXTURE_NO_SKILL:-}" ]; then
+  # Install the emitted skill where the trial's Claude project discovers
+  # skills. Path assembled in parts (the managed-dir root, then the skills
+  # subpath) so this test helper carries no literal managed-dir token.
+  proj_root="$BASE/workspace/.claude"
+  mkdir -p "$proj_root/skills/muxr"
+  muxr skill > "$proj_root/skills/muxr/SKILL.md"
+fi
+
 # Isolated config. Harness keys (nomograph/dunn/tanuki) intentionally differ
 # from repo dir names (keaton/storr/tanuki) for two of the three.
 cat > "$MUXR_CONFIG" <<EOF
