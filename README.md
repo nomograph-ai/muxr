@@ -8,8 +8,8 @@
 [![crates.io](https://img.shields.io/crates/v/nomograph-muxr.svg)](https://crates.io/crates/nomograph-muxr)
 
 Harness session multiplexer for AI coding workflows. Owns the address
-`harness/campaign/session/segment` across tmux, the filesystem, and your
-AI runtime, so a rename or move stays coherent in all three.
+`<repo>/<campaign>` across tmux, the filesystem, and your AI runtime, so
+a rename or move stays coherent in all three.
 
 ## What it is
 
@@ -25,7 +25,7 @@ session with the right working directory and the right tool running.
 You open tabs, cd around, lose track of what is where. When you
 reboot, everything is gone.
 
-muxr organizes tmux sessions into verticals (local directory trees) and
+muxr organizes tmux sessions into repos (local directory trees) and
 remotes (GCE instances). Each session knows where it lives and what tool to
 run. `muxr save` snapshots everything. `muxr restore` brings it back.
 
@@ -42,17 +42,19 @@ Pre-built binaries for macOS arm64 and Linux amd64 are available in
 
 ```bash
 muxr init                                # create config
-muxr work                                # open the work harness switchboard
-muxr work api topic-flag                 # open work/api/topic-flag campaign session
-muxr switch                              # TUI picker to jump between them
+muxr work                                # open the work repo switchboard
+muxr work retrieval-precision            # open work/retrieval-precision campaign session
+muxr switch                              # interactive chooser to jump or launch
 muxr save                                # snapshot before reboot
 muxr restore                             # bring everything back
 ```
 
-Sessions are addressed as `<harness>/<campaign>/<topic>`. Topics are
-kebab-case and describe the work (e.g. `cicd-stub-fix`,
-`retrieval-precision`); they are not date-stamped. The per-harness
-switchboard is a singleton at `<harness>/_switchboard/switchboard`.
+Sessions are addressed as `<repo>/<campaign>` — two levels. Campaigns are
+kebab-case and name the initiative (e.g. `cicd-stub-fix`,
+`retrieval-precision`); they are not date-stamped. The per-repo switchboard
+is a singleton at `<repo>/switchboard`. When a topic crystallizes inside a
+broad campaign, `muxr shard <new>` spins it out into a sibling campaign
+instead of adding a third name level.
 
 ## Config
 
@@ -61,11 +63,15 @@ One file: `~/.config/muxr/config.toml`
 ```toml
 default_tool = "claude"
 
-[verticals.work]
+[repos.work]
 dir = "~/projects/work"
 color = "#7aa2f7"
 
-[verticals.personal]
+[repos.work.launch]
+append_system_prompt_file = "HARNESS.md"   # optional repo-level prompt
+add_dirs = ["~/docs/shared"]               # optional base --add-dir paths
+
+[repos.personal]
 dir = "~/projects/personal"
 color = "#9ece6a"
 
@@ -78,10 +84,10 @@ color = "#d29922"
 # instance_prefix = ""   # optional prefix for GCE instance names
 ```
 
-Verticals are local directory trees. Remotes are GCE instances resolved
-via `gcloud`. Each gets a color that shows up in the TUI switcher and
-the tmux status bar. Remotes require the
-[gcloud CLI](https://cloud.google.com/sdk/docs/install).
+Repos are local directory trees; the table key is the name you pass as the
+first argument to `muxr`. Remotes are GCE instances resolved via `gcloud`.
+Each gets a color that shows up in the chooser and the tmux status bar.
+Remotes require the [gcloud CLI](https://cloud.google.com/sdk/docs/install).
 
 ## How sessions work
 
@@ -89,27 +95,36 @@ muxr is a thin layer over tmux. Each session gets a named tmux session,
 the right working directory, and your default tool running.
 
 ```
-muxr work api topic-flag
-  tmux new-session -s "work/api/topic-flag" -c ~/projects/work
+muxr work retrieval-precision
+  tmux new-session -s "work/retrieval-precision" -c ~/projects/work
   tmux send-keys "claude" Enter
-  tmux attach -t "work/api/topic-flag"
+  tmux attach -t "work/retrieval-precision"
 ```
 
-Session names follow the pattern `harness/campaign/topic`. The topic is
+Session names follow the pattern `<repo>/<campaign>`. The campaign is
 mandatory and validated as kebab-case. Sessions persist across terminal
 restarts because tmux keeps them alive.
 
-## TUI switcher
+## The chooser
 
-`muxr switch` opens an interactive picker. Sessions are color-coded by
-vertical, sorted by most recent activity. Local and remote sessions
-appear together.
+`muxr switch` opens an interactive chooser that merges everything you can
+act on into one list, grouped by repo:
+
+- **live sessions** — Enter attaches.
+- **dormant campaigns** (on disk, not running) — Enter launches them, so
+  every campaign is visible at a glance, not just the running ones.
+- **`+ new campaign…`** per repo — Enter prompts for a slug and creates it.
+
+Shards render indented under their hub. Remote sessions appear alongside
+local ones.
 
 | Key | Action |
 |-----|--------|
 | `j` / `k` | Navigate |
-| `Enter` | Attach to session |
-| `d` | Kill session (with confirmation) |
+| `Enter` | Switch / open dormant / create (context-sensitive) |
+| `n` | New campaign in the selected repo |
+| `r` | Rename a live session |
+| `d` | Kill a live session (with confirmation) |
 | `/` | Fuzzy filter |
 | `q` | Quit |
 
@@ -151,7 +166,7 @@ Remote sessions re-establish connections.
 muxr upgrade                    # move every claude session onto the
                                 # freshly installed binary, in place
 muxr upgrade --dry-run          # show what would happen, touch nothing
-muxr upgrade tanuki/factory/foo # upgrade just one session
+muxr upgrade work/retrieval-precision  # upgrade just one session
 muxr upgrade --model opus-4-8   # also switch model on relaunch
 ```
 
@@ -168,10 +183,11 @@ agent session.
 | Command | What it does |
 |---------|-------------|
 | `muxr` | Control plane (bare shell) |
-| `muxr <harness>` | Open the harness switchboard singleton |
-| `muxr <harness> <campaign> <topic>` | Open or attach to a campaign session |
+| `muxr <repo>` | Open the repo switchboard singleton |
+| `muxr <repo> <campaign>` | Open or attach to a campaign session |
 | `muxr <remote> [context...]` | Create or attach to a remote session |
-| `muxr switch` | Interactive TUI session picker |
+| `muxr switch` | Interactive chooser: switch / open dormant / create |
+| `muxr shard <new>` | Spin a topic out of the current campaign into a sibling (`--repo`, `--from`) |
 | `muxr ls` | List active sessions |
 | `muxr save` | Snapshot session state |
 | `muxr restore` | Recreate sessions after reboot |
@@ -181,6 +197,7 @@ agent session.
 | `muxr upgrade [name]` | Relaunch sessions in place on the new binary (`--dry-run`, `--tool`, `--model`) |
 | `muxr broadcast [/cmd]` | Send a slash command to every harness session |
 | `muxr rename <name>` | Rename: tmux + session file on disk + runtime relink |
+| `muxr migrate-layout <repo>` | Migrate a repo's `campaigns/` tree to the 2-level model (`--dry-run`, `--keep-archives`) |
 | `muxr init` | Create default config |
 | `muxr completions <shell>` | Shell completions (zsh, bash, fish) |
 | `muxr tmux-status` | tmux status bar integration |

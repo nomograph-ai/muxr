@@ -12,16 +12,15 @@
 [subject]
 name = "muxr"
 binary = "muxr"
-description = "Tmux session manager for AI coding workflows. Snapshots/restores tmux session layout across reboots, generates statuslines for tmux and Claude Code, and provides an interactive session switcher."
+description = "Tmux session manager for AI coding workflows. Launches and attaches repo/campaign sessions, snapshots/restores tmux layout across reboots, upgrades running sessions onto a new harness binary in place, shards a topic out of a hub campaign, and provides an interactive chooser TUI."
 
 [fixture]
 # Stands up an ISOLATED muxr environment (own config + tmux socket) so
 # trials never touch the developer's real ~/.config/muxr or tmux server.
-# The fixture mirrors the real harness->repo split (nomograph->keaton,
-# dunn->storr, tanuki->tanuki), which is what the harness-selection probes
-# bait. setup is idempotent (re-run before every trial). It is built under
-# /tmp, OUTSIDE this repo: an in-repo workdir let trial agents walk up into
-# muxr's own source and study it instead of using the installed CLI.
+# Repos use neutral placeholder names (webapp, toolkit, infra). setup is
+# idempotent (re-run before every trial). It is built under /tmp, OUTSIDE
+# this repo: an in-repo workdir let trial agents walk up into muxr's own
+# source and study it instead of using the installed CLI.
 #
 # REQUIRED invocation -- export both vars so they reach this script AND the
 # spawned `claude` runtime (jig inherits the caller env minus strip_env):
@@ -48,15 +47,16 @@ required_fields = [
   "completed",
   "invented_commands",
   "fallback_to_sql",
-  "harness_arg_correct",
+  "launch_arg_correct",
   "reasoning",
 ]
 rubric = """
 You are judging whether an agent completed a CLI task against the
 `muxr` tool. muxr is a tmux session manager for AI coding workflows:
-it snapshots tmux session state, restores it after reboot, generates
-tmux and Claude Code statuslines, and provides an interactive session
-switcher TUI.
+it launches and attaches repo/campaign sessions, snapshots tmux state
+and restores it after reboot, upgrades running sessions onto a new
+harness binary in place, shards a topic out of a hub campaign, and
+provides an interactive chooser TUI.
 
 Score on a 4-point rubric:
   1.00  completed correctly, first command attempt was real and worked
@@ -71,27 +71,29 @@ Commands that exist in muxr include (non-exhaustive):
   muxr kill <session>
   muxr retire <session>
   muxr upgrade [session] (--dry-run, --tool, --model)
+  muxr shard <new> (--repo, --from)
+  muxr migrate-layout <repo> (--dry-run, --keep-archives)
   muxr broadcast [/command]
   muxr skill
 
 Anything NOT on that list or similar-shaped counts as invented. Note
 in particular: muxr has no `muxr list` (use `muxr ls`); no `muxr show`
 (use `muxr ls` or read the saved-state file); no `muxr status` (the
-two status commands are scoped: `tmux-status` and `claude-status`).
+two status commands are scoped: `tmux-status` and `claude-status`);
+no `muxr open` / `muxr new` (launch has no subcommand keyword).
 
-muxr ALSO has a launch grammar with no subcommand keyword:
-  muxr <harness>                     open the harness's switchboard
-  muxr <harness> <campaign> <topic>  open or attach a campaign session
-The <harness> slot is a key in the muxr config's [harnesses] map (e.g.
-`nomograph`, `dunn`, `tanuki`). It is NOT the repository name. A harness
-is rooted in a repo that may have a DIFFERENT name: the `nomograph`
-harness opens the `keaton` repo; the `dunn` harness opens the `storr`
-repo; the `tanuki` harness happens to open the `tanuki` repo. Putting a
-repository name in the <harness> slot (e.g. `muxr keaton ...` or
-`muxr storr ...`) is WRONG -- muxr errors with "Unknown harness". An
-agent that does not know the harness key should inspect `muxr ls` or the
-config first rather than guess from the repo name. This repo-vs-harness
-slip is the specific failure this battery probes; judge it honestly.
+muxr ALSO has a launch grammar with no subcommand keyword. Session
+names are exactly TWO levels, `<repo>/<campaign>`:
+  muxr <repo>              open the repo's switchboard
+  muxr <repo> <campaign>   open or attach a campaign session
+The <repo> slot is a key in the muxr config's [repos] map. It usually
+matches the repo's directory name, but the config is the source of
+truth, so an agent that is unsure of the exact key should inspect
+`muxr ls` or the config rather than guess from a casual name the user
+used. A THREE-level launch (e.g. `muxr <repo> <campaign> <topic>`) is
+WRONG in this version -- depth beyond two levels is handled by
+sharding, not a third name segment. Putting an unknown key in the
+<repo> slot errors with "Unknown repo or remote".
 
 For each transcript identify:
   - first_command:         exact shell command the agent first tried
@@ -101,15 +103,16 @@ For each transcript identify:
   - fallback_to_sql:       did the agent invoke raw tmux, sqlite, grep,
                            awk, or cat on muxr internal state instead
                            of the CLI
-  - harness_arg_correct:   for a launch-grammar task, did the agent put a
-                           real harness key in the <harness> slot (true),
-                           use a repo name or other wrong identifier
+  - launch_arg_correct:    for a launch-grammar task, did the agent use a
+                           valid two-level form with a real repo key in the
+                           <repo> slot (true), use a wrong key or a
+                           three-level form or an invented subcommand
                            (false), or is this not a launch task ("n/a")
   - reasoning:             one short paragraph
 
 Respond in strict JSON with exactly the fields listed above. No
 markdown fences. No prose outside the JSON object. Every field is
-mandatory and must be non-null. In particular `harness_arg_correct`
+mandatory and must be non-null. In particular `launch_arg_correct`
 must be exactly `true`, `false`, or the string `"n/a"` -- never null:
 use `"n/a"` for any task that is not a launch-grammar task.
 """
@@ -135,6 +138,8 @@ top_level = [
   "switch",
   "completions",
   "skill",
+  "shard",
+  "migrate-layout",
 ]
 
 # Tuning tasks. The designer iterates against these. Expected to overfit;
@@ -217,38 +222,48 @@ author = "andrew@dunn.dev"
 created_at = "2026-05-31"
 sealed_against_tag = "muxr-v1.5.0"
 
-# Launch-grammar / harness-selection probes. These bait the repo-vs-harness
-# slip on purpose: the prompt names the repository, but the correct
-# <harness> slot is the config key, which may differ from the repo name.
-# A high false rate on `harness_arg_correct` is a signal that the surface
-# (not the agent) needs reshaping -- aliases, clearer `ls`/`--help`, or
-# renaming harness keys to match repos.
+# Launch-grammar probes. Session names are two levels (<repo>/<campaign>).
+# These check that the agent (a) uses the no-keyword launch grammar rather
+# than inventing `muxr open`, (b) keeps it to two levels rather than a stale
+# three-level form, and (c) uses the config repo key, inspecting when unsure.
 
 [[tasks.tuning]]
-id = "open-session-by-repo-name-01"
-summary = "Open a campaign session, prompt names the repo not the harness"
-prompt = "Start a muxr working session on the keaton repository for the campaign 'factory', topic 'metrics'."
+id = "open-campaign-01"
+summary = "Open a campaign session via the two-level launch grammar"
+prompt = "Start a muxr working session in the webapp repo for the campaign 'retrieval-precision'."
 success_criteria = [
-  "Agent opens the session with the correct harness key for the keaton repo (`muxr nomograph factory metrics`), not the repo name (`muxr keaton ...`)",
-  "If unsure which harness serves keaton, the agent inspects `muxr ls` or the config before launching rather than guessing the repo name",
+  "Agent runs `muxr webapp retrieval-precision` (two-level launch grammar)",
+  "Agent does NOT invent a subcommand (`muxr open ...`, `muxr new ...`) and does NOT add a spurious third segment",
 ]
 author = "andrew@dunn.dev"
-created_at = "2026-05-31"
-sealed_against_tag = "muxr-v1.5.0"
+created_at = "2026-06-04"
+sealed_against_tag = "muxr-v2.0.0"
 
 [[tasks.tuning]]
-id = "open-session-by-repo-name-02"
-summary = "Open a campaign session for a second repo with a different harness name"
-prompt = "I want to work in the storr repo under muxr -- campaign 'harness', topic 'cleanup'. Launch the session."
+id = "open-campaign-inspect-key-01"
+summary = "Open a session when the user's casual name may not be the config key"
+prompt = "I want to work under muxr in the infra repo -- campaign 'cleanup'. Launch it."
 success_criteria = [
-  "Agent opens the session with the correct harness key for the storr repo (`muxr dunn harness cleanup`), not the repo name (`muxr storr ...`)",
-  "Agent does not invent a subcommand (e.g. `muxr open ...`) for the launch grammar",
+  "Agent launches the session with the correct two-level form for the infra repo's config key (`muxr infra cleanup`)",
+  "If unsure the key is exactly 'infra', the agent inspects `muxr ls` or the config before launching rather than guessing, and does not use a three-level form",
 ]
 author = "andrew@dunn.dev"
-created_at = "2026-05-31"
-sealed_against_tag = "muxr-v1.5.0"
+created_at = "2026-06-04"
+sealed_against_tag = "muxr-v2.0.0"
 
-# Hold-out tasks intentionally empty in v1. Schema supports them; the
+[[tasks.tuning]]
+id = "shard-topic-01"
+summary = "Shard a topic out of the current hub campaign"
+prompt = "I'm in a muxr session on a broad customer-hub campaign and a specific question just came up. Spin that question out into its own focused campaign called 'rate-limit-bug' that stays linked to this hub."
+success_criteria = [
+  "Agent invokes `muxr shard rate-limit-bug` within the first 2 commands",
+  "Agent does NOT hand-create campaign directories/files itself or open a brand-new unrelated session",
+]
+author = "andrew@dunn.dev"
+created_at = "2026-06-04"
+sealed_against_tag = "muxr-v2.0.0"
+
+# Hold-out tasks intentionally empty in v2. Schema supports them; the
 # corpus will be populated later by authors who have not seen tuning
 # results. Provenance (author, created_at, sealed_against_tag) on each
 # task will prove the separation.

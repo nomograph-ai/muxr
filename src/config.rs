@@ -1115,13 +1115,13 @@ prompt_mode = "string"
     fn launch_command_with_resume_and_model() {
         let h = Tool::builtin_claude();
         let cmd = h.launch_command(
-            Some("tanuki/opus"),
+            Some("work/opus"),
             Some("abc-123"),
             Some("claude-opus-4-7"),
         );
         assert_eq!(
             cmd,
-            "claude --name 'tanuki/opus' --resume 'abc-123' --model 'claude-opus-4-7'"
+            "claude --name 'work/opus' --resume 'abc-123' --model 'claude-opus-4-7'"
         );
     }
 
@@ -1135,10 +1135,10 @@ prompt_mode = "string"
     #[test]
     fn build_rename_command_interpolates() {
         let h = Tool::builtin_claude();
-        let cmd = h.build_rename_command("tanuki/opus").unwrap();
+        let cmd = h.build_rename_command("work/opus").unwrap();
         // Slash commands get raw values -- the harness reads literal
         // keystrokes, not a shell.
-        assert_eq!(cmd, "/rename tanuki/opus");
+        assert_eq!(cmd, "/rename work/opus");
     }
 
     #[test]
@@ -1292,7 +1292,7 @@ session_discovery = { type = "none" }
 
         // Resume case: session_id provided -> --resume present, no --continue.
         let cmd = tool
-            .launch_command_with_settings(Some("tanuki/pi"), Some("abc-123"), None, &settings)
+            .launch_command_with_settings(Some("work/pi"), Some("abc-123"), None, &settings)
             .unwrap();
         assert!(
             cmd.starts_with("nono run --profile X -- pi"),
@@ -1320,7 +1320,7 @@ session_discovery = { type = "none" }
         );
 
         // Continue/restore case: no session_id -> restore_command falls back to --continue.
-        let restore = tool.restore_command(Some("tanuki/pi"), None);
+        let restore = tool.restore_command(Some("work/pi"), None);
         assert!(
             restore.contains("--continue"),
             "expected --continue fallback; got: {restore}"

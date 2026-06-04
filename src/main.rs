@@ -75,7 +75,7 @@ enum Commands {
     /// session. Drops the session from the saved state so future
     /// `muxr restore` won't recreate it.
     Retire {
-        /// Session name (e.g. tanuki/2026-04-24) or "all" to retire every
+        /// Session name (e.g. work/old-experiment) or "all" to retire every
         /// tmux session.
         name: String,
     },
@@ -89,7 +89,7 @@ enum Commands {
     /// resolves to. Aliased as `migrate`.
     #[command(visible_alias = "migrate")]
     Upgrade {
-        /// Session name to upgrade (e.g. tanuki/factory/foo). Omit to
+        /// Session name to upgrade (e.g. work/retrieval-precision). Omit to
         /// upgrade every session running the selected tool.
         name: Option<String>,
         /// Tool to upgrade (default: claude).
@@ -112,7 +112,7 @@ enum Commands {
     ///
     /// Filters: by default applies to every active harness session.
     /// Pass --tool to limit to one runtime (e.g. --tool pi),
-    /// --harness to limit to one harness (e.g. --harness tanuki).
+    /// --repo to limit to one repo (e.g. --repo work).
     /// Pass --dry-run to print the targets without sending keys.
     Broadcast {
         /// Slash command to send (with leading /). Defaults to "/reload".
@@ -121,9 +121,9 @@ enum Commands {
         /// Limit to sessions running this tool (e.g. "pi", "claude").
         #[arg(long)]
         tool: Option<String>,
-        /// Limit to sessions in this harness (e.g. "tanuki", "dunn").
+        /// Limit to sessions in this repo (e.g. "work", "personal").
         #[arg(long)]
-        harness: Option<String>,
+        repo: Option<String>,
         /// List targets without sending the command.
         #[arg(long)]
         dry_run: bool,
@@ -133,10 +133,10 @@ enum Commands {
         /// Shell to generate completions for
         shell: String,
     },
-    /// Emit the muxr skill file: launch grammar, the harness-key vs repo-name
-    /// distinction, and the lifecycle verbs. Install it as a project skill so
-    /// an agent learns how to drive muxr. Compiled in, so it always matches
-    /// this binary's surface.
+    /// Emit the muxr skill file: the two-level `<repo>/<campaign>` launch
+    /// grammar, the chooser, sharding, and the lifecycle verbs. Install it as
+    /// a project skill so an agent learns how to drive muxr. Compiled in, so
+    /// it always matches this binary's surface.
     Skill,
     /// Shard the current campaign into a new sibling campaign.
     ///
@@ -225,9 +225,9 @@ fn main() -> Result<()> {
         Some(Commands::Broadcast {
             cmd,
             tool,
-            harness,
+            repo,
             dry_run,
-        }) => cmd_broadcast(&tmux, &cmd, tool.as_deref(), harness.as_deref(), dry_run),
+        }) => cmd_broadcast(&tmux, &cmd, tool.as_deref(), repo.as_deref(), dry_run),
         Some(Commands::Rename { name }) => cmd_rename(&tmux, &name, cli.tool.as_deref()),
         Some(Commands::Kill { name }) => cmd_kill(&tmux, &name),
         Some(Commands::Retire { name }) => cmd_retire(&tmux, &name),
@@ -801,12 +801,12 @@ fn cmd_kill(tmux: &Tmux, name: &str) -> Result<()> {
 ///
 /// Targets every tmux session whose first segment is a configured
 /// harness AND that has the harness binary running in the pane.
-/// Skips the muxr control plane. Filters: --tool, --harness.
+/// Skips the muxr control plane. Filters: --tool, --repo.
 fn cmd_broadcast(
     tmux: &Tmux,
     cmd: &str,
     tool_filter: Option<&str>,
-    harness_filter: Option<&str>,
+    repo_filter: Option<&str>,
     dry_run: bool,
 ) -> Result<()> {
     let config = Config::load()?;
@@ -825,13 +825,13 @@ fn cmd_broadcast(
         if sname == "muxr" {
             continue;
         }
-        let harness_name = sname.split('/').next().unwrap_or(sname);
-        if let Some(want) = harness_filter
-            && want != harness_name
+        let repo_name = sname.split('/').next().unwrap_or(sname);
+        if let Some(want) = repo_filter
+            && want != repo_name
         {
             continue;
         }
-        let tool = config.resolve_tool(harness_name, None);
+        let tool = config.resolve_tool(repo_name, None);
         if let Some(want) = tool_filter
             && want != tool
         {
@@ -1139,8 +1139,8 @@ mod tests {
     #[test]
     fn parse_session_splits_two_part() {
         assert_eq!(
-            parse_session("tanuki/in-place-updates"),
-            Some(("tanuki".to_string(), "in-place-updates".to_string()))
+            parse_session("work/in-place-updates"),
+            Some(("work".to_string(), "in-place-updates".to_string()))
         );
     }
 
@@ -1149,8 +1149,8 @@ mod tests {
         // The switchboard is just a campaign named `switchboard`; no special
         // collapse/inverse mapping is needed under the two-level model.
         assert_eq!(
-            parse_session("tanuki/switchboard"),
-            Some(("tanuki".to_string(), "switchboard".to_string()))
+            parse_session("work/switchboard"),
+            Some(("work".to_string(), "switchboard".to_string()))
         );
     }
 
@@ -1159,7 +1159,7 @@ mod tests {
         assert_eq!(parse_session("solo"), None);
         // A third slash means the campaign component contains a slash, which
         // is never valid (campaigns are validated kebab-case).
-        assert_eq!(parse_session("tanuki/factory/in-place-updates"), None);
+        assert_eq!(parse_session("work/factory/in-place-updates"), None);
     }
 
     #[test]
@@ -1313,12 +1313,12 @@ mod tests {
         std::fs::write(old_dir.join("log.md"), "log body").unwrap();
 
         let toml = format!(
-            "[repos.tanuki]\ndir = {dir:?}\ncolor = \"#fff\"\n",
+            "[repos.work]\ndir = {dir:?}\ncolor = \"#fff\"\n",
             dir = dir.path()
         );
         let config: Config = toml::from_str(&toml).unwrap();
 
-        try_move_session_file(&config, "tanuki/old-campaign", "tanuki/new-campaign");
+        try_move_session_file(&config, "work/old-campaign", "work/new-campaign");
 
         assert!(!old_dir.exists(), "old dir should be gone");
         let new_dir = dir.path().join("campaigns/new-campaign");
@@ -1333,13 +1333,13 @@ mod tests {
     fn try_move_session_file_silent_when_source_missing() {
         let dir = tempfile::tempdir().unwrap();
         let toml = format!(
-            "[repos.tanuki]\ndir = {dir:?}\ncolor = \"#fff\"\n",
+            "[repos.work]\ndir = {dir:?}\ncolor = \"#fff\"\n",
             dir = dir.path()
         );
         let config: Config = toml::from_str(&toml).unwrap();
         // No campaign dir at the expected location. Should not panic, should
         // not create anything.
-        try_move_session_file(&config, "tanuki/old-campaign", "tanuki/new-campaign");
+        try_move_session_file(&config, "work/old-campaign", "work/new-campaign");
         let campaigns = dir.path().join("campaigns");
         assert!(!campaigns.exists() || std::fs::read_dir(&campaigns).unwrap().next().is_none());
     }
@@ -1355,12 +1355,12 @@ mod tests {
         std::fs::write(new_dir.join("log.md"), "existing").unwrap();
 
         let toml = format!(
-            "[repos.tanuki]\ndir = {dir:?}\ncolor = \"#fff\"\n",
+            "[repos.work]\ndir = {dir:?}\ncolor = \"#fff\"\n",
             dir = dir.path()
         );
         let config: Config = toml::from_str(&toml).unwrap();
 
-        try_move_session_file(&config, "tanuki/old-campaign", "tanuki/new-campaign");
+        try_move_session_file(&config, "work/old-campaign", "work/new-campaign");
 
         assert!(old_dir.exists(), "old must not have been clobbered");
         assert_eq!(
@@ -1376,12 +1376,12 @@ mod tests {
         std::fs::create_dir_all(&old_dir).unwrap();
         std::fs::write(old_dir.join("log.md"), "x").unwrap();
         let toml = format!(
-            "[repos.tanuki]\ndir = {dir:?}\ncolor = \"#fff\"\n",
+            "[repos.work]\ndir = {dir:?}\ncolor = \"#fff\"\n",
             dir = dir.path()
         );
         let config: Config = toml::from_str(&toml).unwrap();
 
-        try_move_session_file(&config, "tanuki/old-campaign", "different/old-campaign");
+        try_move_session_file(&config, "work/old-campaign", "different/old-campaign");
 
         // Cross-repo move is not supported; old dir stays.
         assert!(old_dir.exists());

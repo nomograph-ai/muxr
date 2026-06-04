@@ -2,6 +2,55 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.0.0] (unreleased)
+
+**Breaking: the repo/campaign redesign.** Sessions are now addressed as
+two levels, `<repo>/<campaign>`, instead of three
+(`<harness>/<campaign>/<topic>`). The first argument is a **repo** key
+(`[repos]` in config, usually the repo's directory name), replacing the
+old harness-key indirection where the config key differed from the repo it
+opened. The old middle "category" segment becomes `category:` frontmatter,
+and depth beyond two levels is handled by **sharding** a hub campaign into
+sibling campaigns, not a third name segment. This release absorbs the
+1.5.0 in-place-upgrade work (which was built but never tagged).
+
+### Added
+- **`muxr shard <new>`** -- spin a topic that crystallized inside the
+  current campaign out into its own sibling campaign, inheriting the hub's
+  `category:` and recording `sharded_from:` lineage, then launch it.
+  `--repo`/`--from` name the hub explicitly for out-of-session use.
+- **Launch chooser** (`muxr switch`, rebuilt) -- merges live sessions,
+  dormant on-disk campaigns, and a per-repo "+ new campaign" affordance
+  into one list grouped by repo, with shards indented under their hub.
+  Enter switches / opens / creates depending on the row; `n` creates in the
+  selected repo. Surfacing every campaign (not just the running ones) is
+  the hygiene-visibility fix for accumulated, never-reviewed sessions.
+- **`muxr migrate-layout <repo>`** -- migrate a repo's `campaigns/` tree
+  from the old 3-level layout to the 2-level model
+  (`campaigns/<campaign>/{campaign.md,log.md}`), inheriting category
+  trees/paths into frontmatter. `--dry-run` prints the plan and the
+  session-name rewrites; `--keep-archives` preserves stale files. It is
+  filesystem-only and git-reversible; the live `state.json`/tmux cutover
+  stays a human-gated step.
+- `primitives::list_campaigns` -- campaign discovery (name + category +
+  `sharded_from`) shared by the chooser, migration, and shard.
+- `category:` and `sharded_from:` campaign frontmatter fields.
+
+### Changed
+- Config table renamed `[harnesses]`/`[verticals]` -> `[repos]`; struct
+  `Harness` -> `Repo`. `muxr init`, the default template, the README, and
+  the emitted skill all describe the two-level `<repo>/<campaign>` model.
+- On-disk layout is one directory per campaign:
+  `campaigns/<campaign>/{campaign.md,log.md}` (was
+  `campaigns/<category>/sessions/<topic>.md`).
+- The per-repo switchboard is `<repo>/switchboard` (was the
+  `_switchboard` category specialcasing).
+- agent-shape battery retargeted to 2.0: neutral placeholder repos, a
+  two-level launch + chooser + shard probe set, a `launch_arg_correct`
+  judge field (was `harness_arg_correct`), and `shard`/`migrate-layout`
+  added to the cross-checked command list.
+- `shard`, `skill`, and `migrate-layout` added to the reserved repo names.
+
 ## [1.5.0] (2026-06-02)
 
 In-place session upgrade: move long-running harness sessions onto a newly
@@ -149,8 +198,8 @@ conversation, harness rules, or working directories.
   the date string is passed as a topic, but new launches should pick
   topical names. Rename a live session and its file together with
   `muxr rename <harness>/<campaign>/<topic>` -- e.g. inside a session
-  named `tanuki/harness/2026-04-24`, run
-  `muxr rename tanuki/harness/topic-flag` to align tmux state, the
+  named `work/harness/2026-04-24`, run
+  `muxr rename work/harness/topic-flag` to align tmux state, the
   session file on disk, and the runtime label.
 - Existing dated switchboard sessions are orphaned by the singleton
   scaffold. The new `switchboard.md` is created alongside on first

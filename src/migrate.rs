@@ -342,7 +342,7 @@ mod tests {
         fs::create_dir_all(factory.join("sessions")).unwrap();
         fs::write(
             factory.join("campaign.md"),
-            "---\nsynthesist_trees: [keaton]\npaths:\n  - ~/gitlab.com/nomograph/muxr\n---\n\n# factory\n\n## What this is\nBuilding things.\n",
+            "---\nsynthesist_trees: [mytree]\npaths:\n  - ~/projects/webapp\n---\n\n# factory\n\n## What this is\nBuilding things.\n",
         )
         .unwrap();
         fs::write(
@@ -417,8 +417,8 @@ mod tests {
         let (campaign, body) =
             primitives::load_campaign(&c.join("in-place-updates").join("campaign.md")).unwrap();
         assert_eq!(campaign.category, "factory");
-        assert_eq!(campaign.synthesist_trees, vec!["keaton"]);
-        assert_eq!(campaign.paths, vec!["~/gitlab.com/nomograph/muxr"]);
+        assert_eq!(campaign.synthesist_trees, vec!["mytree"]);
+        assert_eq!(campaign.paths, vec!["~/projects/webapp"]);
         assert!(body.contains("Building things"));
 
         // Log carries the entrypoint + body.
@@ -486,7 +486,7 @@ mod tests {
     fn render_campaign_md_roundtrips() {
         let md = render_campaign_md(
             "factory",
-            &["keaton".to_string()],
+            &["mytree".to_string()],
             &["~/x".to_string(), "~/y".to_string()],
             "# t\n\nbody",
         );
@@ -497,7 +497,7 @@ mod tests {
             (parsed, md)
         };
         assert_eq!(c.category, "factory");
-        assert_eq!(c.synthesist_trees, vec!["keaton"]);
+        assert_eq!(c.synthesist_trees, vec!["mytree"]);
         assert_eq!(c.paths, vec!["~/x", "~/y"]);
         assert!(body.contains("body"));
     }
