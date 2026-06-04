@@ -148,6 +148,26 @@ muxr lab ls                     # list remote sessions
 
 Connections auto-reconnect on drops with exponential backoff.
 
+## The system prompt is a pointer
+
+muxr composes the launch prompt as repo HARNESS rules + the campaign's
+what/how + a **pointer**: the one-line `entrypoint` plus the absolute paths
+of `campaign.md`/`log.md` and an instruction to re-read them. It does not
+inline the growing log body — a fat prompt is resent every turn (burning the
+context window) and goes stale the moment you `/serialize`.
+
+Because the system prompt survives `/compact`, the re-read instruction
+survives too, so the durable source of truth stays the on-disk files. After a
+compaction, re-anchor from disk instead of the lossy summary:
+
+```bash
+muxr reorient                   # nudge the current session to re-read its files
+muxr reorient work/api          # or a named session
+```
+
+Keep `log.md`'s `entrypoint` a tight "where we are / what's next" line —
+that's the pointer you move as work advances.
+
 ## Save and restore
 
 ```bash
@@ -188,6 +208,7 @@ agent session.
 | `muxr <remote> [context...]` | Create or attach to a remote session |
 | `muxr switch` | Interactive chooser: switch / open dormant / create |
 | `muxr shard <new>` | Spin a topic out of the current campaign into a sibling (`--repo`, `--from`) |
+| `muxr reorient [name]` | Nudge a live session to re-read its campaign.md + log.md (use after `/compact`) |
 | `muxr ls` | List active sessions |
 | `muxr save` | Snapshot session state |
 | `muxr restore` | Recreate sessions after reboot |

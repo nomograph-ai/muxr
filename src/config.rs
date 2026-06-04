@@ -225,6 +225,7 @@ const RESERVED_NAMES: &[&str] = &[
     "broadcast",
     "skill",
     "shard",
+    "reorient",
     "migrate-layout",
     "tmux-status",
     "claude-status",

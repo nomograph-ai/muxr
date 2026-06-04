@@ -40,6 +40,22 @@ sibling campaigns, not a third name segment. This release absorbs the
 - `primitives::list_campaigns` -- campaign discovery (name + category +
   `sharded_from`) shared by the chooser, migration, and shard.
 - `category:` and `sharded_from:` campaign frontmatter fields.
+- **System prompt is now a pointer, not a snapshot.** `compose_prompt` emits
+  HARNESS + the campaign's what/how + a pointer block (the one-line
+  `entrypoint` plus the absolute `campaign.md`/`log.md` paths and a standing
+  "re-read after `/compact`" instruction). It no longer inlines the growing
+  log body, which bloated every turn (accelerating context exhaustion) and
+  went stale on `/serialize`. The on-disk files are the source of truth; the
+  prompt survives compaction, so the re-read directive does too.
+- **`muxr reorient [name]`** -- inject a one-line nudge into a live session to
+  re-read its `campaign.md` + `log.md` now. The explicit, on-demand companion
+  to the standing pointer; run it right after a `/compact` to re-anchor from
+  current disk state in seconds instead of a lossy summary.
+- **Fix: `compose_launch_command` now folds the plural
+  `append_system_prompt_files`.** It previously read only the singular field
+  and left the array set, so launch preferred the raw array and silently
+  dropped the composed campaign+log -- every repo using base+overlay HARNESS
+  files got no campaign/log in its prompt at all.
 
 ### Changed
 - Config table renamed `[harnesses]`/`[verticals]` -> `[repos]`; struct

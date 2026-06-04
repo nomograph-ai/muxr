@@ -73,6 +73,31 @@ muxr shard <new> --repo <r> --from <hub>  # out of session: name the hub explici
 The shard inherits the hub's `category:` and records `sharded_from: <hub>`,
 so the chooser groups it under its hub. Then it launches.
 
+## The system prompt is a pointer, not a snapshot
+
+muxr composes the launch system prompt as: repo HARNESS rules + the
+campaign's what/how + a **pointer** — the one-line `entrypoint` plus the
+absolute paths of `campaign.md` and `log.md` and a standing instruction to
+re-read them. It deliberately does **not** inline the growing log body: a fat
+prompt is resent every turn (burning the context window that forces
+compaction) and goes stale the moment you `/serialize`.
+
+Because the system prompt survives `/compact`, the re-read instruction
+survives even as the conversation summary decays. So the durable source of
+truth is always the on-disk `campaign.md` + `log.md`, not the prompt snapshot.
+
+**After a `/compact`, re-orient from disk** rather than trusting the lossy
+summary:
+
+```bash
+muxr reorient            # nudge the current session to re-read its files now
+muxr reorient <repo>/<campaign>
+```
+
+`/serialize` is how you **move the pointer**: keep `log.md`'s `entrypoint` a
+tight "where we are / what's next" line so a reorient (or a fresh launch)
+re-anchors in seconds.
+
 ## Lifecycle verbs
 
 | Command | What it does |
@@ -80,6 +105,7 @@ so the chooser groups it under its hub. Then it launches.
 | `muxr ls` / `muxr ls --active` | List sessions (all / only those with a running harness) |
 | `muxr switch` | Interactive chooser: switch / open dormant / create |
 | `muxr shard <new>` | Spin a topic out of the current campaign into a sibling |
+| `muxr reorient [name]` | Nudge a session to re-read its campaign.md + log.md (use after `/compact`) |
 | `muxr save` | Snapshot all sessions (name, dir, tool, session id) |
 | `muxr restore` | Recreate snapshotted sessions after a reboot, resuming each in place |
 | `muxr upgrade [name]` (alias `migrate`) | Move running sessions onto the freshly installed binary, in place. `--dry-run`, `--tool`, `--model`. Omit name for all |

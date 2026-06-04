@@ -392,12 +392,43 @@ pub fn resolve_or_scaffold_session(repo_dir: &Path, campaign: &str) -> Result<Pa
     Ok(log_md)
 }
 
-/// Compose the system prompt addition from campaign + log bodies.
-pub fn compose_prompt(campaign: &str, campaign_body: &str, log_body: &str) -> String {
+/// Compose the system prompt addition: the campaign's what/how plus a stable
+/// *pointer* to the durable on-disk state.
+///
+/// Deliberately does NOT inline the (growing) log body. The log is what bloats
+/// the prompt -- and a fat prompt is resent every turn, burning the context
+/// window that forces compaction, while also going stale the moment `log.md`
+/// is updated. Instead the prompt carries the one-line `entrypoint` (the
+/// movable "where we are" pointer) and the absolute paths to re-read. Because
+/// the system prompt survives `/compact`, the re-read instruction persists
+/// even as the conversation summary decays, so the agent can re-orient from
+/// the current files in seconds rather than rediscovering from a lossy summary.
+pub fn compose_prompt(
+    campaign: &str,
+    campaign_body: &str,
+    entrypoint: &str,
+    campaign_md_path: &Path,
+    log_md_path: &Path,
+) -> String {
+    let ep = entrypoint.trim();
+    let ep_line = if ep.is_empty() {
+        "(none yet -- read log.md)"
+    } else {
+        ep
+    };
     format!(
-        "# Campaign: {campaign}\n\n{}\n\n---\n\n# Log\n\n{}",
+        "# Campaign: {campaign}\n\n{}\n\n---\n\n## Current pointer\n\n\
+         entrypoint: {ep_line}\n\n\
+         This system prompt is a STABLE POINTER, not a snapshot. Your durable, \
+         current state lives on disk at the paths below. Re-read them before \
+         acting when you are unsure, and ALWAYS immediately after a /compact -- \
+         the conversation summary is lossy, so these files are the source of \
+         truth for where the work stands:\n\
+         - {}\n\
+         - {}\n",
         campaign_body.trim(),
-        log_body.trim()
+        campaign_md_path.display(),
+        log_md_path.display(),
     )
 }
 
@@ -467,12 +498,28 @@ mod tests {
     }
 
     #[test]
-    fn compose_prompt_includes_both_bodies() {
-        let out = compose_prompt("gkg", "## What\ngkg stuff", "## Log\nentry");
+    fn compose_prompt_is_a_pointer_not_a_log_snapshot() {
+        let cmd = Path::new("/repo/campaigns/gkg/campaign.md");
+        let log = Path::new("/repo/campaigns/gkg/log.md");
+        let out = compose_prompt("gkg", "## What\ngkg stuff", "ship the thing", cmd, log);
         assert!(out.contains("Campaign: gkg"));
         assert!(out.contains("gkg stuff"));
-        assert!(out.contains("# Log"));
-        assert!(out.contains("entry"));
+        // The entrypoint pointer is inline...
+        assert!(out.contains("entrypoint: ship the thing"));
+        // ...the re-read directive and absolute paths are present...
+        assert!(out.contains("after a /compact"));
+        assert!(out.contains("/repo/campaigns/gkg/campaign.md"));
+        assert!(out.contains("/repo/campaigns/gkg/log.md"));
+        // ...and the (growing) log body is NOT snapshotted in.
+        assert!(!out.contains("# Log"));
+    }
+
+    #[test]
+    fn compose_prompt_handles_empty_entrypoint() {
+        let cmd = Path::new("/r/campaign.md");
+        let log = Path::new("/r/log.md");
+        let out = compose_prompt("x", "body", "", cmd, log);
+        assert!(out.contains("(none yet -- read log.md)"));
     }
 
     #[test]

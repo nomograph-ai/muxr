@@ -156,6 +156,18 @@ enum Commands {
         #[arg(long)]
         from: Option<String>,
     },
+    /// Re-anchor a live session to its current on-disk state.
+    ///
+    /// Reads the session's campaign + log paths and injects a one-line nudge
+    /// into the pane telling the agent to re-read them NOW before continuing.
+    /// The explicit, on-demand companion to the standing re-read pointer baked
+    /// into the system prompt: run it right after a `/compact` to re-orient
+    /// from the current files in seconds instead of a lossy conversation
+    /// summary. No NAME uses the current session.
+    Reorient {
+        /// Session to reorient (e.g. storr/deploy). Omit to use the current one.
+        name: Option<String>,
+    },
     /// Migrate a repo's campaigns/ tree from the old 3-level layout
     /// (campaigns/<category>/sessions/<topic>.md) to the 2-level repo/campaign
     /// model (campaigns/<campaign>/{campaign.md,log.md}).
@@ -241,6 +253,7 @@ fn main() -> Result<()> {
             repo,
             from,
         }) => cmd_shard(&tmux, &campaign, repo.as_deref(), from.as_deref()),
+        Some(Commands::Reorient { name }) => cmd_reorient(&tmux, name.as_deref()),
         Some(Commands::MigrateLayout {
             repo,
             dir,
@@ -444,6 +457,51 @@ fn cmd_shard(tmux: &Tmux, new: &str, repo: Option<&str>, from: Option<&str>) -> 
     cmd_open(tmux, &config, &repo_name, new)
 }
 
+/// Re-anchor a live session to its current on-disk campaign + log: muxr reorient [name]
+///
+/// Sends a single-line nudge into the pane telling the agent to re-read its
+/// campaign.md + log.md now. The system prompt already carries a standing
+/// re-read pointer; this is the explicit, on-demand trigger (e.g. right after
+/// a `/compact`). It does not relaunch and does not touch the conversation.
+fn cmd_reorient(tmux: &Tmux, name: Option<&str>) -> Result<()> {
+    let config = Config::load()?;
+
+    let session = match name {
+        Some(n) => n.to_string(),
+        None => tmux.current_session().context(
+            "Not inside a muxr session. Run `muxr reorient <repo>/<campaign>` \
+             or run it from within the session's pane.",
+        )?,
+    };
+
+    let (repo_name, campaign) = parse_session(&session)
+        .with_context(|| format!("'{session}' is not a <repo>/<campaign> session"))?;
+    let repo_dir = config.resolve_dir(&repo_name)?;
+    let campaign_md = primitives::campaign_md_path(&repo_dir, &campaign);
+    let log_md = primitives::log_md_path(&repo_dir, &campaign);
+
+    if !campaign_md.is_file() {
+        anyhow::bail!(
+            "No campaign on disk for {session} (expected {}).",
+            campaign_md.display()
+        );
+    }
+
+    // One line (send-keys can't carry newlines reliably). The agent pulls the
+    // current full state itself by re-reading the files.
+    let nudge = format!(
+        "[muxr reorient] Re-read your durable state NOW before continuing -- \
+         the conversation context may be stale or compacted. Read {} and {}, \
+         then resume from the current entrypoint.",
+        campaign_md.display(),
+        log_md.display()
+    );
+
+    tmux.send_text(&session, &nudge)?;
+    eprintln!("Reoriented {session} (nudged to re-read campaign.md + log.md).");
+    Ok(())
+}
+
 /// Migrate a repo's campaigns/ tree to the 2-level layout.
 ///
 /// Resolves the repo dir from `--dir` (explicit, config-free) or the config
@@ -539,11 +597,14 @@ pub(crate) fn compose_launch_command(
     // name+resume fallback for the truly-unrecoverable case.
     let (campaign_data, campaign_body) =
         primitives::load_campaign(&campaign_md).unwrap_or_default();
-    let log_body = primitives::load_log(&log_path)
-        .map(|(_, body)| body)
+    // Only the entrypoint (the movable pointer) goes inline; the full log body
+    // stays on disk and is pointed at, not snapshotted into the prompt.
+    let entrypoint = primitives::load_log(&log_path)
+        .map(|(log, _)| log.entrypoint)
         .unwrap_or_default();
 
-    let composed = primitives::compose_prompt(&campaign, &campaign_body, &log_body);
+    let composed =
+        primitives::compose_prompt(&campaign, &campaign_body, &entrypoint, &campaign_md, &log_path);
 
     // Claude Code rejects --append-system-prompt and --append-system-prompt-file
     // together, and multi-line content via shell send-keys breaks parsing.
@@ -1272,7 +1333,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             campaign_dir.join("log.md"),
-            "---\nentrypoint: \"\"\n---\n\n# factory\nLOG_BODY_MARKER\n",
+            "---\nentrypoint: \"ENTRYPOINT_MARKER\"\n---\n\n# factory\nLOG_BODY_MARKER\n",
         )
         .unwrap();
 
@@ -1289,7 +1350,8 @@ mod tests {
             compose_launch_command(&config, "nomograph/factory", Some("X"), None, false).unwrap();
 
         // Exactly one --append-system-prompt-file (the composed temp), and the
-        // temp must contain BOTH HARNESS files AND the campaign + log bodies.
+        // temp must carry BOTH HARNESS files, the campaign body, and the
+        // entrypoint pointer -- but NOT the (growing) log body.
         assert_eq!(
             cmd.matches("--append-system-prompt-file").count(),
             1,
@@ -1301,10 +1363,14 @@ mod tests {
             "BASE_HARNESS_MARKER",
             "OVERLAY_HARNESS_MARKER",
             "CAMPAIGN_BODY_MARKER",
-            "LOG_BODY_MARKER",
+            "ENTRYPOINT_MARKER",
         ] {
             assert!(composed.contains(marker), "composed prompt missing {marker}:\n{composed}");
         }
+        assert!(
+            !composed.contains("LOG_BODY_MARKER"),
+            "log body must NOT be snapshotted into the prompt:\n{composed}"
+        );
     }
 
     #[test]

@@ -139,6 +139,7 @@ top_level = [
   "completions",
   "skill",
   "shard",
+  "reorient",
   "migrate-layout",
 ]
 

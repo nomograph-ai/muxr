@@ -87,6 +87,20 @@ impl Tmux {
         Ok(())
     }
 
+    /// Send a single line of text to a session's pane, then Enter. Used to
+    /// inject a prompt (e.g. a reorient nudge) into a live harness session.
+    pub fn send_text(&self, name: &str, text: &str) -> Result<()> {
+        let status = self
+            .command()
+            .args(["send-keys", "-t", &Self::target(name), text, "Enter"])
+            .status()
+            .context("Failed to send keys to tmux session")?;
+        if !status.success() {
+            anyhow::bail!("tmux send-keys failed for {name}");
+        }
+        Ok(())
+    }
+
     /// Attach to an existing tmux session.
     pub fn attach(&self, name: &str) -> Result<()> {
         if std::env::var("TMUX").is_ok() {
