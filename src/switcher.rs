@@ -275,25 +275,57 @@ fn cand_entry(repo: &str, color: Color, cand: &Cand, is_shard: bool) -> Entry {
     }
 }
 
-/// Filter selectable entries by a query over repo + campaign + name. Separators
-/// and create-stubs are dropped from a filtered view.
-fn filter_entries(entries: &[Entry], query: &str) -> Vec<usize> {
-    if query.is_empty() {
-        return (0..entries.len()).collect();
-    }
+fn entry_matches(e: &Entry, q: &str) -> bool {
+    e.name.to_lowercase().contains(q)
+        || e.repo.to_lowercase().contains(q)
+        || e.campaign.to_lowercase().contains(q)
+}
+
+/// Compute the visible row indices.
+///
+/// When `show_all` is false (the default), only the control plane and LIVE
+/// sessions are shown -- dormant on-disk campaigns and the "+ new campaign"
+/// rows are hidden, so the list is what's actually running rather than a wall
+/// of every campaign on disk. `a` toggles the full launcher view. A query
+/// filters within the current mode. Group separators orphaned by hidden rows
+/// are trimmed.
+fn filter_entries(entries: &[Entry], query: &str, show_all: bool) -> Vec<usize> {
     let q = query.to_lowercase();
-    entries
-        .iter()
-        .enumerate()
-        .filter(|(_, e)| {
-            e.selectable()
-                && e.kind != Kind::NewStub
-                && (e.name.to_lowercase().contains(&q)
-                    || e.repo.to_lowercase().contains(&q)
-                    || e.campaign.to_lowercase().contains(&q))
-        })
-        .map(|(i, _)| i)
-        .collect()
+    let mut kept: Vec<usize> = Vec::new();
+    for (i, e) in entries.iter().enumerate() {
+        let keep = match e.kind {
+            Kind::Separator => true, // provisional; orphans trimmed below
+            Kind::NewStub => show_all && query.is_empty(),
+            Kind::Dormant => show_all && (query.is_empty() || entry_matches(e, &q)),
+            Kind::Control | Kind::Running => query.is_empty() || entry_matches(e, &q),
+        };
+        if keep {
+            kept.push(i);
+        }
+    }
+    // Trim leading / duplicate / trailing separators left behind by hidden rows.
+    let mut result: Vec<usize> = Vec::with_capacity(kept.len());
+    for idx in kept {
+        if entries[idx].is_separator() {
+            if result
+                .last()
+                .map(|&l| !entries[l].is_separator())
+                .unwrap_or(false)
+            {
+                result.push(idx);
+            }
+        } else {
+            result.push(idx);
+        }
+    }
+    while result
+        .last()
+        .map(|&l| entries[l].is_separator())
+        .unwrap_or(false)
+    {
+        result.pop();
+    }
+    result
 }
 
 /// Format a unix timestamp as relative time (e.g., "2m", "1h", "3d").
@@ -352,7 +384,9 @@ pub fn run(tmux: &Tmux) -> Result<Action> {
     let mut table_state = TableState::default();
     let mut query = String::new();
     let mut filtering = false;
-    let mut filtered = filter_entries(&entries, &query);
+    // Default to active sessions only; `a` reveals dormant campaigns + create.
+    let mut show_all = false;
+    let mut filtered = filter_entries(&entries, &query, show_all);
     let mut confirm_kill: Option<usize> = None;
     // Rename buffer for entries[idx].
     let mut renaming: Option<(usize, String)> = None;
@@ -388,6 +422,7 @@ pub fn run(tmux: &Tmux) -> Result<Action> {
                 creating.as_ref().map(|(repo, buf)| (repo.as_str(), buf.as_str())),
                 input_error.as_deref().or(rename_error.as_deref()),
                 selected_kind(&entries, &filtered, &table_state),
+                show_all,
             );
         })?;
 
@@ -493,7 +528,7 @@ pub fn run(tmux: &Tmux) -> Result<Action> {
                 KeyCode::Esc if filtering => {
                     query.clear();
                     filtering = false;
-                    filtered = filter_entries(&entries, &query);
+                    filtered = filter_entries(&entries, &query, show_all);
                     select_nearest_real(&entries, &filtered, &mut table_state, 0);
                 }
                 KeyCode::Esc | KeyCode::Char('q') if !filtering => {
@@ -549,6 +584,13 @@ pub fn run(tmux: &Tmux) -> Result<Action> {
                         input_error = None;
                     }
                 }
+                KeyCode::Char('a') if !filtering => {
+                    // Toggle between active-only (default) and the full
+                    // launcher view (dormant campaigns + create rows).
+                    show_all = !show_all;
+                    filtered = filter_entries(&entries, &query, show_all);
+                    select_nearest_real(&entries, &filtered, &mut table_state, 0);
+                }
                 KeyCode::Up => move_selection(&entries, &filtered, &mut table_state, -1),
                 KeyCode::Down => move_selection(&entries, &filtered, &mut table_state, 1),
                 KeyCode::Char('k') if !filtering => {
@@ -562,7 +604,7 @@ pub fn run(tmux: &Tmux) -> Result<Action> {
                 }
                 KeyCode::Char(c) if filtering => {
                     query.push(c);
-                    filtered = filter_entries(&entries, &query);
+                    filtered = filter_entries(&entries, &query, show_all);
                     select_nearest_real(&entries, &filtered, &mut table_state, 0);
                 }
                 KeyCode::Backspace if filtering => {
@@ -570,7 +612,7 @@ pub fn run(tmux: &Tmux) -> Result<Action> {
                     if query.is_empty() {
                         filtering = false;
                     }
-                    filtered = filter_entries(&entries, &query);
+                    filtered = filter_entries(&entries, &query, show_all);
                     select_nearest_real(&entries, &filtered, &mut table_state, 0);
                 }
                 _ => {}
@@ -879,6 +921,7 @@ fn draw_footer(
     create_buffer: Option<(&str, &str)>,
     input_error: Option<&str>,
     sel_kind: Option<Kind>,
+    show_all: bool,
 ) {
     let dim = Style::default().fg(Color::DarkGray);
     let text = if let Some((repo, buf)) = create_buffer {
@@ -933,8 +976,17 @@ fn draw_footer(
             Some(Kind::NewStub) => " create  ",
             _ => " switch  ",
         };
+        // Mode tag + what `a` toggles to.
+        let (mode_tag, mode_color, a_hint) = if show_all {
+            ("[all] ", Color::Cyan, " active  ")
+        } else {
+            ("[active] ", Color::Green, " all  ")
+        };
         Line::from(vec![
-            Span::styled("  /", dim),
+            Span::styled(format!("  {mode_tag}"), Style::default().fg(mode_color)),
+            Span::styled("a", dim),
+            Span::styled(a_hint, dim),
+            Span::styled("/", dim),
             Span::styled("filter  ", dim),
             Span::styled("j/k", dim),
             Span::styled(" move  ", dim),
@@ -1040,13 +1092,17 @@ mod tests {
     }
 
     #[test]
-    fn filter_entries_empty_query_returns_all() {
+    fn filter_active_only_hides_dormant_and_trims_orphan_separator() {
         let entries = vec![
             make_entry("work", "api", Kind::Running),
             Entry::separator(),
             make_entry("personal", "blog", Kind::Dormant),
         ];
-        assert_eq!(filter_entries(&entries, ""), vec![0, 1, 2]);
+        // Default (active-only): dormant hidden, and the now-trailing
+        // separator is trimmed.
+        assert_eq!(filter_entries(&entries, "", false), vec![0]);
+        // show_all reveals everything.
+        assert_eq!(filter_entries(&entries, "", true), vec![0, 1, 2]);
     }
 
     #[test]
@@ -1055,7 +1111,7 @@ mod tests {
             make_entry("work", "api", Kind::Running),
             make_entry("personal", "blog", Kind::Dormant),
         ];
-        assert_eq!(filter_entries(&entries, "api"), vec![0]);
+        assert_eq!(filter_entries(&entries, "api", true), vec![0]);
     }
 
     #[test]
@@ -1065,7 +1121,10 @@ mod tests {
             make_entry("work", "auth", Kind::Dormant),
             make_entry("personal", "blog", Kind::Running),
         ];
-        assert_eq!(filter_entries(&entries, "work"), vec![0, 1]);
+        // In all-mode, repo "work" matches the running + dormant entries.
+        assert_eq!(filter_entries(&entries, "work", true), vec![0, 1]);
+        // In active-only mode, only the running one.
+        assert_eq!(filter_entries(&entries, "work", false), vec![0]);
     }
 
     #[test]
@@ -1077,14 +1136,14 @@ mod tests {
             make_entry("personal", "blog", Kind::Dormant),
         ];
         // query that would textually match the stub's repo still drops it.
-        assert_eq!(filter_entries(&entries, "blog"), vec![3]);
-        assert_eq!(filter_entries(&entries, "work"), vec![0]);
+        assert_eq!(filter_entries(&entries, "blog", true), vec![3]);
+        assert_eq!(filter_entries(&entries, "work", true), vec![0]);
     }
 
     #[test]
     fn filter_entries_case_insensitive() {
         let entries = vec![make_entry("Work", "API", Kind::Running)];
-        assert_eq!(filter_entries(&entries, "api"), vec![0]);
+        assert_eq!(filter_entries(&entries, "api", false), vec![0]);
     }
 
     #[test]

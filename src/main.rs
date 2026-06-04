@@ -1337,9 +1337,12 @@ mod tests {
         )
         .unwrap();
 
+        // Use a unique repo key so the deterministic temp-prompt path
+        // (muxr-prompt-<repo>-<campaign>.md) can't collide with another
+        // test's under parallel execution.
         let toml = format!(
-            "[repos.nomograph]\ndir = {dir:?}\ncolor = \"#fff\"\n\
-             [repos.nomograph.launch]\nappend_system_prompt_files = [{base:?}, {overlay:?}]\n",
+            "[repos.pluralrepo]\ndir = {dir:?}\ncolor = \"#fff\"\n\
+             [repos.pluralrepo.launch]\nappend_system_prompt_files = [{base:?}, {overlay:?}]\n",
             dir = dir.path(),
             base = base,
             overlay = overlay,
@@ -1347,7 +1350,7 @@ mod tests {
         let config: Config = toml::from_str(&toml).unwrap();
 
         let (cmd, _) =
-            compose_launch_command(&config, "nomograph/factory", Some("X"), None, false).unwrap();
+            compose_launch_command(&config, "pluralrepo/factory", Some("X"), None, false).unwrap();
 
         // Exactly one --append-system-prompt-file (the composed temp), and the
         // temp must carry BOTH HARNESS files, the campaign body, and the
@@ -1357,7 +1360,7 @@ mod tests {
             1,
             "expected a single composed prompt file: {cmd}"
         );
-        let tmp = std::env::temp_dir().join("muxr-prompt-nomograph-factory.md");
+        let tmp = std::env::temp_dir().join("muxr-prompt-pluralrepo-factory.md");
         let composed = std::fs::read_to_string(&tmp).unwrap();
         for marker in [
             "BASE_HARNESS_MARKER",
