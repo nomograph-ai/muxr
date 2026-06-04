@@ -173,6 +173,24 @@ pub fn plan(repo_dir: &Path) -> Result<Plan> {
         // un-migrated content behind, so we keep the dir and never delete it.
         let mut cat_clean = true;
 
+        // First: the category dir must contain ONLY `campaign.md` and
+        // `sessions/`. Anything else (e.g. a sibling `notes/` dir, a stray
+        // file) lives outside the sessions scan and would be destroyed when
+        // the dir is removed -- so its presence forces us to keep the dir.
+        for top in fs::read_dir(cat_path)
+            .with_context(|| format!("Failed to read {}", cat_path.display()))?
+        {
+            let top = top?;
+            let nm = top.file_name();
+            if nm != "campaign.md" && nm != "sessions" {
+                plan.skips.push(format!(
+                    "{cat_name}/{:?}: category-level content outside sessions/ -- dir KEPT",
+                    nm
+                ));
+                cat_clean = false;
+            }
+        }
+
         for sub in fs::read_dir(&sessions)
             .with_context(|| format!("Failed to read {}", sessions.display()))?
         {
@@ -602,6 +620,28 @@ mod tests {
         execute(tmp.path(), &p, &Opts { dry_run: false, keep_archives: false }).unwrap();
         assert!(s.join("notes.txt").exists(), "stray file must survive migration");
         assert!(tmp.path().join("campaigns/good/log.md").is_file());
+    }
+
+    #[test]
+    fn category_level_sibling_dir_is_preserved() {
+        // SAFETY: content beside sessions/ (e.g. a notes/ dir) is outside the
+        // sessions scan; removing the category dir would destroy it, so the
+        // dir must be kept and the sibling content must survive.
+        let tmp = tempfile::tempdir().unwrap();
+        let cat = tmp.path().join("campaigns").join("immutable");
+        fs::create_dir_all(cat.join("sessions")).unwrap();
+        fs::create_dir_all(cat.join("notes")).unwrap();
+        fs::write(cat.join("campaign.md"), "---\npaths: []\n---\n").unwrap();
+        fs::write(cat.join("sessions/deploy.md"), "---\nentrypoint: \"\"\n---\n\n# d\n").unwrap();
+        fs::write(cat.join("notes/v4.md"), "untracked notes").unwrap();
+
+        let p = plan(tmp.path()).unwrap();
+        assert_eq!(p.moves.len(), 1, "deploy.md still migrates");
+        assert!(p.old_dirs.is_empty(), "category with a notes/ sibling must be kept");
+
+        execute(tmp.path(), &p, &Opts { dry_run: false, keep_archives: false }).unwrap();
+        assert!(cat.join("notes/v4.md").exists(), "sibling notes/ must survive");
+        assert!(tmp.path().join("campaigns/deploy/log.md").is_file());
     }
 
     #[test]

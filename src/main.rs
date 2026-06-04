@@ -547,20 +547,44 @@ pub(crate) fn compose_launch_command(
 
     // Claude Code rejects --append-system-prompt and --append-system-prompt-file
     // together, and multi-line content via shell send-keys breaks parsing.
-    // Resolve any configured HARNESS.md-style file, combine it with the
-    // composed campaign+log prompt, write to a single temp file, and pass
-    // only --append-system-prompt-file.
-    let harness_md_content = if let Some(ref file) = settings.append_system_prompt_file {
+    // Resolve EVERY configured HARNESS.md-style prompt file, combine them with
+    // the composed campaign+log prompt, write to a single temp file, and pass
+    // only that one --append-system-prompt-file.
+    //
+    // Both the plural `append_system_prompt_files` (base + overlay, e.g.
+    // HARNESS-base.md + a per-repo HARNESS.md) and the singular
+    // `append_system_prompt_file` must be folded in here. The plural takes
+    // precedence, mirroring launch_command_with_settings. Crucially we then
+    // CLEAR the plural array below: otherwise launch_command_with_settings
+    // would prefer the (un-composed) plural array and silently drop this
+    // composed temp file -- which dropped the campaign + log entrypoint from
+    // the system prompt for every repo configured with the array.
+    let harness_files: Vec<String> = settings
+        .append_system_prompt_files
+        .clone()
+        .or_else(|| {
+            settings
+                .append_system_prompt_file
+                .clone()
+                .map(|f| vec![f])
+        })
+        .unwrap_or_default();
+
+    let mut harness_md_content = String::new();
+    for file in &harness_files {
         let expanded = shellexpand::tilde(file).to_string();
         let path = if expanded.starts_with('/') {
             std::path::PathBuf::from(expanded)
         } else {
             repo_dir.join(&expanded)
         };
-        std::fs::read_to_string(&path).unwrap_or_default()
-    } else {
-        String::new()
-    };
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if !harness_md_content.is_empty() {
+                harness_md_content.push_str("\n\n");
+            }
+            harness_md_content.push_str(text.trim_end());
+        }
+    }
 
     let full_prompt = if harness_md_content.trim().is_empty() {
         composed
@@ -571,8 +595,11 @@ pub(crate) fn compose_launch_command(
     let tmp_path = std::env::temp_dir().join(format!("muxr-prompt-{repo_name}-{campaign}.md"));
     std::fs::write(&tmp_path, &full_prompt)?;
 
-    // Clear the inline and replace the file with our composed temp file.
+    // Replace both prompt-file fields with our single composed temp file. The
+    // plural array MUST be cleared so launch uses the composed file, not the
+    // raw HARNESS files (which omit the campaign + log).
     settings.append_system_prompt = None;
+    settings.append_system_prompt_files = None;
     settings.append_system_prompt_file = Some(tmp_path.to_string_lossy().to_string());
 
     for path in &campaign_data.paths {
@@ -1221,6 +1248,63 @@ mod tests {
         );
         assert!(session_dir.join("campaigns/factory/campaign.md").is_file());
         assert!(session_dir.join("campaigns/factory/log.md").is_file());
+    }
+
+    #[test]
+    fn compose_launch_command_folds_plural_prompt_files_with_campaign() {
+        // Regression guard: a repo configured with the PLURAL
+        // append_system_prompt_files array (base + overlay) must still get the
+        // campaign + log composed into the launch prompt. The bug: compose read
+        // only the singular field and left the plural array set, so
+        // launch_command_with_settings preferred the array and dropped the
+        // composed campaign/log temp file entirely.
+        let dir = tempfile::tempdir().unwrap();
+        let campaign_dir = dir.path().join("campaigns/factory");
+        std::fs::create_dir_all(&campaign_dir).unwrap();
+        let base = dir.path().join("HARNESS-base.md");
+        let overlay = dir.path().join("HARNESS.md");
+        std::fs::write(&base, "BASE_HARNESS_MARKER").unwrap();
+        std::fs::write(&overlay, "OVERLAY_HARNESS_MARKER").unwrap();
+        std::fs::write(
+            campaign_dir.join("campaign.md"),
+            "---\ncategory: \"\"\nsynthesist_trees: []\npaths: []\n---\n\n# factory\nCAMPAIGN_BODY_MARKER\n",
+        )
+        .unwrap();
+        std::fs::write(
+            campaign_dir.join("log.md"),
+            "---\nentrypoint: \"\"\n---\n\n# factory\nLOG_BODY_MARKER\n",
+        )
+        .unwrap();
+
+        let toml = format!(
+            "[repos.nomograph]\ndir = {dir:?}\ncolor = \"#fff\"\n\
+             [repos.nomograph.launch]\nappend_system_prompt_files = [{base:?}, {overlay:?}]\n",
+            dir = dir.path(),
+            base = base,
+            overlay = overlay,
+        );
+        let config: Config = toml::from_str(&toml).unwrap();
+
+        let (cmd, _) =
+            compose_launch_command(&config, "nomograph/factory", Some("X"), None, false).unwrap();
+
+        // Exactly one --append-system-prompt-file (the composed temp), and the
+        // temp must contain BOTH HARNESS files AND the campaign + log bodies.
+        assert_eq!(
+            cmd.matches("--append-system-prompt-file").count(),
+            1,
+            "expected a single composed prompt file: {cmd}"
+        );
+        let tmp = std::env::temp_dir().join("muxr-prompt-nomograph-factory.md");
+        let composed = std::fs::read_to_string(&tmp).unwrap();
+        for marker in [
+            "BASE_HARNESS_MARKER",
+            "OVERLAY_HARNESS_MARKER",
+            "CAMPAIGN_BODY_MARKER",
+            "LOG_BODY_MARKER",
+        ] {
+            assert!(composed.contains(marker), "composed prompt missing {marker}:\n{composed}");
+        }
     }
 
     #[test]
