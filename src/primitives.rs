@@ -1,36 +1,46 @@
-//! Campaign/session primitives for muxr-managed harnesses.
+//! Campaign primitives for muxr-managed repos.
 //!
-//! A campaign is a long-lived body of work. Lives at
-//! `campaigns/<slug>/campaign.md` with YAML frontmatter declaring
-//! `synthesist_trees:` and `paths:`, and a markdown body of conventions.
+//! A campaign is a long-lived initiative. It lives in its own directory at
+//! `campaigns/<campaign>/` containing two files:
 //!
-//! A session is an ephemeral episode. Lives at
-//! `campaigns/<slug>/sessions/<date>[-<suffix>].md` with YAML
-//! frontmatter declaring `campaign:` + `entrypoint:`, and a markdown
-//! body that is an append-only log.
+//! - `campaign.md` -- YAML frontmatter declaring `category:`, `paths:`,
+//!   `synthesist_trees:`, and optional `sharded_from:`, plus a markdown body
+//!   of conventions (what this is / how to behave).
+//! - `log.md` -- YAML frontmatter declaring `entrypoint:`, plus a markdown
+//!   body that is an append-only log.
 //!
-//! Muxr composes `HARNESS.md` + campaign body + session body into the
-//! runtime's system prompt at launch. Campaign `paths:` are passed as
-//! `--add-dir`, so Claude knows the full work surface.
+//! Muxr composes the repo's HARNESS prompt + campaign body + log body into
+//! the runtime's system prompt at launch. Campaign `paths:` are passed as
+//! `--add-dir`, so the tool knows the full work surface. Sessions are named
+//! `<repo>/<campaign>` -- two levels, one session per campaign.
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Campaign frontmatter (`campaigns/<slug>/campaign.md`).
+/// Campaign frontmatter (`campaigns/<campaign>/campaign.md`).
 #[derive(Debug, Default, Deserialize)]
 pub struct Campaign {
+    /// Classification slug (was the middle segment in the old 3-level name).
+    /// Parsed now; surfaced by the chooser (W5) and inherited by `shard` (W9).
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub category: String,
     #[serde(default)]
     pub synthesist_trees: Vec<String>,
     #[serde(default)]
     pub paths: Vec<String>,
+    /// Lineage: the parent campaign this one was sharded out of, if any.
+    /// Parsed now; consumed by the chooser grouping (W5) and `shard` (W9).
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub sharded_from: Option<String>,
 }
 
-/// Session frontmatter (`campaigns/<slug>/sessions/<date>[-<suffix>].md`).
-#[derive(Debug, Deserialize)]
-pub struct Session {
-    pub campaign: String,
+/// Log frontmatter (`campaigns/<campaign>/log.md`).
+#[derive(Debug, Default, Deserialize)]
+pub struct Log {
     #[serde(default)]
     pub entrypoint: String,
 }
@@ -52,6 +62,21 @@ fn split_frontmatter(content: &str) -> Option<(&str, &str)> {
     Some((fm, body))
 }
 
+/// `<repo-dir>/campaigns/<campaign>/`.
+pub fn campaign_dir(repo_dir: &Path, campaign: &str) -> PathBuf {
+    repo_dir.join("campaigns").join(campaign)
+}
+
+/// `<repo-dir>/campaigns/<campaign>/campaign.md`.
+pub fn campaign_md_path(repo_dir: &Path, campaign: &str) -> PathBuf {
+    campaign_dir(repo_dir, campaign).join("campaign.md")
+}
+
+/// `<repo-dir>/campaigns/<campaign>/log.md`.
+pub fn log_md_path(repo_dir: &Path, campaign: &str) -> PathBuf {
+    campaign_dir(repo_dir, campaign).join("log.md")
+}
+
 pub fn load_campaign(path: &Path) -> Result<(Campaign, String)> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("Failed to read campaign file: {}", path.display()))?;
@@ -62,103 +87,95 @@ pub fn load_campaign(path: &Path) -> Result<(Campaign, String)> {
     Ok((campaign, body.to_string()))
 }
 
-pub fn load_session(path: &Path) -> Result<(Session, String)> {
+pub fn load_log(path: &Path) -> Result<(Log, String)> {
     let content = fs::read_to_string(path)
-        .with_context(|| format!("Failed to read session file: {}", path.display()))?;
+        .with_context(|| format!("Failed to read log file: {}", path.display()))?;
     let (fm, body) = split_frontmatter(&content)
         .with_context(|| format!("No YAML frontmatter in {}", path.display()))?;
-    let session: Session = serde_yaml_ng::from_str(fm)
-        .with_context(|| format!("Failed to parse session frontmatter: {}", path.display()))?;
-    Ok((session, body.to_string()))
+    let log: Log = serde_yaml_ng::from_str(fm)
+        .with_context(|| format!("Failed to parse log frontmatter: {}", path.display()))?;
+    Ok((log, body.to_string()))
 }
 
-/// Resolve `<harness-dir>/campaigns/<campaign>/campaign.md`, erroring if
+/// Resolve `<repo-dir>/campaigns/<campaign>/campaign.md`, erroring if
 /// the campaign does not exist.
-pub fn campaign_file(harness_dir: &Path, campaign: &str) -> Result<PathBuf> {
-    let path = harness_dir
-        .join("campaigns")
-        .join(campaign)
-        .join("campaign.md");
+pub fn campaign_file(repo_dir: &Path, campaign: &str) -> Result<PathBuf> {
+    let path = campaign_md_path(repo_dir, campaign);
     if !path.is_file() {
         anyhow::bail!("Campaign '{campaign}' not found at {}.", path.display());
     }
     Ok(path)
 }
 
-/// Reserved campaign slug for the harness switchboard. One per harness.
-/// Launched by `muxr <harness>` with no campaign arg.
-pub const SWITCHBOARD: &str = "_switchboard";
+/// Reserved campaign slug for the repo switchboard. One per repo.
+/// Launched by `muxr <repo>` with no campaign arg, as `<repo>/switchboard`.
+pub const SWITCHBOARD: &str = "switchboard";
 
-/// Singleton topic used for the switchboard session file. The switchboard
-/// is one accumulating log per harness, not per-topic.
-pub const SWITCHBOARD_TOPIC: &str = "switchboard";
-
-/// Validate a topic slug. Topics name session files and tmux sessions, so
+/// Validate a campaign slug. Campaigns name directories and tmux sessions, so
 /// they must be filesystem- and tmux-safe.
 ///
 /// Rules: kebab-case (lowercase letters, digits, hyphens), 1-64 chars,
 /// no leading/trailing/consecutive hyphens.
-pub fn validate_topic(topic: &str) -> Result<()> {
-    if topic.is_empty() {
+pub fn validate_topic(campaign: &str) -> Result<()> {
+    if campaign.is_empty() {
         anyhow::bail!(
-            "Topic required: muxr <harness> <campaign> <topic>.\n\
-             Topic is kebab-case and describes the work (e.g. 'cicd-stub-fix')."
+            "Campaign required: muxr <repo> <campaign>.\n\
+             Campaign is kebab-case and names the initiative (e.g. 'cicd-stub-fix')."
         );
     }
-    if topic.len() > 64 {
+    if campaign.len() > 64 {
         anyhow::bail!(
-            "Topic too long: {} chars (max 64). Pick something shorter.",
-            topic.len()
+            "Campaign too long: {} chars (max 64). Pick something shorter.",
+            campaign.len()
         );
     }
-    for c in topic.chars() {
+    for c in campaign.chars() {
         if !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
             anyhow::bail!(
-                "Topic must be kebab-case (lowercase letters, digits, hyphens).\n\
+                "Campaign must be kebab-case (lowercase letters, digits, hyphens).\n\
                  Invalid char: '{c}'. Try kebab-case like 'cicd-stub-fix'."
             );
         }
     }
     // Reject empty segments: catches leading hyphen, trailing hyphen, and
     // consecutive hyphens in one rule.
-    if topic.split('-').any(|s| s.is_empty()) {
+    if campaign.split('-').any(|s| s.is_empty()) {
         anyhow::bail!(
-            "Topic must not have leading, trailing, or consecutive hyphens.\n\
-             Got '{topic}'. Try kebab-case like 'cicd-stub-fix'."
+            "Campaign must not have leading, trailing, or consecutive hyphens.\n\
+             Got '{campaign}'. Try kebab-case like 'cicd-stub-fix'."
         );
     }
     Ok(())
 }
 
-/// Scaffold the switchboard campaign for a harness if it doesn't exist.
+/// Scaffold the switchboard campaign for a repo if it doesn't exist.
 ///
-/// The switchboard is the per-harness orchestrator AI. It lives at
-/// `campaigns/_switchboard/` and gets a specific persona + bootstrap
-/// entrypoint, distinct from regular campaign scaffolding.
-pub fn scaffold_switchboard(harness_dir: &Path) -> Result<PathBuf> {
-    let campaign_dir = harness_dir.join("campaigns").join(SWITCHBOARD);
-    let sessions_dir = campaign_dir.join("sessions");
-    fs::create_dir_all(&sessions_dir)?;
+/// The switchboard is the per-repo orchestrator AI. It lives at
+/// `campaigns/switchboard/` and gets a specific persona + bootstrap
+/// log entrypoint, distinct from regular campaign scaffolding.
+pub fn scaffold_switchboard(repo_dir: &Path) -> Result<PathBuf> {
+    let dir = campaign_dir(repo_dir, SWITCHBOARD);
+    fs::create_dir_all(&dir)?;
 
-    let campaign_md = campaign_dir.join("campaign.md");
+    let campaign_md = campaign_md_path(repo_dir, SWITCHBOARD);
     if !campaign_md.is_file() {
-        let harness_name = harness_dir
+        let repo_name = repo_dir
             .file_name()
             .and_then(|n| n.to_str())
-            .unwrap_or("harness");
+            .unwrap_or("repo");
         let content = format!(
-            "---\nsynthesist_trees: []\npaths: []\n---\n\n\
-             # {harness_name} switchboard\n\n\
+            "---\ncategory: switchboard\nsynthesist_trees: []\npaths: []\n---\n\n\
+             # {repo_name} switchboard\n\n\
              ## What this is\n\
-             The per-harness orchestrator. One AI session whose job is to \
+             The per-repo orchestrator. One AI session whose job is to \
              help the human spawn, triage, archive, and navigate campaigns \
-             in this harness without memorizing muxr commands. Scope is \
-             this harness only -- cross-harness work happens at the \
+             in this repo without memorizing muxr commands. Scope is \
+             this repo only -- cross-repo work happens at the \
              control-plane shell.\n\n\
              ## How to behave\n\
              - Classify intent fast. Propose, don't interrogate.\n\
              - \"I want to work on X\" -> glob campaigns/*/ to see what \
-             exists; if X is there, run `muxr {harness_name} X` to launch \
+             exists; if X is there, run `muxr {repo_name} X` to launch \
              it in a new tmux session (via Bash). If not, propose paths \
              from the add_dirs and run the scaffold launch.\n\
              - \"What's going on\" -> `synthesist status`, `muxr ls --active`, \
@@ -166,57 +183,55 @@ pub fn scaffold_switchboard(harness_dir: &Path) -> Result<PathBuf> {
              - Delegate actual work to campaign sessions. This pane is a \
              dispatcher, not a work pane. Keep conversations short.\n\
              - /serialize rarely here -- the switchboard isn't a work \
-             session. Update its log only when the harness itself changed \
+             session. Update its log only when the repo itself changed \
              (new campaign added, old one archived, structural shift).\n"
         );
         fs::write(&campaign_md, content)?;
     }
 
-    // Seed the singleton switchboard session if missing. The switchboard
-    // is one accumulating log per harness, never date- or topic-keyed.
-    let session_path = sessions_dir.join(format!("{SWITCHBOARD_TOPIC}.md"));
-    if !session_path.exists() {
-        let content = format!(
-            "---\ncampaign: {SWITCHBOARD}\nentrypoint: \"Switchboard ready. First-glance: run `synthesist status` and ls campaigns/ so you know what's live. Then wait for the human's intent.\"\n---\n\n\
+    // Seed the switchboard log if missing. The switchboard is one
+    // accumulating log per repo.
+    let log_md = log_md_path(repo_dir, SWITCHBOARD);
+    if !log_md.exists() {
+        let content = "---\nentrypoint: \"Switchboard ready. First-glance: run `synthesist status` and ls campaigns/ so you know what's live. Then wait for the human's intent.\"\n---\n\n\
              # Switchboard\n\n\
              ## Log\n\
              Switchboard scaffolded.\n"
-        );
-        fs::write(&session_path, content)?;
+            .to_string();
+        fs::write(&log_md, content)?;
     }
 
     Ok(campaign_md)
 }
 
-/// Scaffold a stub campaign + a bootstrap session file that tells Claude
-/// to onboard the human conversationally.
+/// Scaffold a stub campaign directory (`campaign.md` + `log.md`) that tells
+/// the tool to onboard the human conversationally.
 ///
 /// Muxr does NOT prompt for paths/tree/description at the terminal.
-/// Instead it creates empty stubs and seeds the session's entrypoint
-/// with an instruction for Claude to ask the human what the campaign
-/// is about and populate campaign.md via Edit. This keeps the launch
-/// command single-keystroke and moves the onboarding into a natural
-/// LLM conversation where typos, ambiguity, and defaults are cheap.
-pub fn scaffold_campaign_stub(harness_dir: &Path, campaign: &str, topic: &str) -> Result<PathBuf> {
-    let campaign_dir = harness_dir.join("campaigns").join(campaign);
-    let sessions_dir = campaign_dir.join("sessions");
-    fs::create_dir_all(&sessions_dir)?;
+/// Instead it creates empty stubs and seeds the log's entrypoint with an
+/// instruction for the tool to ask the human what the campaign is about
+/// and populate campaign.md via Edit. This keeps the launch command
+/// single-keystroke and moves the onboarding into a natural LLM
+/// conversation where typos, ambiguity, and defaults are cheap.
+pub fn scaffold_campaign_stub(repo_dir: &Path, campaign: &str) -> Result<PathBuf> {
+    let dir = campaign_dir(repo_dir, campaign);
+    fs::create_dir_all(&dir)?;
 
     let campaign_content = format!(
-        "---\nsynthesist_trees: []\npaths: []\n---\n\n\
+        "---\ncategory: \"\"\nsynthesist_trees: []\npaths: []\n---\n\n\
          # {campaign}\n\n\
          ## What this is\n\
-         (pending -- Claude will prompt the human on first launch)\n\n\
+         (pending -- the tool will prompt the human on first launch)\n\n\
          ## How to behave\n\
          (pending)\n"
     );
-    let campaign_md = campaign_dir.join("campaign.md");
+    let campaign_md = campaign_md_path(repo_dir, campaign);
     fs::write(&campaign_md, campaign_content)?;
 
-    // Seed the topic's session file with a bootstrap entrypoint so Claude
-    // knows to run the onboarding conversation on first response.
-    let session_path = sessions_dir.join(format!("{topic}.md"));
-    if !session_path.exists() {
+    // Seed the log with a bootstrap entrypoint so the tool knows to run the
+    // onboarding conversation on first response.
+    let log_md = log_md_path(repo_dir, campaign);
+    if !log_md.exists() {
         let entrypoint = format!(
             "Bootstrap campaign '{campaign}'. campaign.md is a stub. \
              First action: discover, don't interrogate. Search ~/gitlab.com, \
@@ -227,65 +242,45 @@ pub fn scaffold_campaign_stub(harness_dir: &Path, campaign: &str, topic: &str) -
              campaign.md via Edit, then proceed with whatever work the \
              human wants."
         );
-        let session_content = format!(
-            "---\ncampaign: {campaign}\nentrypoint: \"{entrypoint}\"\n---\n\n\
-             # {topic}\n\n\
+        let log_content = format!(
+            "---\nentrypoint: \"{entrypoint}\"\n---\n\n\
+             # {campaign}\n\n\
              ## Log\n\
              Freshly scaffolded campaign. Awaiting onboarding conversation.\n"
         );
-        fs::write(&session_path, session_content)?;
+        fs::write(&log_md, log_content)?;
     }
 
     eprintln!();
     eprintln!("Scaffolded stub campaign: {}", campaign_md.display());
-    eprintln!("Claude will prompt you to fill it out on launch.");
+    eprintln!("The tool will prompt you to fill it out on launch.");
     eprintln!();
 
     Ok(campaign_md)
 }
 
-/// Find or scaffold a session file for the given campaign and topic.
-/// If a file at `campaigns/<campaign>/sessions/<topic>.md` exists, returns
-/// it. Otherwise scaffolds from `campaigns/TEMPLATE/sessions/TEMPLATE.md`
-/// (or a built-in fallback) and returns the new path.
-pub fn resolve_or_scaffold_session(
-    harness_dir: &Path,
-    campaign: &str,
-    topic: &str,
-) -> Result<PathBuf> {
-    let campaign_dir = harness_dir.join("campaigns").join(campaign);
-    let sessions_dir = campaign_dir.join("sessions");
-    let path = sessions_dir.join(format!("{topic}.md"));
-    if path.is_file() {
-        return Ok(path);
+/// Find or scaffold the log file for the given campaign.
+/// If `campaigns/<campaign>/log.md` exists, returns it. Otherwise scaffolds
+/// the campaign dir + a minimal log.md and returns the new path.
+pub fn resolve_or_scaffold_session(repo_dir: &Path, campaign: &str) -> Result<PathBuf> {
+    let log_md = log_md_path(repo_dir, campaign);
+    if log_md.is_file() {
+        return Ok(log_md);
     }
 
-    fs::create_dir_all(&sessions_dir)?;
-    let template_path = harness_dir
-        .join("campaigns")
-        .join("TEMPLATE")
-        .join("sessions")
-        .join("TEMPLATE.md");
-    let content = if template_path.is_file() {
-        let tpl = fs::read_to_string(&template_path)?;
-        // `<date>[-<suffix>]` is the legacy placeholder kept here so existing
-        // TEMPLATE.md files in user harnesses keep working without a rewrite.
-        tpl.replace("<slug>", campaign)
-            .replace("<topic>", topic)
-            .replace("<date>[-<suffix>]", topic)
-    } else {
-        format!("---\ncampaign: {campaign}\nentrypoint: \"\"\n---\n\n# {topic}\n\n## Log\n\n")
-    };
-    fs::write(&path, content)?;
-    Ok(path)
+    let dir = campaign_dir(repo_dir, campaign);
+    fs::create_dir_all(&dir)?;
+    let content = format!("---\nentrypoint: \"\"\n---\n\n# {campaign}\n\n## Log\n\n");
+    fs::write(&log_md, content)?;
+    Ok(log_md)
 }
 
-/// Compose the system prompt addition from campaign + session bodies.
-pub fn compose_prompt(campaign: &str, campaign_body: &str, session_body: &str) -> String {
+/// Compose the system prompt addition from campaign + log bodies.
+pub fn compose_prompt(campaign: &str, campaign_body: &str, log_body: &str) -> String {
     format!(
-        "# Campaign: {campaign}\n\n{}\n\n---\n\n# Session\n\n{}",
+        "# Campaign: {campaign}\n\n{}\n\n---\n\n# Log\n\n{}",
         campaign_body.trim(),
-        session_body.trim()
+        log_body.trim()
     )
 }
 
@@ -322,18 +317,27 @@ mod tests {
 
     #[test]
     fn parse_campaign_frontmatter() {
-        let fm = "synthesist_trees:\n  - harness\npaths:\n  - ~/foo\n  - ~/bar\n";
+        let fm =
+            "category: harness\nsynthesist_trees:\n  - harness\npaths:\n  - ~/foo\n  - ~/bar\n";
         let c: Campaign = serde_yaml_ng::from_str(fm).unwrap();
+        assert_eq!(c.category, "harness");
         assert_eq!(c.synthesist_trees, vec!["harness"]);
         assert_eq!(c.paths, vec!["~/foo".to_string(), "~/bar".to_string()]);
+        assert!(c.sharded_from.is_none());
     }
 
     #[test]
-    fn parse_session_frontmatter() {
-        let fm = "campaign: harness\nentrypoint: do the thing\n";
-        let s: Session = serde_yaml_ng::from_str(fm).unwrap();
-        assert_eq!(s.campaign, "harness");
-        assert_eq!(s.entrypoint, "do the thing");
+    fn parse_campaign_with_sharded_from() {
+        let fm = "category: customer\nsharded_from: ncbi\npaths: []\n";
+        let c: Campaign = serde_yaml_ng::from_str(fm).unwrap();
+        assert_eq!(c.sharded_from.as_deref(), Some("ncbi"));
+    }
+
+    #[test]
+    fn parse_log_frontmatter() {
+        let fm = "entrypoint: do the thing\n";
+        let l: Log = serde_yaml_ng::from_str(fm).unwrap();
+        assert_eq!(l.entrypoint, "do the thing");
     }
 
     #[test]
@@ -342,6 +346,7 @@ mod tests {
         let c: Campaign = serde_yaml_ng::from_str(fm).unwrap_or_default();
         assert!(c.synthesist_trees.is_empty());
         assert!(c.paths.is_empty());
+        assert!(c.category.is_empty());
     }
 
     #[test]
@@ -349,63 +354,40 @@ mod tests {
         let out = compose_prompt("gkg", "## What\ngkg stuff", "## Log\nentry");
         assert!(out.contains("Campaign: gkg"));
         assert!(out.contains("gkg stuff"));
-        assert!(out.contains("# Session"));
+        assert!(out.contains("# Log"));
         assert!(out.contains("entry"));
     }
 
     #[test]
-    fn resolve_or_scaffold_creates_file_at_topic() {
+    fn resolve_or_scaffold_creates_log_in_campaign_dir() {
         let tmp = tempfile::tempdir().unwrap();
-        let harness_dir = tmp.path();
-        let campaign_dir = harness_dir.join("campaigns").join("gkg");
-        fs::create_dir_all(&campaign_dir).unwrap();
+        let repo_dir = tmp.path();
+        let dir = campaign_dir(repo_dir, "gkg");
+        fs::create_dir_all(&dir).unwrap();
         fs::write(
-            campaign_dir.join("campaign.md"),
-            "---\npaths: []\n---\n\n# gkg\n",
+            dir.join("campaign.md"),
+            "---\ncategory: \"\"\npaths: []\n---\n\n# gkg\n",
         )
         .unwrap();
 
-        let path = resolve_or_scaffold_session(harness_dir, "gkg", "topic-flag").unwrap();
+        let path = resolve_or_scaffold_session(repo_dir, "gkg").unwrap();
         assert!(path.exists());
-        assert_eq!(path.file_name().unwrap().to_str().unwrap(), "topic-flag.md");
+        assert_eq!(path.file_name().unwrap().to_str().unwrap(), "log.md");
         let contents = fs::read_to_string(&path).unwrap();
-        assert!(contents.contains("campaign: gkg"));
-        assert!(contents.contains("# topic-flag"));
+        assert!(contents.contains("# gkg"));
     }
 
     #[test]
-    fn resolve_or_scaffold_attaches_to_existing_topic() {
+    fn resolve_or_scaffold_attaches_to_existing_log() {
         let tmp = tempfile::tempdir().unwrap();
-        let harness_dir = tmp.path();
-        let sessions_dir = harness_dir.join("campaigns").join("gkg").join("sessions");
-        fs::create_dir_all(&sessions_dir).unwrap();
-        let existing = sessions_dir.join("retrieval.md");
-        fs::write(
-            &existing,
-            "---\ncampaign: gkg\nentrypoint: x\n---\n\n# retrieval\n",
-        )
-        .unwrap();
+        let repo_dir = tmp.path();
+        let dir = campaign_dir(repo_dir, "gkg");
+        fs::create_dir_all(&dir).unwrap();
+        let existing = dir.join("log.md");
+        fs::write(&existing, "---\nentrypoint: x\n---\n\n# gkg\n").unwrap();
 
-        let path = resolve_or_scaffold_session(harness_dir, "gkg", "retrieval").unwrap();
+        let path = resolve_or_scaffold_session(repo_dir, "gkg").unwrap();
         assert_eq!(path, existing);
-    }
-
-    #[test]
-    fn resolve_or_scaffold_does_not_match_legacy_dated_files() {
-        // Legacy `2026-04-24-cicd.md` files do not satisfy a `2026-04-24`
-        // topic lookup. The new world is exact-match only.
-        let tmp = tempfile::tempdir().unwrap();
-        let harness_dir = tmp.path();
-        let sessions_dir = harness_dir.join("campaigns").join("gkg").join("sessions");
-        fs::create_dir_all(&sessions_dir).unwrap();
-        fs::write(
-            sessions_dir.join("2026-04-24-cicd.md"),
-            "---\ncampaign: gkg\nentrypoint: x\n---\n\n",
-        )
-        .unwrap();
-
-        let path = resolve_or_scaffold_session(harness_dir, "gkg", "2026-04-24").unwrap();
-        assert_eq!(path.file_name().unwrap().to_str().unwrap(), "2026-04-24.md");
     }
 
     #[test]
@@ -420,7 +402,7 @@ mod tests {
     #[test]
     fn validate_topic_rejects_empty() {
         let err = validate_topic("").unwrap_err().to_string();
-        assert!(err.contains("Topic required"));
+        assert!(err.contains("Campaign required"));
     }
 
     #[test]
@@ -467,60 +449,51 @@ mod tests {
     }
 
     #[test]
-    fn scaffold_switchboard_creates_singleton() {
+    fn scaffold_switchboard_creates_campaign_and_log() {
         let tmp = tempfile::tempdir().unwrap();
-        let harness_dir = tmp.path();
-        scaffold_switchboard(harness_dir).unwrap();
+        let repo_dir = tmp.path();
+        scaffold_switchboard(repo_dir).unwrap();
 
-        let session_path = harness_dir
-            .join("campaigns")
-            .join(SWITCHBOARD)
-            .join("sessions")
-            .join(format!("{SWITCHBOARD_TOPIC}.md"));
-        assert!(session_path.is_file(), "switchboard.md should exist");
+        let log_md = log_md_path(repo_dir, SWITCHBOARD);
+        assert!(log_md.is_file(), "switchboard log.md should exist");
 
-        let contents = fs::read_to_string(&session_path).unwrap();
-        assert!(contents.contains(&format!("campaign: {SWITCHBOARD}")));
+        let contents = fs::read_to_string(&log_md).unwrap();
         assert!(contents.contains("# Switchboard"));
+
+        let campaign_md = campaign_md_path(repo_dir, SWITCHBOARD);
+        assert!(campaign_md.is_file());
+        assert!(
+            fs::read_to_string(&campaign_md)
+                .unwrap()
+                .contains("switchboard")
+        );
     }
 
     #[test]
-    fn scaffold_campaign_stub_writes_topic_keyed_session() {
+    fn scaffold_campaign_stub_writes_campaign_and_log() {
         let tmp = tempfile::tempdir().unwrap();
-        let harness_dir = tmp.path();
-        scaffold_campaign_stub(harness_dir, "gkg", "retrieval-precision").unwrap();
+        let repo_dir = tmp.path();
+        scaffold_campaign_stub(repo_dir, "retrieval-precision").unwrap();
 
-        let campaign_md = harness_dir
-            .join("campaigns")
-            .join("gkg")
-            .join("campaign.md");
+        let campaign_md = campaign_md_path(repo_dir, "retrieval-precision");
         assert!(campaign_md.is_file());
 
-        let session_path = harness_dir
-            .join("campaigns")
-            .join("gkg")
-            .join("sessions")
-            .join("retrieval-precision.md");
-        assert!(session_path.is_file(), "topic-keyed session should exist");
-        let body = fs::read_to_string(&session_path).unwrap();
-        assert!(body.contains("campaign: gkg"));
+        let log_md = log_md_path(repo_dir, "retrieval-precision");
+        assert!(log_md.is_file(), "log.md should exist");
+        let body = fs::read_to_string(&log_md).unwrap();
         assert!(body.contains("# retrieval-precision"));
-        assert!(body.contains("Bootstrap campaign 'gkg'"));
+        assert!(body.contains("Bootstrap campaign 'retrieval-precision'"));
     }
 
     #[test]
     fn scaffold_switchboard_idempotent() {
         let tmp = tempfile::tempdir().unwrap();
-        let harness_dir = tmp.path();
-        scaffold_switchboard(harness_dir).unwrap();
-        let session_path = harness_dir
-            .join("campaigns")
-            .join(SWITCHBOARD)
-            .join("sessions")
-            .join(format!("{SWITCHBOARD_TOPIC}.md"));
-        fs::write(&session_path, "custom content").unwrap();
+        let repo_dir = tmp.path();
+        scaffold_switchboard(repo_dir).unwrap();
+        let log_md = log_md_path(repo_dir, SWITCHBOARD);
+        fs::write(&log_md, "custom content").unwrap();
 
-        scaffold_switchboard(harness_dir).unwrap();
-        assert_eq!(fs::read_to_string(&session_path).unwrap(), "custom content");
+        scaffold_switchboard(repo_dir).unwrap();
+        assert_eq!(fs::read_to_string(&log_md).unwrap(), "custom content");
     }
 }

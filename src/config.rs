@@ -7,7 +7,7 @@ use std::path::PathBuf;
 pub struct Config {
     #[serde(default = "default_tool")]
     pub default_tool: String,
-    pub harnesses: HashMap<String, Harness>,
+    pub repos: HashMap<String, Repo>,
     #[serde(default)]
     pub remotes: HashMap<String, Remote>,
     #[serde(default)]
@@ -28,10 +28,10 @@ pub struct Hooks {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-pub struct Harness {
+pub struct Repo {
     pub dir: String,
     pub color: String,
-    /// Override default_tool for this harness.
+    /// Override default_tool for this repo.
     #[serde(default)]
     pub tool: Option<String>,
     /// Tool-launch settings. Passed through to the runtime at session start.
@@ -210,7 +210,7 @@ fn merge_tool_with_builtin(user: Tool, builtin: Tool) -> Tool {
     }
 }
 
-/// Reserved command names that cannot be used as harness names.
+/// Reserved command names that cannot be used as repo names.
 const RESERVED_NAMES: &[&str] = &[
     "init",
     "ls",
@@ -570,23 +570,21 @@ impl Config {
         let config: Config = toml::from_str(&content)
             .with_context(|| format!("Failed to parse {}", path.display()))?;
 
-        // Validate no name collisions between harnesses, remotes, and tools
+        // Validate no name collisions between repos, remotes, and tools
         for name in config.remotes.keys() {
-            if config.harnesses.contains_key(name) {
-                anyhow::bail!("Name collision: '{name}' is defined as both a harness and a remote");
+            if config.repos.contains_key(name) {
+                anyhow::bail!("Name collision: '{name}' is defined as both a repo and a remote");
             }
         }
         for name in config.tools.keys() {
-            if config.harnesses.contains_key(name) {
-                anyhow::bail!("Name collision: '{name}' is defined as both a tool and a harness");
+            if config.repos.contains_key(name) {
+                anyhow::bail!("Name collision: '{name}' is defined as both a tool and a repo");
             }
             if config.remotes.contains_key(name) {
-                anyhow::bail!("Name collision: '{name}' is defined as both a remote and a harness");
+                anyhow::bail!("Name collision: '{name}' is defined as both a remote and a repo");
             }
             if RESERVED_NAMES.contains(&name.as_str()) {
-                anyhow::bail!(
-                    "Harness name '{name}' is reserved (conflicts with built-in command)"
-                );
+                anyhow::bail!("Repo name '{name}' is reserved (conflicts with built-in command)");
             }
         }
 
@@ -616,19 +614,19 @@ impl Config {
         Ok(dir.join("state.json"))
     }
 
-    pub fn resolve_dir(&self, harness: &str) -> Result<PathBuf> {
+    pub fn resolve_dir(&self, repo: &str) -> Result<PathBuf> {
         let v = self
-            .harnesses
-            .get(harness)
-            .with_context(|| format!("Unknown harness: {harness}"))?;
+            .repos
+            .get(repo)
+            .with_context(|| format!("Unknown repo: {repo}"))?;
         let expanded = shellexpand::tilde(&v.dir);
         Ok(PathBuf::from(expanded.as_ref()))
     }
 
-    /// All known names (harnesses + remotes) for validation and completions.
+    /// All known names (repos + remotes) for validation and completions.
     pub fn all_names(&self) -> Vec<&str> {
         let mut names: Vec<&str> = self
-            .harnesses
+            .repos
             .keys()
             .chain(self.remotes.keys())
             .map(|s| s.as_str())
@@ -638,13 +636,13 @@ impl Config {
         names
     }
 
-    /// Resolve which tool to use for a harness.
-    /// Priority: explicit override > harness config > default_tool
-    pub fn resolve_tool(&self, harness: &str, tool_override: Option<&str>) -> String {
+    /// Resolve which tool to use for a repo.
+    /// Priority: explicit override > repo config > default_tool
+    pub fn resolve_tool(&self, repo: &str, tool_override: Option<&str>) -> String {
         if let Some(t) = tool_override {
             return t.to_string();
         }
-        if let Some(v) = self.harnesses.get(harness)
+        if let Some(v) = self.repos.get(repo)
             && let Some(ref t) = v.tool
         {
             return t.clone();
@@ -744,32 +742,32 @@ impl Config {
     }
 
     pub fn color_for(&self, name: &str) -> &str {
-        self.harnesses
+        self.repos
             .get(name)
             .map(|v| v.color.as_str())
             .or_else(|| self.remotes.get(name).map(|r| r.color.as_str()))
             .unwrap_or("#8a7f83")
     }
 
-    /// Generate a default config file with example harnesses.
+    /// Generate a default config file with example repos.
     pub fn default_template() -> String {
         r##"# muxr configuration
-# Harnesses are named project estates. Each maps to a directory and a
-# status-bar color. Sessions launch under `campaigns/<slug>/` inside
-# the harness directory.
+# Repos are named project estates. Each maps to a directory and a
+# status-bar color. Sessions launch under `campaigns/<campaign>/` inside
+# the repo directory, named `<repo>/<campaign>`.
 
 default_tool = "claude"
 
-# [harnesses.work]
+# [repos.work]
 # dir = "~/projects/work"
 # color = "#7aa2f7"
 # tool = "claude"    # optional, overrides default_tool
 #
-# [harnesses.work.launch]
+# [repos.work.launch]
 # append_system_prompt_file = "HARNESS.md"
 # add_dirs = ["~/docs/shared"]
 #
-# [harnesses.personal]
+# [repos.personal]
 # dir = "~/projects/personal"
 # color = "#9ece6a"
 
@@ -797,12 +795,12 @@ mod tests {
         let toml_str = r##"
 default_tool = "claude"
 
-[harnesses.work]
+[repos.work]
 dir = "~/projects/work"
 color = "#7aa2f7"
 tool = "claude"
 
-[harnesses.personal]
+[repos.personal]
 dir = "~/projects/personal"
 color = "#9ece6a"
 tool = "opencode"
@@ -824,14 +822,14 @@ session_discovery = { type = "none" }
     fn parse_valid_config() {
         let config = sample_config();
         assert_eq!(config.default_tool, "claude");
-        assert_eq!(config.harnesses.len(), 2);
+        assert_eq!(config.repos.len(), 2);
         assert_eq!(config.remotes.len(), 1);
         assert_eq!(config.tools.len(), 1);
     }
 
     #[test]
     fn default_tool_is_claude() {
-        let config: Config = toml::from_str("[harnesses]").unwrap();
+        let config: Config = toml::from_str("[repos]").unwrap();
         assert_eq!(config.default_tool, "claude");
         assert!(config.tools.is_empty());
     }
@@ -918,7 +916,7 @@ session_discovery = { type = "none" }
     #[test]
     fn name_collision_harness_remote_rejected() {
         let toml_str = r##"
-[harnesses.lab]
+[repos.lab]
 dir = "~/lab"
 color = "#fff"
 
@@ -932,14 +930,14 @@ color = "#fff"
         let has_collision = config
             .remotes
             .keys()
-            .any(|name| config.harnesses.contains_key(name));
+            .any(|name| config.repos.contains_key(name));
         assert!(has_collision);
     }
 
     #[test]
     fn name_collision_tool_harness_detected() {
         let toml_str = r##"
-[harnesses.opencode]
+[repos.opencode]
 dir = "~/oc"
 color = "#fff"
 
@@ -951,7 +949,7 @@ session_discovery = { type = "none" }
         let has_collision = config
             .tools
             .keys()
-            .any(|name| config.harnesses.contains_key(name));
+            .any(|name| config.repos.contains_key(name));
         assert!(has_collision);
     }
 
@@ -987,7 +985,7 @@ session_discovery = { type = "none" }
 
     #[test]
     fn hooks_default_empty() {
-        let config: Config = toml::from_str("[harnesses]").unwrap();
+        let config: Config = toml::from_str("[repos]").unwrap();
         assert!(config.hooks.pre_create.is_empty());
         assert!(config.hooks.path.is_empty());
     }
@@ -1010,7 +1008,7 @@ session_discovery = { type = "none" }
 
     #[test]
     fn tool_for_returns_builtin_claude() {
-        let config: Config = toml::from_str("[harnesses]").unwrap();
+        let config: Config = toml::from_str("[repos]").unwrap();
         let h = config.tool_for("claude").unwrap();
         assert_eq!(h.bin, "claude");
     }
@@ -1037,7 +1035,7 @@ session_discovery = { type = "none" }
         // muxr save returning null sessionIds when [tools.pi] only
         // declared bin + prompt_mode.
         let toml_str = r##"
-[harnesses]
+[repos]
 
 [tools.claude]
 bin = "claude"
@@ -1067,7 +1065,7 @@ args = ["--name", "{name}", "--verbose"]
         // merge must inherit the builtin pi discovery pattern so muxr
         // save can find sessionIds via ~/.pi/sessions/<pid>.json.
         let toml_str = r##"
-[harnesses]
+[repos]
 
 [tools.pi]
 bin = "pi"
@@ -1186,7 +1184,7 @@ prompt_mode = "string"
 
     #[test]
     fn tool_names_includes_builtin() {
-        let config: Config = toml::from_str("[harnesses]").unwrap();
+        let config: Config = toml::from_str("[repos]").unwrap();
         let names = config.tool_names();
         assert!(names.contains(&"claude".to_string()));
     }
@@ -1223,7 +1221,7 @@ prompt_mode = "string"
 
     #[test]
     fn tool_for_returns_builtin_pi() {
-        let config: Config = toml::from_str("[harnesses]").unwrap();
+        let config: Config = toml::from_str("[repos]").unwrap();
         let h = config.tool_for("pi").unwrap();
         assert_eq!(h.bin, "pi");
         assert_eq!(h.prompt_mode, PromptMode::String);
@@ -1231,7 +1229,7 @@ prompt_mode = "string"
 
     #[test]
     fn tool_names_includes_pi_builtin() {
-        let config: Config = toml::from_str("[harnesses]").unwrap();
+        let config: Config = toml::from_str("[repos]").unwrap();
         let names = config.tool_names();
         assert!(names.contains(&"pi".to_string()));
         assert!(names.contains(&"claude".to_string()));
@@ -1240,7 +1238,7 @@ prompt_mode = "string"
     #[test]
     fn pi_tool_config_overrides_builtin_with_wrapper() {
         let toml_str = r##"
-[harnesses]
+[repos]
 
 [tools.pi]
 bin = "pi"
@@ -1357,7 +1355,7 @@ session_discovery = { type = "none" }
     #[test]
     fn hooks_parsed() {
         let toml_str = r##"
-[harnesses]
+[repos]
 
 [hooks]
 pre_create = ["mise install"]
@@ -1374,15 +1372,15 @@ path = ["~/.local/share/mise/shims"]
     fn launch_settings_deserializes_files_array() {
         // The new field round-trips through TOML correctly.
         let toml_str = r##"
-[harnesses.work]
+[repos.work]
 dir = "~/work"
 color = "#fff"
 
-[harnesses.work.launch]
+[repos.work.launch]
 append_system_prompt_files = ["base.md", "overlay.md"]
 "##;
         let config: Config = toml::from_str(toml_str).unwrap();
-        let launch = &config.harnesses["work"].launch;
+        let launch = &config.repos["work"].launch;
         assert_eq!(
             launch.append_system_prompt_files,
             Some(vec!["base.md".to_string(), "overlay.md".to_string()])

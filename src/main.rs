@@ -203,19 +203,20 @@ fn main() -> Result<()> {
             if cli.args.is_empty() {
                 cmd_control_plane(&tmux)
             } else {
-                // Check if first arg is a harness name before treating as harness
+                // Check if first arg is a tool name (e.g. `muxr claude upgrade`)
+                // before treating it as a repo to open.
                 let first = &cli.args[0];
                 let config = Config::load().ok();
-                let is_harness = config
+                let is_tool = config
                     .as_ref()
                     .map(|c| c.tool_names().contains(&first.to_string()))
                     .unwrap_or(false);
 
-                if is_harness {
+                if is_tool {
                     let config = config.unwrap();
                     cmd_harness_dispatch(&tmux, &config, &cli.args)
                 } else {
-                    cmd_open(&tmux, &cli.args, cli.tool.as_deref())
+                    cmd_open_dispatch(&tmux, &cli.args, cli.tool.as_deref())
                 }
             }
         }
@@ -237,99 +238,64 @@ fn cmd_control_plane(tmux: &Tmux) -> Result<()> {
     Ok(())
 }
 
-/// Open or attach to a session: muxr <harness> [<campaign> <topic>]
-fn cmd_open(tmux: &Tmux, args: &[String], tool_override: Option<&str>) -> Result<()> {
+/// Route a bare `muxr <repo> [<campaign>]` invocation.
+///
+/// `muxr <repo>` opens the repo switchboard; `muxr <repo> <campaign>` opens
+/// (or scaffolds) that campaign. Remotes are dispatched to their own handler.
+fn cmd_open_dispatch(tmux: &Tmux, args: &[String], tool_override: Option<&str>) -> Result<()> {
     let config = Config::load()?;
     let name = &args[0];
 
-    // Route to remote handler if this is a remote harness
+    // Route to remote handler if this is a remote.
     if config.is_remote(name) {
         return cmd_open_remote(tmux, &config, name, args);
     }
 
-    if !config.harnesses.contains_key(name) {
+    if !config.repos.contains_key(name) {
         let names = config.all_names().join(", ");
-        anyhow::bail!("Unknown harness or remote: {name}\nKnown: {names}");
+        anyhow::bail!("Unknown repo or remote: {name}\nKnown: {names}");
     }
 
     let dir = config.resolve_dir(name)?;
     let _ = tool_override;
 
-    // No campaign arg -> route to the per-harness switchboard singleton.
+    // No campaign arg -> route to the per-repo switchboard.
     if args.get(1).is_none() {
         primitives::scaffold_switchboard(&dir)?;
-        return cmd_open_campaign(
-            tmux,
-            &config,
-            name,
-            primitives::SWITCHBOARD,
-            primitives::SWITCHBOARD_TOPIC,
-        );
+        return cmd_open(tmux, &config, name, primitives::SWITCHBOARD);
     }
 
     let campaign = args[1].as_str();
-    if campaign.starts_with('_') {
-        anyhow::bail!(
-            "Campaign slug '{campaign}' is reserved (leading underscore).\n\
-             The switchboard is launched via `muxr {name}` with no campaign arg."
-        );
-    }
-    let topic = args.get(2).map(|s| s.as_str()).ok_or_else(|| {
-        anyhow::anyhow!(
-            "Topic required: muxr {name} {campaign} <topic>.\n\
-             Topic is kebab-case and describes the work (e.g. 'cicd-stub-fix')."
-        )
-    })?;
-    primitives::validate_topic(topic)?;
-    if args.len() > 3 {
-        let extras = args[3..].join(" ");
+    primitives::validate_topic(campaign)?;
+    if args.len() > 2 {
+        let extras = args[2..].join(" ");
         anyhow::bail!(
             "Unexpected extra args: {extras}\n\
-             Launch shape is: muxr <harness> <campaign> <topic>."
+             Launch shape is: muxr <repo> <campaign>."
         );
     }
 
-    cmd_open_campaign(tmux, &config, name, campaign, topic)
+    cmd_open(tmux, &config, name, campaign)
 }
 
-/// Open or attach to a campaign session: muxr <harness> <campaign> <topic>
+/// Open or attach to a campaign session: muxr <repo> <campaign>
 ///
-/// Resolves `campaigns/<campaign>/sessions/<topic>.md`, scaffolding from
-/// `campaigns/TEMPLATE/sessions/TEMPLATE.md` if missing. Composes system
-/// prompt from the campaign body + session body; passes each campaign
-/// `paths:` entry as `--add-dir`.
-fn cmd_open_campaign(
-    tmux: &Tmux,
-    config: &Config,
-    harness_name: &str,
-    campaign: &str,
-    topic: &str,
-) -> Result<()> {
-    let harness_dir = config.resolve_dir(harness_name)?;
-    // If the campaign doesn't exist yet, prompt interactively so the
-    // human can scaffold it in-flow. Keeps the launch single-command
-    // from the muxr control plane.
-    let campaign_md_path = harness_dir
-        .join("campaigns")
-        .join(campaign)
-        .join("campaign.md");
-    if !campaign_md_path.is_file() {
-        primitives::scaffold_campaign_stub(&harness_dir, campaign, topic)?;
+/// Resolves `campaigns/<campaign>/{campaign.md,log.md}`, scaffolding a stub
+/// if missing. Composes the system prompt from the repo HARNESS prompt +
+/// campaign body + log body; passes each campaign `paths:` entry as
+/// `--add-dir`. The session is named `<repo>/<campaign>`.
+fn cmd_open(tmux: &Tmux, config: &Config, repo_name: &str, campaign: &str) -> Result<()> {
+    let repo_dir = config.resolve_dir(repo_name)?;
+    // If the campaign doesn't exist yet, scaffold a stub so the human can
+    // onboard it in-flow. Keeps the launch single-command from the control
+    // plane.
+    if !primitives::campaign_md_path(&repo_dir, campaign).is_file() {
+        primitives::scaffold_campaign_stub(&repo_dir, campaign)?;
     }
-    let campaign_md = primitives::campaign_file(&harness_dir, campaign)?;
-    let session_path = primitives::resolve_or_scaffold_session(&harness_dir, campaign, topic)?;
+    let campaign_md = primitives::campaign_file(&repo_dir, campaign)?;
+    let log_path = primitives::resolve_or_scaffold_session(&repo_dir, campaign)?;
 
-    // Switchboard is a singleton; collapse the slug from
-    // `<harness>/_switchboard/switchboard` to just `<harness>/switchboard`.
-    // Filesystem stays at campaigns/_switchboard/sessions/switchboard.md
-    // so we don't have to migrate existing harnesses; only the tmux
-    // session name (and downstream switcher display, health-cache
-    // filename, statusline) changes.
-    let session_name = if campaign == primitives::SWITCHBOARD {
-        format!("{harness_name}/{}", primitives::SWITCHBOARD_TOPIC)
-    } else {
-        format!("{harness_name}/{campaign}/{topic}")
-    };
+    let session_name = format!("{repo_name}/{campaign}");
 
     if tmux.session_exists(&session_name) {
         eprintln!("Attaching to {session_name}");
@@ -337,20 +303,11 @@ fn cmd_open_campaign(
         return Ok(());
     }
 
-    let tool = config.resolve_tool(harness_name, None);
+    let tool = config.resolve_tool(repo_name, None);
 
-    // Schema validation: session's campaign must match requested campaign.
-    let (session_data, _session_body) = primitives::load_session(&session_path)?;
-    if session_data.campaign != campaign {
-        anyhow::bail!(
-            "Session file {} declares campaign '{}' but was opened as '{}'.",
-            session_path.display(),
-            session_data.campaign,
-            campaign
-        );
-    }
-    if !session_data.entrypoint.is_empty() {
-        eprintln!("  entrypoint: {}", session_data.entrypoint);
+    let (log_data, _log_body) = primitives::load_log(&log_path)?;
+    if !log_data.entrypoint.is_empty() {
+        eprintln!("  entrypoint: {}", log_data.entrypoint);
     }
 
     // Build the launch command through the single composer so that a freshly
@@ -384,48 +341,37 @@ fn cmd_open_campaign(
     Ok(())
 }
 
-/// Invert a tmux session name back into (harness, campaign, topic).
+/// Split a tmux session name into `(repo, campaign)`.
 ///
-/// The launch path collapses the switchboard slug from
-/// `<harness>/_switchboard/switchboard` to `<harness>/switchboard`, so the
-/// inverse maps a bare `<harness>/switchboard` back to the `_switchboard`
-/// campaign. All other sessions are the straightforward
-/// `<harness>/<campaign>/<topic>` (topics are validated kebab-case, so they
-/// never contain a slash).
-pub(crate) fn parse_session_slug(session_name: &str) -> Option<(String, String, String)> {
-    let parts: Vec<&str> = session_name.split('/').collect();
-    match parts.as_slice() {
-        [harness, topic] if *topic == primitives::SWITCHBOARD_TOPIC => Some((
-            (*harness).to_string(),
-            primitives::SWITCHBOARD.to_string(),
-            primitives::SWITCHBOARD_TOPIC.to_string(),
-        )),
-        [harness, campaign, topic] => Some((
-            (*harness).to_string(),
-            (*campaign).to_string(),
-            (*topic).to_string(),
-        )),
-        _ => None,
+/// Session names are exactly two levels: `<repo>/<campaign>`. Campaigns are
+/// validated kebab-case, so they never contain a slash; a name with more or
+/// fewer than two non-empty components is not a campaign session (e.g. the
+/// `muxr` control plane, or remote proxy names).
+pub(crate) fn parse_session(name: &str) -> Option<(String, String)> {
+    let (repo, campaign) = name.split_once('/')?;
+    if repo.is_empty() || campaign.is_empty() || campaign.contains('/') {
+        return None;
     }
+    Some((repo.to_string(), campaign.to_string()))
 }
 
 /// Materialise the full launch command for a session: the single source of
 /// truth shared by `open`, `restore`, and `upgrade`.
 ///
-/// Reconstructs harness launch settings, the composed HARNESS + campaign +
-/// session system prompt (written to a temp file), and the campaign's
-/// `--add-dir` paths, then asks the tool to assemble the command. The binary
-/// name is resolved fresh from config each call, so a relaunch picks up a
-/// newly installed harness version.
+/// Reconstructs the repo's launch settings, the composed HARNESS + campaign +
+/// log system prompt (written to a temp file), and the campaign's `--add-dir`
+/// paths, then asks the tool to assemble the command. The binary name is
+/// resolved fresh from config each call, so a relaunch picks up a newly
+/// installed harness version.
 ///
 /// `resume_id` resumes a specific conversation; when it is `None` and
 /// `continue_fallback` is set, the tool's `--continue` args are appended so a
 /// restored session without a discovered id still re-attaches to its most
 /// recent conversation. Returns the command and the session directory.
 ///
-/// The campaign and session files must already exist; callers that might not
-/// have them (restore/upgrade of an archived session) handle the error by
-/// falling back to a name+resume-only relaunch.
+/// The campaign and log files are loaded best-effort; callers that might not
+/// have them (restore/upgrade of an archived session) get a degraded
+/// composition rather than a failure.
 pub(crate) fn compose_launch_command(
     config: &Config,
     session_name: &str,
@@ -433,57 +379,49 @@ pub(crate) fn compose_launch_command(
     model: Option<&str>,
     continue_fallback: bool,
 ) -> Result<(String, std::path::PathBuf)> {
-    let (harness_name, campaign, topic) = parse_session_slug(session_name)
-        .with_context(|| format!("cannot derive campaign/topic from '{session_name}'"))?;
+    let (repo_name, campaign) = parse_session(session_name)
+        .with_context(|| format!("cannot derive repo/campaign from '{session_name}'"))?;
 
-    let harness_dir = config.resolve_dir(&harness_name)?;
-    let campaign_md = harness_dir
-        .join("campaigns")
-        .join(&campaign)
-        .join("campaign.md");
-    let session_path = harness_dir
-        .join("campaigns")
-        .join(&campaign)
-        .join("sessions")
-        .join(format!("{topic}.md"));
+    let repo_dir = config.resolve_dir(&repo_name)?;
+    let campaign_md = primitives::campaign_md_path(&repo_dir, &campaign);
+    let log_path = primitives::log_md_path(&repo_dir, &campaign);
 
-    let tool = config.resolve_tool(&harness_name, None);
+    let tool = config.resolve_tool(&repo_name, None);
     let tool_config = config.tool_for(&tool);
-    let harness = config.harnesses.get(&harness_name);
+    let repo = config.repos.get(&repo_name);
 
-    // Start from the harness's existing launch settings; layer campaign
+    // Start from the repo's existing launch settings; layer campaign
     // paths and the composed prompt on top.
-    let mut settings = harness.map(|v| v.launch.clone()).unwrap_or_default();
+    let mut settings = repo.map(|v| v.launch.clone()).unwrap_or_default();
 
-    // Campaign and session files are loaded best-effort. A relaunch must keep
-    // the harness-level prompt and campaign --add-dir paths even when the
-    // session body file is missing -- e.g. an archived-but-still-running
-    // session, whose `.md` has moved to sessions/archive/. Without this an
-    // in-place upgrade of such a session would silently drop its HARNESS
-    // rules and working dirs. Missing or unparseable files degrade the
-    // composition (empty body / no campaign paths) instead of failing the
-    // whole relaunch. Genuinely fatal errors (unknown harness, unparseable
-    // slug) are still surfaced above, so callers keep their name+resume
-    // fallback for the truly-unrecoverable case.
+    // Campaign and log files are loaded best-effort. A relaunch must keep
+    // the repo-level prompt and campaign --add-dir paths even when the log
+    // body file is missing -- e.g. an archived-but-still-running session.
+    // Without this an in-place upgrade of such a session would silently drop
+    // its HARNESS rules and working dirs. Missing or unparseable files
+    // degrade the composition (empty body / no campaign paths) instead of
+    // failing the whole relaunch. Genuinely fatal errors (unknown repo,
+    // unparseable slug) are still surfaced above, so callers keep their
+    // name+resume fallback for the truly-unrecoverable case.
     let (campaign_data, campaign_body) =
         primitives::load_campaign(&campaign_md).unwrap_or_default();
-    let session_body = primitives::load_session(&session_path)
+    let log_body = primitives::load_log(&log_path)
         .map(|(_, body)| body)
         .unwrap_or_default();
 
-    let composed = primitives::compose_prompt(&campaign, &campaign_body, &session_body);
+    let composed = primitives::compose_prompt(&campaign, &campaign_body, &log_body);
 
     // Claude Code rejects --append-system-prompt and --append-system-prompt-file
     // together, and multi-line content via shell send-keys breaks parsing.
     // Resolve any configured HARNESS.md-style file, combine it with the
-    // composed campaign+session prompt, write to a single temp file, and pass
+    // composed campaign+log prompt, write to a single temp file, and pass
     // only --append-system-prompt-file.
     let harness_md_content = if let Some(ref file) = settings.append_system_prompt_file {
         let expanded = shellexpand::tilde(file).to_string();
         let path = if expanded.starts_with('/') {
             std::path::PathBuf::from(expanded)
         } else {
-            harness_dir.join(&expanded)
+            repo_dir.join(&expanded)
         };
         std::fs::read_to_string(&path).unwrap_or_default()
     } else {
@@ -496,8 +434,7 @@ pub(crate) fn compose_launch_command(
         format!("{}\n\n---\n\n{}", harness_md_content.trim_end(), composed)
     };
 
-    let tmp_path =
-        std::env::temp_dir().join(format!("muxr-prompt-{harness_name}-{campaign}-{topic}.md"));
+    let tmp_path = std::env::temp_dir().join(format!("muxr-prompt-{repo_name}-{campaign}.md"));
     std::fs::write(&tmp_path, &full_prompt)?;
 
     // Clear the inline and replace the file with our composed temp file.
@@ -528,7 +465,7 @@ pub(crate) fn compose_launch_command(
         None => tool.clone(),
     };
 
-    Ok((tool_cmd, harness_dir))
+    Ok((tool_cmd, repo_dir))
 }
 
 /// Open or attach to a remote proxy session: muxr lab bootc
@@ -644,68 +581,55 @@ pub(crate) fn rename_session_by_name(
     Ok(())
 }
 
-/// Move the session file on disk to match a tmux rename.
+/// Move the campaign directory on disk to match a tmux rename.
 ///
-/// Convention (set by the `serialize` skill): each session file lives at
-/// `<harness_dir>/campaigns/<campaign>/sessions/<segment>.md`, where
-/// `<segment>` is the trailing component of the tmux session name
-/// (e.g. `2026-04-24-foo` from `tanuki/harness/2026-04-24-foo`).
+/// A session is `<repo>/<campaign>`, backed by `campaigns/<campaign>/`.
+/// Renaming `<repo>/<old>` to `<repo>/<new>` renames the directory
+/// `campaigns/<old>/` -> `campaigns/<new>/`.
 ///
-/// Both old and new tmux session names must follow `<harness>/<campaign>/<segment>`
-/// for the move to fire. Anything else (bare names, mismatched harnesses,
-/// missing source file) is silently skipped — this is a hint, not a
+/// Both old and new names must follow `<repo>/<campaign>` and share the same
+/// repo for the move to fire. Anything else (bare names, cross-repo renames,
+/// missing source dir) is silently skipped -- this is a hint, not a
 /// correctness requirement.
 fn try_move_session_file(config: &Config, old: &str, new: &str) {
-    let Some((old_h, old_campaign, old_seg)) = parse_three_part(old) else {
+    let Some((old_repo, old_campaign)) = parse_session(old) else {
         return;
     };
-    let Some((new_h, new_campaign, new_seg)) = parse_three_part(new) else {
+    let Some((new_repo, new_campaign)) = parse_session(new) else {
         return;
     };
-    if old_h != new_h || old_campaign != new_campaign {
-        // We don't move files across harnesses or campaigns from a rename.
+    if old_repo != new_repo {
+        // We don't move directories across repos from a rename.
         return;
     }
-    let dir = match config.resolve_dir(old_h) {
+    let dir = match config.resolve_dir(&old_repo) {
         Ok(p) => p,
         Err(_) => return,
     };
-    let base = dir.join("campaigns").join(old_campaign).join("sessions");
-    let old_path = base.join(format!("{old_seg}.md"));
-    let new_path = base.join(format!("{new_seg}.md"));
+    let old_path = primitives::campaign_dir(&dir, &old_campaign);
+    let new_path = primitives::campaign_dir(&dir, &new_campaign);
     if !old_path.exists() {
         return;
     }
     if new_path.exists() {
         eprintln!(
-            "Session file at {} already exists; not overwriting",
+            "Campaign dir at {} already exists; not overwriting",
             new_path.display()
         );
         return;
     }
     match std::fs::rename(&old_path, &new_path) {
         Ok(()) => eprintln!(
-            "Moved session file: {} -> {}",
+            "Moved campaign dir: {} -> {}",
             old_path.display(),
             new_path.display()
         ),
         Err(e) => eprintln!(
-            "Could not move session file {} -> {}: {e}",
+            "Could not move campaign dir {} -> {}: {e}",
             old_path.display(),
             new_path.display()
         ),
     }
-}
-
-fn parse_three_part(name: &str) -> Option<(&str, &str, &str)> {
-    let mut parts = name.splitn(3, '/');
-    let h = parts.next()?;
-    let c = parts.next()?;
-    let s = parts.next()?;
-    if h.is_empty() || c.is_empty() || s.is_empty() {
-        return None;
-    }
-    Some((h, c, s))
 }
 
 /// Kill a session or all sessions.
@@ -1063,75 +987,46 @@ mod tests {
 
     #[test]
     fn resolve_tool_uses_override() {
-        let config: Config = toml::from_str("[harnesses]").unwrap();
+        let config: Config = toml::from_str("[repos]").unwrap();
         assert_eq!(config.resolve_tool("work", Some("opencode")), "opencode");
     }
 
     #[test]
     fn resolve_tool_falls_back_to_config() {
-        let config: Config = toml::from_str("[harnesses]").unwrap();
+        let config: Config = toml::from_str("[repos]").unwrap();
         assert_eq!(config.resolve_tool("work", None), "claude");
     }
 
     #[test]
-    fn parse_three_part_splits_on_two_slashes() {
+    fn parse_session_splits_two_part() {
         assert_eq!(
-            parse_three_part("tanuki/harness/2026-04-24-foo"),
-            Some(("tanuki", "harness", "2026-04-24-foo"))
+            parse_session("tanuki/in-place-updates"),
+            Some(("tanuki".to_string(), "in-place-updates".to_string()))
         );
     }
 
     #[test]
-    fn parse_three_part_keeps_extra_slashes_in_segment() {
+    fn parse_session_handles_switchboard() {
+        // The switchboard is just a campaign named `switchboard`; no special
+        // collapse/inverse mapping is needed under the two-level model.
         assert_eq!(
-            parse_three_part("tanuki/harness/2026/04/24"),
-            Some(("tanuki", "harness", "2026/04/24"))
+            parse_session("tanuki/switchboard"),
+            Some(("tanuki".to_string(), "switchboard".to_string()))
         );
     }
 
     #[test]
-    fn parse_three_part_rejects_two_part_names() {
-        assert_eq!(parse_three_part("tanuki/harness"), None);
-        assert_eq!(parse_three_part("just-a-name"), None);
+    fn parse_session_rejects_one_part_and_three_part() {
+        assert_eq!(parse_session("solo"), None);
+        // A third slash means the campaign component contains a slash, which
+        // is never valid (campaigns are validated kebab-case).
+        assert_eq!(parse_session("tanuki/factory/in-place-updates"), None);
     }
 
     #[test]
-    fn parse_three_part_rejects_empty_components() {
-        assert_eq!(parse_three_part("/harness/foo"), None);
-        assert_eq!(parse_three_part("tanuki//foo"), None);
-        assert_eq!(parse_three_part("tanuki/harness/"), None);
-    }
-
-    #[test]
-    fn parse_session_slug_splits_three_part() {
-        assert_eq!(
-            parse_session_slug("tanuki/factory/in-place-updates"),
-            Some((
-                "tanuki".to_string(),
-                "factory".to_string(),
-                "in-place-updates".to_string()
-            ))
-        );
-    }
-
-    #[test]
-    fn parse_session_slug_inverts_switchboard_collapse() {
-        // muxr collapses _switchboard/switchboard to a bare <harness>/switchboard
-        // tmux name; the inverse must map it back to the _switchboard campaign.
-        assert_eq!(
-            parse_session_slug("tanuki/switchboard"),
-            Some((
-                "tanuki".to_string(),
-                "_switchboard".to_string(),
-                "switchboard".to_string()
-            ))
-        );
-    }
-
-    #[test]
-    fn parse_session_slug_rejects_other_two_part_and_one_part() {
-        assert_eq!(parse_session_slug("tanuki/harness"), None);
-        assert_eq!(parse_session_slug("solo"), None);
+    fn parse_session_rejects_empty_components() {
+        assert_eq!(parse_session("/campaign"), None);
+        assert_eq!(parse_session("repo/"), None);
     }
 
     #[test]
@@ -1139,49 +1034,41 @@ mod tests {
         // Regression guard for the convergence fix: a resumed launch (restore /
         // upgrade) must carry the composed system prompt AND the campaign's
         // --add-dir paths, not just --name/--resume. The pre-convergence
-        // restore_command/launch_command paths dropped both.
+        // restore_command/launch_command paths dropped both. Layout is now
+        // dir-per-campaign: campaigns/<campaign>/{campaign.md,log.md}.
         let dir = tempfile::tempdir().unwrap();
         let campaign_dir = dir.path().join("campaigns/factory");
-        let sessions = campaign_dir.join("sessions");
-        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::create_dir_all(&campaign_dir).unwrap();
         let extra = dir.path().join("extra-workdir");
         std::fs::create_dir_all(&extra).unwrap();
 
         std::fs::write(
             campaign_dir.join("campaign.md"),
             format!(
-                "---\nsynthesist_trees: []\npaths:\n  - {}\n---\n\n# factory\nbody\n",
+                "---\ncategory: \"\"\nsynthesist_trees: []\npaths:\n  - {}\n---\n\n# factory\nbody\n",
                 extra.display()
             ),
         )
         .unwrap();
         std::fs::write(
-            sessions.join("in-place-updates.md"),
-            "---\ncampaign: factory\nentrypoint: \"\"\n---\n\n# in-place-updates\nsession body\n",
+            campaign_dir.join("log.md"),
+            "---\nentrypoint: \"\"\n---\n\n# factory\nlog body\n",
         )
         .unwrap();
 
         let toml = format!(
-            "[harnesses.nomograph]\ndir = {dir:?}\ncolor = \"#fff\"\n",
+            "[repos.nomograph]\ndir = {dir:?}\ncolor = \"#fff\"\n",
             dir = dir.path()
         );
         let config: Config = toml::from_str(&toml).unwrap();
 
-        let (cmd, session_dir) = compose_launch_command(
-            &config,
-            "nomograph/factory/in-place-updates",
-            Some("ABC123"),
-            None,
-            false,
-        )
-        .unwrap();
+        let (cmd, session_dir) =
+            compose_launch_command(&config, "nomograph/factory", Some("ABC123"), None, false)
+                .unwrap();
 
         // Flag values are shell-quoted, so assert flag and value separately.
         assert!(cmd.contains("--name"));
-        assert!(
-            cmd.contains("nomograph/factory/in-place-updates"),
-            "name missing: {cmd}"
-        );
+        assert!(cmd.contains("nomograph/factory"), "name missing: {cmd}");
         assert!(cmd.contains("--resume"), "resume flag missing: {cmd}");
         assert!(cmd.contains("ABC123"), "resume id missing: {cmd}");
         assert!(
@@ -1194,56 +1081,51 @@ mod tests {
             "campaign path missing: {cmd}"
         );
         assert!(session_dir.join("campaigns/factory/campaign.md").is_file());
+        assert!(session_dir.join("campaigns/factory/log.md").is_file());
     }
 
     #[test]
-    fn compose_launch_command_degrades_when_session_file_missing() {
+    fn compose_launch_command_degrades_when_log_file_missing() {
         // Archived-but-running session: campaign.md (with paths) exists, but
-        // the session .md has been moved to archive/. The relaunch must still
-        // carry the campaign --add-dir paths and a prompt file -- NOT collapse
-        // to bare name+resume -- so an upgrade doesn't strip a live session's
-        // harness rules.
+        // log.md is gone. The relaunch must still carry the campaign --add-dir
+        // paths and a prompt file -- NOT collapse to bare name+resume -- so an
+        // upgrade doesn't strip a live session's harness rules.
         let dir = tempfile::tempdir().unwrap();
         let campaign_dir = dir.path().join("campaigns/factory");
-        std::fs::create_dir_all(campaign_dir.join("sessions")).unwrap();
+        std::fs::create_dir_all(&campaign_dir).unwrap();
         let extra = dir.path().join("extra-workdir");
         std::fs::create_dir_all(&extra).unwrap();
         std::fs::write(
             campaign_dir.join("campaign.md"),
             format!(
-                "---\nsynthesist_trees: []\npaths:\n  - {}\n---\n\n# factory\nbody\n",
+                "---\ncategory: \"\"\nsynthesist_trees: []\npaths:\n  - {}\n---\n\n# factory\nbody\n",
                 extra.display()
             ),
         )
         .unwrap();
-        // Deliberately do NOT write sessions/archived-topic.md.
+        // Deliberately do NOT write log.md.
 
         let toml = format!(
-            "[harnesses.nomograph]\ndir = {dir:?}\ncolor = \"#fff\"\n",
+            "[repos.nomograph]\ndir = {dir:?}\ncolor = \"#fff\"\n",
             dir = dir.path()
         );
         let config: Config = toml::from_str(&toml).unwrap();
 
-        let (cmd, _) = compose_launch_command(
-            &config,
-            "nomograph/factory/archived-topic",
-            Some("ZID9"),
-            None,
-            false,
-        )
-        .expect("missing session file should degrade, not error");
+        let (cmd, _) =
+            compose_launch_command(&config, "nomograph/factory", Some("ZID9"), None, false)
+                .expect("missing log file should degrade, not error");
 
         assert!(cmd.contains("--resume"), "resume flag missing: {cmd}");
         assert!(cmd.contains("ZID9"), "resume id missing: {cmd}");
-        // Harness/campaign-level context survives even though the session
-        // body file is gone:
+        // Repo/campaign-level context survives even though the log body file
+        // is gone:
         assert!(
             cmd.contains("--append-system-prompt-file"),
-            "prompt dropped on missing session: {cmd}"
+            "prompt dropped on missing log: {cmd}"
         );
         assert!(
             cmd.contains("--add-dir") && cmd.contains(&extra.display().to_string()),
-            "campaign --add-dir dropped on missing session: {cmd}"
+            "campaign --add-dir dropped on missing log: {cmd}"
         );
     }
 
@@ -1252,27 +1134,27 @@ mod tests {
         // restore passes continue_fallback=true; with no discovered id the
         // command must re-attach via --continue rather than starting cold.
         let dir = tempfile::tempdir().unwrap();
-        let sessions = dir.path().join("campaigns/factory/sessions");
-        std::fs::create_dir_all(&sessions).unwrap();
+        let campaign_dir = dir.path().join("campaigns/factory");
+        std::fs::create_dir_all(&campaign_dir).unwrap();
         std::fs::write(
-            dir.path().join("campaigns/factory/campaign.md"),
-            "---\nsynthesist_trees: []\npaths: []\n---\n\n# factory\nbody\n",
+            campaign_dir.join("campaign.md"),
+            "---\ncategory: \"\"\nsynthesist_trees: []\npaths: []\n---\n\n# factory\nbody\n",
         )
         .unwrap();
         std::fs::write(
-            sessions.join("topic.md"),
-            "---\ncampaign: factory\nentrypoint: \"\"\n---\n\nbody\n",
+            campaign_dir.join("log.md"),
+            "---\nentrypoint: \"\"\n---\n\nbody\n",
         )
         .unwrap();
 
         let toml = format!(
-            "[harnesses.nomograph]\ndir = {dir:?}\ncolor = \"#fff\"\n",
+            "[repos.nomograph]\ndir = {dir:?}\ncolor = \"#fff\"\n",
             dir = dir.path()
         );
         let config: Config = toml::from_str(&toml).unwrap();
 
         let (cmd, _) =
-            compose_launch_command(&config, "nomograph/factory/topic", None, None, true).unwrap();
+            compose_launch_command(&config, "nomograph/factory", None, None, true).unwrap();
 
         assert!(
             cmd.contains("--continue"),
@@ -1285,95 +1167,84 @@ mod tests {
     }
 
     #[test]
-    fn try_move_session_file_moves_when_source_exists() {
+    fn try_move_session_file_moves_campaign_dir_when_source_exists() {
         let dir = tempfile::tempdir().unwrap();
-        let sessions = dir.path().join("campaigns/lab/sessions");
-        std::fs::create_dir_all(&sessions).unwrap();
-        let old_path = sessions.join("2026-04-24.md");
-        std::fs::write(&old_path, "session body").unwrap();
+        let old_dir = dir.path().join("campaigns/old-campaign");
+        std::fs::create_dir_all(&old_dir).unwrap();
+        std::fs::write(old_dir.join("log.md"), "log body").unwrap();
 
         let toml = format!(
-            "[harnesses.tanuki]\ndir = {dir:?}\ncolor = \"#fff\"\n",
+            "[repos.tanuki]\ndir = {dir:?}\ncolor = \"#fff\"\n",
             dir = dir.path()
         );
         let config: Config = toml::from_str(&toml).unwrap();
 
-        try_move_session_file(
-            &config,
-            "tanuki/lab/2026-04-24",
-            "tanuki/lab/2026-04-24-named",
-        );
+        try_move_session_file(&config, "tanuki/old-campaign", "tanuki/new-campaign");
 
-        assert!(!old_path.exists(), "old should be gone");
-        let new_path = sessions.join("2026-04-24-named.md");
-        assert!(new_path.exists(), "new should exist");
-        assert_eq!(std::fs::read_to_string(new_path).unwrap(), "session body");
+        assert!(!old_dir.exists(), "old dir should be gone");
+        let new_dir = dir.path().join("campaigns/new-campaign");
+        assert!(new_dir.exists(), "new dir should exist");
+        assert_eq!(
+            std::fs::read_to_string(new_dir.join("log.md")).unwrap(),
+            "log body"
+        );
     }
 
     #[test]
     fn try_move_session_file_silent_when_source_missing() {
         let dir = tempfile::tempdir().unwrap();
         let toml = format!(
-            "[harnesses.tanuki]\ndir = {dir:?}\ncolor = \"#fff\"\n",
+            "[repos.tanuki]\ndir = {dir:?}\ncolor = \"#fff\"\n",
             dir = dir.path()
         );
         let config: Config = toml::from_str(&toml).unwrap();
-        // No file at the expected location. Should not panic, should not create anything.
-        try_move_session_file(
-            &config,
-            "tanuki/lab/2026-04-24",
-            "tanuki/lab/2026-04-24-named",
-        );
-        let sessions = dir.path().join("campaigns/lab/sessions");
-        assert!(!sessions.exists() || std::fs::read_dir(&sessions).unwrap().next().is_none());
+        // No campaign dir at the expected location. Should not panic, should
+        // not create anything.
+        try_move_session_file(&config, "tanuki/old-campaign", "tanuki/new-campaign");
+        let campaigns = dir.path().join("campaigns");
+        assert!(!campaigns.exists() || std::fs::read_dir(&campaigns).unwrap().next().is_none());
     }
 
     #[test]
     fn try_move_session_file_refuses_to_overwrite() {
         let dir = tempfile::tempdir().unwrap();
-        let sessions = dir.path().join("campaigns/lab/sessions");
-        std::fs::create_dir_all(&sessions).unwrap();
-        let old_path = sessions.join("2026-04-24.md");
-        let new_path = sessions.join("2026-04-24-named.md");
-        std::fs::write(&old_path, "old").unwrap();
-        std::fs::write(&new_path, "existing").unwrap();
+        let old_dir = dir.path().join("campaigns/old-campaign");
+        let new_dir = dir.path().join("campaigns/new-campaign");
+        std::fs::create_dir_all(&old_dir).unwrap();
+        std::fs::create_dir_all(&new_dir).unwrap();
+        std::fs::write(old_dir.join("log.md"), "old").unwrap();
+        std::fs::write(new_dir.join("log.md"), "existing").unwrap();
 
         let toml = format!(
-            "[harnesses.tanuki]\ndir = {dir:?}\ncolor = \"#fff\"\n",
+            "[repos.tanuki]\ndir = {dir:?}\ncolor = \"#fff\"\n",
             dir = dir.path()
         );
         let config: Config = toml::from_str(&toml).unwrap();
 
-        try_move_session_file(
-            &config,
-            "tanuki/lab/2026-04-24",
-            "tanuki/lab/2026-04-24-named",
-        );
+        try_move_session_file(&config, "tanuki/old-campaign", "tanuki/new-campaign");
 
-        assert!(old_path.exists(), "old must not have been clobbered");
-        assert_eq!(std::fs::read_to_string(new_path).unwrap(), "existing");
+        assert!(old_dir.exists(), "old must not have been clobbered");
+        assert_eq!(
+            std::fs::read_to_string(new_dir.join("log.md")).unwrap(),
+            "existing"
+        );
     }
 
     #[test]
-    fn try_move_session_file_skips_cross_campaign() {
+    fn try_move_session_file_skips_cross_repo() {
         let dir = tempfile::tempdir().unwrap();
-        let sessions = dir.path().join("campaigns/lab/sessions");
-        std::fs::create_dir_all(&sessions).unwrap();
-        let old_path = sessions.join("2026-04-24.md");
-        std::fs::write(&old_path, "x").unwrap();
+        let old_dir = dir.path().join("campaigns/old-campaign");
+        std::fs::create_dir_all(&old_dir).unwrap();
+        std::fs::write(old_dir.join("log.md"), "x").unwrap();
         let toml = format!(
-            "[harnesses.tanuki]\ndir = {dir:?}\ncolor = \"#fff\"\n",
+            "[repos.tanuki]\ndir = {dir:?}\ncolor = \"#fff\"\n",
             dir = dir.path()
         );
         let config: Config = toml::from_str(&toml).unwrap();
 
-        try_move_session_file(
-            &config,
-            "tanuki/lab/2026-04-24",
-            "tanuki/different/2026-04-24",
-        );
+        try_move_session_file(&config, "tanuki/old-campaign", "different/old-campaign");
 
-        // Cross-campaign move is not supported; old file stays.
-        assert!(old_path.exists());
+        // Cross-repo move is not supported; old dir stays.
+        assert!(old_dir.exists());
     }
 }

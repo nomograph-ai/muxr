@@ -11,7 +11,7 @@ use std::fs;
 /// that actually exist on disk for that harness.
 fn campaigns_by_harness(config: &Config) -> BTreeMap<String, Vec<String>> {
     let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for harness_name in config.harnesses.keys() {
+    for harness_name in config.repos.keys() {
         let Ok(dir) = config.resolve_dir(harness_name) else {
             continue;
         };
