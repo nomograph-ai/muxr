@@ -31,7 +31,12 @@ sibling campaigns, not a third name segment. This release absorbs the
   trees/paths into frontmatter. `--dry-run` prints the plan and the
   session-name rewrites; `--keep-archives` preserves stale files. It is
   filesystem-only and git-reversible; the live `state.json`/tmux cutover
-  stays a human-gated step.
+  stays a human-gated step. Collision-safe: when two categories share a
+  session stem (e.g. many `bootstrap.md`), the loser falls back to
+  `<category>-<stem>`; dotted/invalid stems are sanitized
+  (`v0.1-release` -> `v0-1-release`). A category dir is removed ONLY when
+  every file under it migrated cleanly -- any skipped/unexpected file
+  keeps the dir intact so nothing is ever silently deleted.
 - `primitives::list_campaigns` -- campaign discovery (name + category +
   `sharded_from`) shared by the chooser, migration, and shard.
 - `category:` and `sharded_from:` campaign frontmatter fields.

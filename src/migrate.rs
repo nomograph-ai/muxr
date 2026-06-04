@@ -33,8 +33,11 @@ use crate::primitives;
 pub struct PlannedMove {
     /// Old category (the middle segment; leading underscore stripped).
     pub category: String,
-    /// New campaign slug (was the session-file stem).
+    /// New campaign slug. Usually the session-file stem; a collision or an
+    /// invalid raw stem may make it `<category>-<stem>` or a sanitized form.
     pub topic: String,
+    /// The original session-file stem, for the old->new rename display.
+    pub orig_topic: String,
     /// Old `sessions/<topic>.md`.
     pub source: PathBuf,
     /// Old `campaigns/<category>/campaign.md`, for inheriting trees/paths.
@@ -71,6 +74,50 @@ fn is_old_category(dir: &Path) -> bool {
 /// `switchboard`) so the frontmatter value is a clean slug.
 fn normalize_category(name: &str) -> String {
     name.strip_prefix('_').unwrap_or(name).to_string()
+}
+
+/// Coerce a raw session stem into a valid campaign slug, or `None` if it
+/// can't be salvaged. Already-valid stems pass through unchanged; otherwise
+/// non-`[a-z0-9-]` runs collapse to a single hyphen (so `v0.1-release` ->
+/// `v0-1-release`) and the result is re-validated.
+fn normalize_slug(raw: &str) -> Option<String> {
+    if primitives::validate_topic(raw).is_ok() {
+        return Some(raw.to_string());
+    }
+    let mut s: String = raw
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_lowercase() || c.is_ascii_digit() { c } else { '-' })
+        .collect();
+    while s.contains("--") {
+        s = s.replace("--", "-");
+    }
+    let s = s.trim_matches('-').to_string();
+    primitives::validate_topic(&s).is_ok().then_some(s)
+}
+
+/// Resolve the target slug for a session, avoiding collisions. Tries the
+/// (sanitized) stem first; on collision falls back to `<category>-<stem>`;
+/// returns `None` if neither is usable. `taken` is the set of slugs already
+/// claimed (planned or existing on disk).
+fn resolve_slug(
+    stem: &str,
+    category: &str,
+    taken: &std::collections::HashSet<String>,
+    campaigns_dir: &Path,
+) -> Option<String> {
+    let exists = |s: &str| taken.contains(s) || campaigns_dir.join(s).is_dir();
+    if let Some(primary) = normalize_slug(stem)
+        && !exists(&primary)
+    {
+        return Some(primary);
+    }
+    if let Some(prefixed) = normalize_slug(&format!("{category}-{stem}"))
+        && !exists(&prefixed)
+    {
+        return Some(prefixed);
+    }
+    None
 }
 
 /// Build the migration plan for a repo (read-only; makes no changes).
@@ -121,6 +168,11 @@ pub fn plan(repo_dir: &Path) -> Result<Plan> {
         };
         let sessions = cat_path.join("sessions");
 
+        // A category dir is only safe to remove if EVERY file under it migrates
+        // cleanly. Any skip, unexpected dir, or stray non-session file leaves
+        // un-migrated content behind, so we keep the dir and never delete it.
+        let mut cat_clean = true;
+
         for sub in fs::read_dir(&sessions)
             .with_context(|| format!("Failed to read {}", sessions.display()))?
         {
@@ -136,44 +188,53 @@ pub fn plan(repo_dir: &Path) -> Result<Plan> {
                         }
                     }
                 } else {
-                    plan.skips
-                        .push(format!("{cat_name}/sessions/{:?}: unexpected dir", sub.file_name()));
+                    plan.skips.push(format!(
+                        "{cat_name}/sessions/{:?}: unexpected dir -- dir KEPT",
+                        sub.file_name()
+                    ));
+                    cat_clean = false;
                 }
                 continue;
             }
-            // A `<topic>.md` session file.
+            // A `<topic>.md` session file. A stray non-.md file blocks removal.
             if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                plan.skips.push(format!(
+                    "{cat_name}/sessions/{:?}: not a .md session -- dir KEPT",
+                    sub.file_name()
+                ));
+                cat_clean = false;
                 continue;
             }
-            let Some(topic) = path.file_stem().and_then(|s| s.to_str()) else {
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                cat_clean = false;
                 continue;
             };
-            let topic = topic.to_string();
+            let stem = stem.to_string();
 
-            if primitives::validate_topic(&topic).is_err() {
-                plan.skips
-                    .push(format!("{cat_name}/sessions/{topic}.md: '{topic}' is not a valid campaign slug -- skipped"));
-                continue;
+            match resolve_slug(&stem, &category, &planned_targets, &campaigns_dir) {
+                Some(slug) => {
+                    planned_targets.insert(slug.clone());
+                    plan.moves.push(PlannedMove {
+                        category: category.clone(),
+                        topic: slug,
+                        orig_topic: stem,
+                        source: path,
+                        category_md: category_md.clone(),
+                    });
+                }
+                None => {
+                    plan.skips.push(format!(
+                        "{cat_name}/sessions/{stem}.md: no free slug (stem and '{category}-{stem}' both taken/invalid) -- dir KEPT"
+                    ));
+                    cat_clean = false;
+                }
             }
-            // Collision: a campaign with this slug already exists or is already
-            // planned from another category. Never clobber.
-            if planned_targets.contains(&topic) || campaigns_dir.join(&topic).join("log.md").is_file()
-            {
-                plan.skips.push(format!(
-                    "{cat_name}/sessions/{topic}.md: target campaign '{topic}' already exists -- skipped"
-                ));
-                continue;
-            }
-            planned_targets.insert(topic.clone());
-            plan.moves.push(PlannedMove {
-                category: category.clone(),
-                topic,
-                source: path,
-                category_md: category_md.clone(),
-            });
         }
 
-        plan.old_dirs.push(cat_path.clone());
+        // Only schedule removal when nothing was left behind.
+        if cat_clean {
+            plan.old_dirs.push(cat_path.clone());
+        }
     }
 
     Ok(plan)
@@ -297,13 +358,15 @@ pub fn print_plan(repo_dir: &Path, plan: &Plan, opts: &Opts) {
         eprintln!("  (no old-layout categories to migrate)");
     }
     for mv in &plan.moves {
+        let renamed = if mv.topic != mv.orig_topic { "  (slug changed)" } else { "" };
         eprintln!(
-            "  campaigns/{}/sessions/{}.md  ->  campaigns/{}/{{campaign.md,log.md}}  [category: {}]",
-            // old category dir name may have had a leading underscore; show the
-            // normalized category that lands in frontmatter.
-            mv.category, mv.topic, mv.topic, mv.category
+            "  campaigns/{}/sessions/{}.md  ->  campaigns/{}/{{campaign.md,log.md}}  [category: {}]{renamed}",
+            mv.category, mv.orig_topic, mv.topic, mv.category
         );
-        eprintln!("      session rename: <harness>/{}/{}  ->  {}/{}", mv.category, mv.topic, repo, mv.topic);
+        eprintln!(
+            "      session rename: <harness>/{}/{}  ->  {}/{}",
+            mv.category, mv.orig_topic, repo, mv.topic
+        );
     }
     if !plan.archives.is_empty() {
         let verb = if opts.keep_archives {
@@ -480,6 +543,65 @@ mod tests {
         let p = plan(tmp.path()).unwrap();
         assert!(p.moves.is_empty());
         assert!(p.old_dirs.is_empty());
+    }
+
+    #[test]
+    fn colliding_stems_fall_back_to_category_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let c = tmp.path().join("campaigns");
+        // Two categories each with a bootstrap.md -- the classic collision.
+        for cat in ["auth", "blog"] {
+            let s = c.join(cat).join("sessions");
+            fs::create_dir_all(&s).unwrap();
+            fs::write(c.join(cat).join("campaign.md"), "---\npaths: []\n---\n").unwrap();
+            fs::write(s.join("bootstrap.md"), "---\nentrypoint: \"\"\n---\n\n# bootstrap\n").unwrap();
+        }
+        let p = plan(tmp.path()).unwrap();
+        let mut slugs: Vec<&str> = p.moves.iter().map(|m| m.topic.as_str()).collect();
+        slugs.sort();
+        // auth (sorted first) keeps `bootstrap`; blog falls back to `blog-bootstrap`.
+        assert_eq!(slugs, vec!["blog-bootstrap", "bootstrap"]);
+        // Both migrate -- nothing skipped, both dirs removable.
+        assert_eq!(p.moves.len(), 2);
+        assert_eq!(p.old_dirs.len(), 2);
+        assert!(p.skips.is_empty());
+    }
+
+    #[test]
+    fn sanitizes_dotted_invalid_stems() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = tmp.path().join("campaigns").join("rel").join("sessions");
+        fs::create_dir_all(&s).unwrap();
+        fs::write(tmp.path().join("campaigns/rel/campaign.md"), "---\npaths: []\n---\n").unwrap();
+        fs::write(s.join("v0.1-release.md"), "---\nentrypoint: \"\"\n---\n\n# r\n").unwrap();
+        let p = plan(tmp.path()).unwrap();
+        assert_eq!(p.moves.len(), 1);
+        assert_eq!(p.moves[0].topic, "v0-1-release");
+        assert_eq!(p.moves[0].orig_topic, "v0.1-release");
+    }
+
+    #[test]
+    fn category_with_unmigrated_file_is_not_removed() {
+        // SAFETY: a category that still holds an un-migrated file (stray
+        // non-.md, unexpected dir, or unresolvable slug) must NOT be scheduled
+        // for removal, or execute() would delete that content.
+        let tmp = tempfile::tempdir().unwrap();
+        let s = tmp.path().join("campaigns").join("mix").join("sessions");
+        fs::create_dir_all(&s).unwrap();
+        fs::write(tmp.path().join("campaigns/mix/campaign.md"), "---\npaths: []\n---\n").unwrap();
+        fs::write(s.join("good.md"), "---\nentrypoint: \"\"\n---\n\n# good\n").unwrap();
+        fs::write(s.join("notes.txt"), "stray").unwrap(); // not a session
+        let p = plan(tmp.path()).unwrap();
+        // good.md migrates...
+        assert_eq!(p.moves.len(), 1);
+        // ...but the dir is KEPT because notes.txt would otherwise be lost.
+        assert!(p.old_dirs.is_empty(), "dir with a stray file must not be removed");
+        assert!(p.skips.iter().any(|s| s.contains("notes.txt")));
+
+        // And execute proves the stray file survives.
+        execute(tmp.path(), &p, &Opts { dry_run: false, keep_archives: false }).unwrap();
+        assert!(s.join("notes.txt").exists(), "stray file must survive migration");
+        assert!(tmp.path().join("campaigns/good/log.md").is_file());
     }
 
     #[test]
