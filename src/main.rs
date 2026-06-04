@@ -4,6 +4,7 @@ mod claude_status;
 mod completions;
 mod config;
 mod init;
+mod migrate;
 mod primitives;
 mod remote;
 mod state;
@@ -155,6 +156,28 @@ enum Commands {
         #[arg(long)]
         from: Option<String>,
     },
+    /// Migrate a repo's campaigns/ tree from the old 3-level layout
+    /// (campaigns/<category>/sessions/<topic>.md) to the 2-level repo/campaign
+    /// model (campaigns/<campaign>/{campaign.md,log.md}).
+    ///
+    /// Filesystem-only and reversible via git: it does NOT touch state.json or
+    /// live sessions. A real run prints the session-name rewrites for the
+    /// human-gated cutover (save -> migrate -> edit config -> restore).
+    #[command(name = "migrate-layout")]
+    MigrateLayout {
+        /// Repo to migrate (config key). Omit when using --dir.
+        repo: Option<String>,
+        /// Operate directly on this repo dir, bypassing config -- good for
+        /// dry-running on a copy.
+        #[arg(long)]
+        dir: Option<std::path::PathBuf>,
+        /// Show the plan without changing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Move sessions/archive/* into a top-level archive/ instead of dropping.
+        #[arg(long)]
+        keep_archives: bool,
+    },
 
     /// Harness subcommands (dynamic, from config)
     #[command(external_subcommand)]
@@ -218,6 +241,12 @@ fn main() -> Result<()> {
             repo,
             from,
         }) => cmd_shard(&tmux, &campaign, repo.as_deref(), from.as_deref()),
+        Some(Commands::MigrateLayout {
+            repo,
+            dir,
+            dry_run,
+            keep_archives,
+        }) => cmd_migrate_layout(repo.as_deref(), dir.as_deref(), dry_run, keep_archives),
         Some(Commands::External(args)) => {
             let config = Config::load()?;
             cmd_harness_dispatch(&tmux, &config, &args)
@@ -413,6 +442,37 @@ fn cmd_shard(tmux: &Tmux, new: &str, repo: Option<&str>, from: Option<&str>) -> 
     eprintln!();
 
     cmd_open(tmux, &config, &repo_name, new)
+}
+
+/// Migrate a repo's campaigns/ tree to the 2-level layout.
+///
+/// Resolves the repo dir from `--dir` (explicit, config-free) or the config
+/// repo key, builds the plan, prints it, and applies it unless `--dry_run`.
+fn cmd_migrate_layout(
+    repo: Option<&str>,
+    dir: Option<&std::path::Path>,
+    dry_run: bool,
+    keep_archives: bool,
+) -> Result<()> {
+    let repo_dir = match (dir, repo) {
+        (Some(d), _) => d.to_path_buf(),
+        (None, Some(r)) => {
+            let config = Config::load()?;
+            config.resolve_dir(r)?
+        }
+        (None, None) => anyhow::bail!(
+            "Specify a repo to migrate: `muxr migrate-layout <repo>` or `--dir <path>`."
+        ),
+    };
+
+    let plan = migrate::plan(&repo_dir)?;
+    let opts = migrate::Opts {
+        dry_run,
+        keep_archives,
+    };
+    migrate::print_plan(&repo_dir, &plan, &opts);
+    migrate::execute(&repo_dir, &plan, &opts)?;
+    Ok(())
 }
 
 /// Split a tmux session name into `(repo, campaign)`.
@@ -966,10 +1026,15 @@ fn cmd_ls(tmux: &Tmux, active_only: bool) -> Result<()> {
     Ok(())
 }
 
-/// Interactive TUI session switcher.
+/// Interactive TUI chooser: switch to a live session, open a dormant
+/// campaign, or create a new one.
 fn cmd_switch(tmux: &Tmux) -> Result<()> {
     match switcher::run(tmux)? {
         switcher::Action::Switch(session) => tmux.attach(&session),
+        switcher::Action::Open(repo, campaign) => {
+            let config = Config::load()?;
+            cmd_open(tmux, &config, &repo, &campaign)
+        }
         switcher::Action::Kill(session) => {
             tmux.kill_session(&session)?;
             eprintln!("Killed {session}");

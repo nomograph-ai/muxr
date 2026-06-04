@@ -108,8 +108,6 @@ pub fn campaign_file(repo_dir: &Path, campaign: &str) -> Result<PathBuf> {
 /// Lightweight metadata for one campaign on disk, as surfaced by the chooser
 /// (W5), the migration tool (W6), and `shard` (W9). Cheap to build: only the
 /// frontmatter fields the caller groups/sorts on, not the bodies.
-// TODO(W5): drop the allow once the chooser consumes this in the binary.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CampaignInfo {
     /// The campaign slug (its directory name under `campaigns/`).
@@ -127,8 +125,6 @@ pub struct CampaignInfo {
 /// `campaign.md` is skipped (it isn't an onboarded campaign yet). Missing
 /// `campaigns/` is not an error -- a repo with no campaigns yields an empty
 /// list.
-// TODO(W5): drop the allow once the chooser consumes this in the binary.
-#[allow(dead_code)]
 pub fn list_campaigns(repo_dir: &Path) -> Result<Vec<CampaignInfo>> {
     let campaigns_dir = repo_dir.join("campaigns");
     if !campaigns_dir.is_dir() {
