@@ -137,6 +137,24 @@ enum Commands {
     /// an agent learns how to drive muxr. Compiled in, so it always matches
     /// this binary's surface.
     Skill,
+    /// Shard the current campaign into a new sibling campaign.
+    ///
+    /// Run from inside a campaign session, `muxr shard <new>` spins a topic
+    /// that crystallized in the current campaign out into its own sibling,
+    /// inheriting the hub's category and recording `sharded_from` lineage so
+    /// the chooser groups the shard under its hub. Then launches the new
+    /// campaign. Out of session, pass `--repo` and `--from` to name the hub
+    /// explicitly.
+    Shard {
+        /// Slug for the new shard campaign (kebab-case).
+        campaign: String,
+        /// Repo to shard within (default: inferred from the current session).
+        #[arg(long)]
+        repo: Option<String>,
+        /// Hub campaign to shard from (default: the current session's campaign).
+        #[arg(long)]
+        from: Option<String>,
+    },
 
     /// Harness subcommands (dynamic, from config)
     #[command(external_subcommand)]
@@ -195,6 +213,11 @@ fn main() -> Result<()> {
             print!("{}", include_str!("../resources/skill.md"));
             Ok(())
         }
+        Some(Commands::Shard {
+            campaign,
+            repo,
+            from,
+        }) => cmd_shard(&tmux, &campaign, repo.as_deref(), from.as_deref()),
         Some(Commands::External(args)) => {
             let config = Config::load()?;
             cmd_harness_dispatch(&tmux, &config, &args)
@@ -339,6 +362,57 @@ fn cmd_open(tmux: &Tmux, config: &Config, repo_name: &str, campaign: &str) -> Re
     tmux.create_session(&session_name, &session_dir, &tool_cmd)?;
     tmux.attach(&session_name)?;
     Ok(())
+}
+
+/// Shard the current (or named) campaign into a new sibling campaign, then
+/// open it: muxr shard <new> [--repo <repo>] [--from <hub>]
+///
+/// The hub repo/campaign default to the session this is run from (via tmux
+/// `#{session_name}`); `--repo`/`--from` override for out-of-session use. The
+/// new campaign inherits the hub's category and records `sharded_from`
+/// lineage, then launches as `<repo>/<new>`.
+fn cmd_shard(tmux: &Tmux, new: &str, repo: Option<&str>, from: Option<&str>) -> Result<()> {
+    let config = Config::load()?;
+
+    // Resolve hub repo + campaign. Flags win; otherwise infer from the
+    // current tmux session. Running from the control plane (or any non-campaign
+    // session) without flags can't infer a hub -- guide the human to pass them.
+    let (repo_name, hub) = match (repo, from) {
+        (Some(r), Some(f)) => (r.to_string(), f.to_string()),
+        _ => {
+            let current = tmux.display_message("#{session_name}").unwrap_or_default();
+            let inferred = parse_session(&current);
+            match inferred {
+                Some((r, c)) => (
+                    repo.map(str::to_string).unwrap_or(r),
+                    from.map(str::to_string).unwrap_or(c),
+                ),
+                None => anyhow::bail!(
+                    "Cannot infer the hub campaign from here (current session: '{current}').\n\
+                     Run `muxr shard <new>` from inside a campaign session, or pass\n\
+                     `muxr shard <new> --repo <repo> --from <hub>` explicitly."
+                ),
+            }
+        }
+    };
+
+    if new == hub {
+        anyhow::bail!("Shard slug '{new}' is the same as the hub. Pick a distinct slug.");
+    }
+    primitives::validate_topic(new)?;
+
+    if !config.repos.contains_key(&repo_name) {
+        let names = config.all_names().join(", ");
+        anyhow::bail!("Unknown repo: {repo_name}\nKnown: {names}");
+    }
+    let repo_dir = config.resolve_dir(&repo_name)?;
+
+    let new_md = primitives::scaffold_shard(&repo_dir, &hub, new)?;
+    eprintln!();
+    eprintln!("Sharded '{hub}' -> '{new}' ({})", new_md.display());
+    eprintln!();
+
+    cmd_open(tmux, &config, &repo_name, new)
 }
 
 /// Split a tmux session name into `(repo, campaign)`.

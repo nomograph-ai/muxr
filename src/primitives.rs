@@ -23,18 +23,16 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Default, Deserialize)]
 pub struct Campaign {
     /// Classification slug (was the middle segment in the old 3-level name).
-    /// Parsed now; surfaced by the chooser (W5) and inherited by `shard` (W9).
+    /// Surfaced by the chooser (W5) and inherited by `shard` (W9).
     #[serde(default)]
-    #[allow(dead_code)]
     pub category: String,
     #[serde(default)]
     pub synthesist_trees: Vec<String>,
     #[serde(default)]
     pub paths: Vec<String>,
     /// Lineage: the parent campaign this one was sharded out of, if any.
-    /// Parsed now; consumed by the chooser grouping (W5) and `shard` (W9).
+    /// Consumed by the chooser grouping (W5) and `shard` (W9).
     #[serde(default)]
-    #[allow(dead_code)]
     pub sharded_from: Option<String>,
 }
 
@@ -105,6 +103,65 @@ pub fn campaign_file(repo_dir: &Path, campaign: &str) -> Result<PathBuf> {
         anyhow::bail!("Campaign '{campaign}' not found at {}.", path.display());
     }
     Ok(path)
+}
+
+/// Lightweight metadata for one campaign on disk, as surfaced by the chooser
+/// (W5), the migration tool (W6), and `shard` (W9). Cheap to build: only the
+/// frontmatter fields the caller groups/sorts on, not the bodies.
+// TODO(W5): drop the allow once the chooser consumes this in the binary.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CampaignInfo {
+    /// The campaign slug (its directory name under `campaigns/`).
+    pub name: String,
+    /// Classification slug from frontmatter (`category:`), empty if unset.
+    pub category: String,
+    /// Lineage: the hub campaign this was sharded out of, if any.
+    pub sharded_from: Option<String>,
+}
+
+/// Discover every campaign in a repo by scanning `campaigns/*/campaign.md`.
+///
+/// Returns one `CampaignInfo` per campaign directory that has a readable
+/// `campaign.md`, sorted by name. A directory without a parseable
+/// `campaign.md` is skipped (it isn't an onboarded campaign yet). Missing
+/// `campaigns/` is not an error -- a repo with no campaigns yields an empty
+/// list.
+// TODO(W5): drop the allow once the chooser consumes this in the binary.
+#[allow(dead_code)]
+pub fn list_campaigns(repo_dir: &Path) -> Result<Vec<CampaignInfo>> {
+    let campaigns_dir = repo_dir.join("campaigns");
+    if !campaigns_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let mut out = Vec::new();
+    for entry in fs::read_dir(&campaigns_dir)
+        .with_context(|| format!("Failed to read {}", campaigns_dir.display()))?
+    {
+        let entry = entry?;
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let name = match entry.file_name().into_string() {
+            Ok(n) => n,
+            Err(_) => continue, // non-UTF8 dir name -- not a valid slug
+        };
+        let md = campaign_md_path(repo_dir, &name);
+        // Best-effort: a dir without a parseable campaign.md isn't a campaign
+        // we can launch, so skip it rather than failing the whole scan.
+        let Ok((campaign, _body)) = load_campaign(&md) else {
+            continue;
+        };
+        out.push(CampaignInfo {
+            name,
+            category: campaign.category,
+            sharded_from: campaign.sharded_from,
+        });
+    }
+
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
 }
 
 /// Reserved campaign slug for the repo switchboard. One per repo.
@@ -257,6 +314,70 @@ pub fn scaffold_campaign_stub(repo_dir: &Path, campaign: &str) -> Result<PathBuf
     eprintln!();
 
     Ok(campaign_md)
+}
+
+/// Shard a hub campaign into a new sibling campaign.
+///
+/// Creates `campaigns/<new>/` carrying the hub's `category:` (so siblings
+/// classify together) and `sharded_from: <hub>` lineage, and seeds `log.md`
+/// with a pointer back to the hub. This is the primitive behind "use the ncbi
+/// session to scope a problem, then shard it out as its own campaign": depth
+/// that would have been a third name segment becomes a lineage *link* between
+/// two-level siblings.
+///
+/// Errors if the hub has no `campaign.md` (can't shard a non-campaign) or the
+/// new slug already exists (never clobber). The new slug must already be
+/// validated by the caller.
+pub fn scaffold_shard(repo_dir: &Path, hub: &str, new: &str) -> Result<PathBuf> {
+    let hub_md = campaign_md_path(repo_dir, hub);
+    let (hub_campaign, _body) = load_campaign(&hub_md)
+        .with_context(|| format!("Cannot shard: hub campaign '{hub}' not found or unreadable"))?;
+
+    let new_md = campaign_md_path(repo_dir, new);
+    if new_md.exists() {
+        anyhow::bail!(
+            "Campaign '{new}' already exists at {}. Pick a different shard slug.",
+            new_md.display()
+        );
+    }
+
+    let dir = campaign_dir(repo_dir, new);
+    fs::create_dir_all(&dir)?;
+
+    let category = if hub_campaign.category.is_empty() {
+        String::new()
+    } else {
+        hub_campaign.category.clone()
+    };
+    let campaign_content = format!(
+        "---\ncategory: \"{category}\"\nsharded_from: {hub}\nsynthesist_trees: []\npaths: []\n---\n\n\
+         # {new}\n\n\
+         ## What this is\n\
+         Sharded out of the `{hub}` campaign to focus on this specific topic. \
+         Lineage is recorded in `sharded_from` so the chooser groups this \
+         under its hub. (Fill in the specifics on first launch.)\n\n\
+         ## How to behave\n\
+         (pending -- inherited from the {hub} hub; refine for this topic)\n"
+    );
+    fs::write(&new_md, campaign_content)?;
+
+    let log_md = log_md_path(repo_dir, new);
+    let entrypoint = format!(
+        "Sharded from the '{hub}' hub campaign. This session focuses one topic \
+         that crystallized inside {hub}. First action: confirm the scope with \
+         the human in one exchange, write specifics into campaign.md via Edit \
+         (paths, trees), then proceed. The hub remains the place for \
+         cross-cutting {hub} work."
+    );
+    let log_content = format!(
+        "---\nentrypoint: \"{entrypoint}\"\n---\n\n\
+         # {new}\n\n\
+         ## Log\n\
+         Sharded from `{hub}`.\n"
+    );
+    fs::write(&log_md, log_content)?;
+
+    Ok(new_md)
 }
 
 /// Find or scaffold the log file for the given campaign.
@@ -483,6 +604,91 @@ mod tests {
         let body = fs::read_to_string(&log_md).unwrap();
         assert!(body.contains("# retrieval-precision"));
         assert!(body.contains("Bootstrap campaign 'retrieval-precision'"));
+    }
+
+    #[test]
+    fn scaffold_shard_inherits_category_and_sets_lineage() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_dir = tmp.path();
+        // Hub campaign with a category.
+        scaffold_campaign_stub(repo_dir, "ncbi").unwrap();
+        fs::write(
+            campaign_md_path(repo_dir, "ncbi"),
+            "---\ncategory: account\npaths: []\n---\n\n# ncbi\n",
+        )
+        .unwrap();
+
+        scaffold_shard(repo_dir, "ncbi", "ncbi-retrieval").unwrap();
+
+        let (shard, _) = load_campaign(&campaign_md_path(repo_dir, "ncbi-retrieval")).unwrap();
+        assert_eq!(shard.category, "account");
+        assert_eq!(shard.sharded_from.as_deref(), Some("ncbi"));
+
+        let log = fs::read_to_string(log_md_path(repo_dir, "ncbi-retrieval")).unwrap();
+        assert!(log.contains("Sharded from `ncbi`"));
+    }
+
+    #[test]
+    fn scaffold_shard_rejects_missing_hub() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = scaffold_shard(tmp.path(), "ghost", "child")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not found"));
+    }
+
+    #[test]
+    fn scaffold_shard_rejects_existing_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_dir = tmp.path();
+        scaffold_campaign_stub(repo_dir, "hub").unwrap();
+        scaffold_campaign_stub(repo_dir, "taken").unwrap();
+        let err = scaffold_shard(repo_dir, "hub", "taken")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("already exists"));
+    }
+
+    #[test]
+    fn list_campaigns_empty_when_no_campaigns_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(list_campaigns(tmp.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_campaigns_reads_metadata_sorted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_dir = tmp.path();
+        scaffold_campaign_stub(repo_dir, "zeta").unwrap();
+        scaffold_campaign_stub(repo_dir, "alpha").unwrap();
+        // Give alpha a category and a shard lineage.
+        fs::write(
+            campaign_md_path(repo_dir, "alpha"),
+            "---\ncategory: research\nsharded_from: zeta\npaths: []\n---\n\n# alpha\n",
+        )
+        .unwrap();
+
+        let campaigns = list_campaigns(repo_dir).unwrap();
+        assert_eq!(campaigns.len(), 2);
+        // Sorted by name: alpha before zeta.
+        assert_eq!(campaigns[0].name, "alpha");
+        assert_eq!(campaigns[0].category, "research");
+        assert_eq!(campaigns[0].sharded_from.as_deref(), Some("zeta"));
+        assert_eq!(campaigns[1].name, "zeta");
+        assert!(campaigns[1].sharded_from.is_none());
+    }
+
+    #[test]
+    fn list_campaigns_skips_dirs_without_campaign_md() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_dir = tmp.path();
+        scaffold_campaign_stub(repo_dir, "real").unwrap();
+        // A bare dir with no campaign.md is not a campaign.
+        fs::create_dir_all(campaign_dir(repo_dir, "not-a-campaign")).unwrap();
+
+        let campaigns = list_campaigns(repo_dir).unwrap();
+        assert_eq!(campaigns.len(), 1);
+        assert_eq!(campaigns[0].name, "real");
     }
 
     #[test]
