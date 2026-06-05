@@ -266,6 +266,48 @@ author = "andrew@dunn.dev"
 created_at = "2026-06-04"
 sealed_against_tag = "muxr-v2.0.0"
 
+# 2.0 lifecycle probes: the verbs added in the redesign. These check that an
+# agent reaches for the muxr verb rather than a raw/hand-rolled alternative.
+
+[[tasks.tuning]]
+id = "recycle-not-compact-01"
+summary = "Continue a context-full session without compounding compaction drift"
+prompt = "My muxr session has nearly filled its context window and I want to keep working on this campaign cleanly, without the drift that repeated /compact causes. What's the muxr way to do this?"
+# Scores the discoverability of the recycle model. Success = reaching for
+# `muxr recycle` (flush -> exit -> reopen fresh from the pointer), NOT advising
+# `/compact` again or hand-rolling a save+kill+relaunch.
+success_criteria = [
+  "Agent identifies `muxr recycle` (optionally noting it flushes state to log.md then reopens fresh) as the move",
+  "Agent does NOT recommend repeated `/compact`, nor hand-roll a manual exit + relaunch",
+]
+author = "andrew@dunn.dev"
+created_at = "2026-06-04"
+sealed_against_tag = "muxr-v2.0.0"
+
+[[tasks.tuning]]
+id = "reorient-after-compact-01"
+summary = "Re-anchor a session right after a compaction"
+prompt = "I just had to /compact this muxr session and the summary feels lossy -- it's drifting from what we were doing. Re-anchor it to the real current state."
+success_criteria = [
+  "Agent invokes `muxr reorient` (which nudges the session to re-read campaign.md + log.md)",
+  "Agent does NOT try to reconstruct state by scrolling history or guessing",
+]
+author = "andrew@dunn.dev"
+created_at = "2026-06-04"
+sealed_against_tag = "muxr-v2.0.0"
+
+[[tasks.tuning]]
+id = "archive-stale-campaign-01"
+summary = "Get a finished/stale campaign out of the chooser without deleting it"
+prompt = "The campaign 'old-experiment' is done and cluttering my muxr chooser, but I don't want to delete its files. Get it out of the list."
+success_criteria = [
+  "Agent invokes `muxr archive old-experiment` (moves it to campaigns/archive/, reversible)",
+  "Agent does NOT `rm` the campaign directory or hand-move files",
+]
+author = "andrew@dunn.dev"
+created_at = "2026-06-04"
+sealed_against_tag = "muxr-v2.0.0"
+
 # Hold-out tasks intentionally empty in v2. Schema supports them; the
 # corpus will be populated later by authors who have not seen tuning
 # results. Provenance (author, created_at, sealed_against_tag) on each
