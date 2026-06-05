@@ -1294,6 +1294,12 @@ fn cmd_switch(tmux: &Tmux) -> Result<()> {
             }
             cmd_switch(tmux)
         }
+        switcher::Action::Recycle(session) => {
+            if let Err(e) = cmd_recycle(tmux, Some(&session), false, 20) {
+                eprintln!("recycle failed: {e}");
+            }
+            cmd_switch(tmux)
+        }
         switcher::Action::Kill(session) => {
             tmux.kill_session(&session)?;
             eprintln!("Killed {session}");

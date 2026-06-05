@@ -385,6 +385,8 @@ pub enum Action {
     Open(String, String),
     /// Archive a dormant campaign out of the chooser: (repo, campaign).
     Archive(String, String),
+    /// Recycle a live session (serialize -> exit -> reopen fresh): session name.
+    Recycle(String),
     Kill(String),
     Rename(String, String),
     None,
@@ -624,6 +626,19 @@ pub fn run(tmux: &Tmux) -> Result<Action> {
                             entries[idx].repo.clone(),
                             entries[idx].campaign.clone(),
                         ));
+                    }
+                }
+                KeyCode::Char('c') if !filtering => {
+                    // Recycle a live session: serialize -> exit -> reopen fresh.
+                    // Only running rows (the control plane and dormant campaigns
+                    // have no conversation to recycle).
+                    if let Some(selected) = table_state.selected()
+                        && let Some(&idx) = filtered.get(selected)
+                        && entries[idx].kind == Kind::Running
+                    {
+                        terminal::disable_raw_mode()?;
+                        crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+                        return Ok(Action::Recycle(entries[idx].name.clone()));
                     }
                 }
                 KeyCode::Char('a') if !filtering => {
@@ -1056,6 +1071,8 @@ fn draw_footer(
             Span::styled(" new  ", dim),
             Span::styled("x", dim),
             Span::styled(" archive  ", dim),
+            Span::styled("c", dim),
+            Span::styled(" recycle  ", dim),
             Span::styled("r", dim),
             Span::styled(" rename  ", dim),
             Span::styled("d", dim),

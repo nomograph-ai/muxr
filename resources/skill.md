@@ -56,7 +56,8 @@ into one list, grouped by repo:
 - **`+ new campaign…`** per repo — Enter prompts for a slug and creates it.
 
 Shards render indented under their hub. Keys: `j/k` move, `/` filter, `enter`
-switch/open/create, `n` new campaign in the selected repo, `r` rename, `d`
+switch/open/create, `a` show all/active, `n` new campaign, `c` recycle a live
+session (serialize → fresh), `x` archive a dormant campaign, `r` rename, `d`
 kill, `q` quit.
 
 ## Sharding: many topics under one hub
