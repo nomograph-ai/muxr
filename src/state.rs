@@ -297,7 +297,7 @@ impl SavedState {
                 // freshly opened one. If the campaign/session files are gone
                 // (e.g. the session was archived), fall back to a name+resume
                 // relaunch rather than dropping the session.
-                let tool_cmd = match crate::compose_launch_command(
+                let tool_cmd = match crate::session::compose_launch_command(
                     config,
                     &s.name,
                     s.session_id.as_deref(),

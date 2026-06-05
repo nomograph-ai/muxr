@@ -72,3 +72,13 @@ pub fn action(msg: &str) {
 pub fn note(msg: &str) {
     eprintln!("  {}", sgr(DIM, msg));
 }
+
+/// Abbreviate a leading `$HOME` to `~` for compact path display.
+pub fn abbreviate_home(p: &str) -> String {
+    if let Some(home) = std::env::var_os("HOME").and_then(|h| h.into_string().ok())
+        && let Some(rest) = p.strip_prefix(&home)
+    {
+        return format!("~{rest}");
+    }
+    p.to_string()
+}

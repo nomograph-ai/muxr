@@ -78,7 +78,7 @@ pub fn upgrade(
         // dry run surfaces compose errors before any session is touched. Fall
         // back to a bare name+resume relaunch if the campaign/session files
         // can't be composed (e.g. an archived session).
-        let cmd = match crate::compose_launch_command(config, name, Some(&session_id), model, false)
+        let cmd = match crate::session::compose_launch_command(config, name, Some(&session_id), model, false)
         {
             Ok((cmd, _)) => cmd,
             Err(e) => {

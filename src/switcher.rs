@@ -77,23 +77,13 @@ impl Entry {
     }
 }
 
-/// Abbreviate a leading $HOME to `~` for compact path display.
-fn abbreviate_home(p: &str) -> String {
-    if let Some(home) = std::env::var_os("HOME").and_then(|h| h.into_string().ok())
-        && let Some(rest) = p.strip_prefix(&home)
-    {
-        return format!("~{rest}");
-    }
-    p.to_string()
-}
-
 /// The "where am I" detail for a group header: the repo's on-disk path, or a
 /// remote's connection target.
 fn group_detail(config: &Config, name: &str) -> String {
     if config.repos.contains_key(name)
         && let Ok(dir) = config.resolve_dir(name)
     {
-        return abbreviate_home(&dir.to_string_lossy());
+        return crate::ui::abbreviate_home(&dir.to_string_lossy());
     }
     if let Some(r) = config.remote(name) {
         return format!("remote: {}@{} · {} · {}", r.user, r.project, r.zone, r.connect);
