@@ -51,6 +51,18 @@ sibling campaigns, not a third name segment. This release absorbs the
   re-read its `campaign.md` + `log.md` now. The explicit, on-demand companion
   to the standing pointer; run it right after a `/compact` to re-anchor from
   current disk state in seconds instead of a lossy summary.
+- **Resumable dormant campaigns.** Opening a campaign that isn't running now
+  consults the saved state for its last conversation id and relaunches with
+  `--resume`, so it picks up where it left off instead of starting cold.
+  `SavedState` gains `load()` + `session_id_for()`.
+- **`muxr archive <campaign>` + chooser `x`.** Move a campaign to
+  `campaigns/archive/` so it leaves the chooser while staying on disk
+  (reversible); `list_campaigns` skips the archive dir. Refuses a campaign
+  with a live session. Prunes launcher sprawl without deleting anything.
+- **Chooser UX.** Defaults to active/live sessions only (`a` toggles the full
+  launcher view of dormant campaigns + create rows); bold colored per-repo
+  header bands replace thin separators as the large visual differentiator
+  between harnesses.
 - **Fix: `compose_launch_command` now folds the plural
   `append_system_prompt_files`.** It previously read only the singular field
   and left the array set, so launch preferred the raw array and silently
