@@ -53,11 +53,12 @@ struct Entry {
 }
 
 impl Entry {
-    /// A bold colored repo band heading a group.
-    fn header(repo: &str, color: Color) -> Entry {
+    /// A bold colored repo band heading a group. `detail` (the on-disk path
+    /// or remote target) is stashed in `campaign` and rendered beside the name.
+    fn header(repo: &str, color: Color, detail: &str) -> Entry {
         Entry {
             repo: repo.to_string(),
-            campaign: String::new(),
+            campaign: detail.to_string(),
             name: String::new(),
             color,
             activity: 0,
@@ -74,6 +75,30 @@ impl Entry {
     fn selectable(&self) -> bool {
         !self.is_chrome()
     }
+}
+
+/// Abbreviate a leading $HOME to `~` for compact path display.
+fn abbreviate_home(p: &str) -> String {
+    if let Some(home) = std::env::var_os("HOME").and_then(|h| h.into_string().ok())
+        && let Some(rest) = p.strip_prefix(&home)
+    {
+        return format!("~{rest}");
+    }
+    p.to_string()
+}
+
+/// The "where am I" detail for a group header: the repo's on-disk path, or a
+/// remote's connection target.
+fn group_detail(config: &Config, name: &str) -> String {
+    if config.repos.contains_key(name)
+        && let Ok(dir) = config.resolve_dir(name)
+    {
+        return abbreviate_home(&dir.to_string_lossy());
+    }
+    if let Some(r) = config.remote(name) {
+        return format!("remote: {}@{} · {} · {}", r.user, r.project, r.zone, r.connect);
+    }
+    String::new()
 }
 
 fn parse_hex_color(hex: &str) -> Color {
@@ -249,9 +274,11 @@ fn build_entries(config: &Config, tmux: &Tmux) -> Result<Vec<Entry>> {
         entries.push(c);
     }
     for (repo, _, _) in &group_order {
-        // Bold colored repo band: the large visual differentiator per harness.
+        // Bold colored repo band: the large visual differentiator per harness,
+        // with the on-disk path / remote target as a "where am I" reminder.
         let color = parse_hex_color(config.color_for(repo));
-        entries.push(Entry::header(repo, color));
+        let detail = group_detail(config, repo);
+        entries.push(Entry::header(repo, color, &detail));
         if let Some(group_entries) = groups.remove(repo) {
             entries.extend(group_entries);
         }
@@ -755,17 +782,20 @@ fn draw_table(
                     .bg(e.color)
                     .fg(Color::Black)
                     .add_modifier(Modifier::BOLD);
-                let fill = " ".repeat(28);
+                let fill = " ".repeat(40);
                 let cell = |text: String| {
                     Cell::from(Text::from(vec![
                         Line::from(""),
                         Line::from(Span::styled(text, band)),
                     ]))
                 };
+                // Name in the (narrow) first cell; path/remote detail flows into
+                // the wide campaign column. Each is padded so the band bg fills.
                 let label = format!("  ▌ {}{fill}", e.repo.to_uppercase());
+                let detail = format!("{}{fill}", e.campaign);
                 return Row::new(vec![
                     cell(label),
-                    cell(fill.clone()),
+                    cell(detail),
                     cell(fill.clone()),
                     cell(fill.clone()),
                     cell(fill.clone()),
@@ -1126,9 +1156,9 @@ mod tests {
     #[test]
     fn filter_active_only_hides_dormant_and_trims_orphan_header() {
         let entries = vec![
-            Entry::header("work", Color::Gray),            // 0
+            Entry::header("work", Color::Gray, ""),            // 0
             make_entry("work", "api", Kind::Running),      // 1
-            Entry::header("personal", Color::Gray),        // 2
+            Entry::header("personal", Color::Gray, ""),        // 2
             make_entry("personal", "blog", Kind::Dormant), // 3
         ];
         // Default (active-only): personal is all-dormant, so its header is
@@ -1164,10 +1194,10 @@ mod tests {
     fn filter_excludes_stubs_and_keeps_header_with_matches() {
         // Realistic header-delimited layout: a repo band heads each group.
         let entries = vec![
-            Entry::header("work", Color::Gray),            // 0
+            Entry::header("work", Color::Gray, ""),            // 0
             make_entry("work", "api", Kind::Running),      // 1
             make_entry("work", "", Kind::NewStub),         // 2
-            Entry::header("personal", Color::Gray),        // 3
+            Entry::header("personal", Color::Gray, ""),        // 3
             make_entry("personal", "blog", Kind::Dormant), // 4
         ];
         // "blog": only personal/blog matches -> its header kept, work group dropped.
@@ -1188,7 +1218,7 @@ mod tests {
     fn move_selection_skips_headers() {
         let entries = vec![
             make_entry("work", "api", Kind::Running),
-            Entry::header("personal", Color::Gray),
+            Entry::header("personal", Color::Gray, ""),
             make_entry("personal", "blog", Kind::Dormant),
         ];
         let filtered = vec![0, 1, 2];
