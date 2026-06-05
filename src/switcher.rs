@@ -29,8 +29,9 @@ enum Kind {
     /// The "+ new campaign" row for a configured repo. Selecting it prompts
     /// for a slug and launches a fresh campaign.
     NewStub,
-    /// A visual group separator -- not selectable.
-    Separator,
+    /// A bold, colored repo band heading a group -- the large visual
+    /// differentiator between harnesses. Not selectable.
+    Header,
 }
 
 struct Entry {
@@ -52,24 +53,26 @@ struct Entry {
 }
 
 impl Entry {
-    fn separator() -> Entry {
+    /// A bold colored repo band heading a group.
+    fn header(repo: &str, color: Color) -> Entry {
         Entry {
-            repo: String::new(),
+            repo: repo.to_string(),
             campaign: String::new(),
             name: String::new(),
-            color: Color::DarkGray,
+            color,
             activity: 0,
             health: None,
-            kind: Kind::Separator,
+            kind: Kind::Header,
             is_shard: false,
         }
     }
-    fn is_separator(&self) -> bool {
-        self.kind == Kind::Separator
+    /// Structural (non-selectable) chrome: the repo header band.
+    fn is_chrome(&self) -> bool {
+        self.kind == Kind::Header
     }
     /// Selectable rows can be acted on with Enter.
     fn selectable(&self) -> bool {
-        self.kind != Kind::Separator
+        !self.is_chrome()
     }
 }
 
@@ -246,9 +249,9 @@ fn build_entries(config: &Config, tmux: &Tmux) -> Result<Vec<Entry>> {
         entries.push(c);
     }
     for (repo, _, _) in &group_order {
-        if !entries.is_empty() {
-            entries.push(Entry::separator());
-        }
+        // Bold colored repo band: the large visual differentiator per harness.
+        let color = parse_hex_color(config.color_for(repo));
+        entries.push(Entry::header(repo, color));
         if let Some(group_entries) = groups.remove(repo) {
             entries.extend(group_entries);
         }
@@ -294,7 +297,7 @@ fn filter_entries(entries: &[Entry], query: &str, show_all: bool) -> Vec<usize> 
     let mut kept: Vec<usize> = Vec::new();
     for (i, e) in entries.iter().enumerate() {
         let keep = match e.kind {
-            Kind::Separator => true, // provisional; orphans trimmed below
+            Kind::Header => true, // provisional; orphans trimmed below
             Kind::NewStub => show_all && query.is_empty(),
             Kind::Dormant => show_all && (query.is_empty() || entry_matches(e, &q)),
             Kind::Control | Kind::Running => query.is_empty() || entry_matches(e, &q),
@@ -303,28 +306,23 @@ fn filter_entries(entries: &[Entry], query: &str, show_all: bool) -> Vec<usize> 
             kept.push(i);
         }
     }
-    // Trim leading / duplicate / trailing separators left behind by hidden rows.
+    // A repo header precedes its group, so keep a chrome row only if a real
+    // (selectable) row follows it before the next chrome. This hides the repo
+    // band for groups with no visible rows (e.g. a repo with no active session
+    // in the default view) and collapses consecutive headers.
     let mut result: Vec<usize> = Vec::with_capacity(kept.len());
+    let mut pending: Option<usize> = None;
     for idx in kept {
-        if entries[idx].is_separator() {
-            if result
-                .last()
-                .map(|&l| !entries[l].is_separator())
-                .unwrap_or(false)
-            {
-                result.push(idx);
-            }
+        if entries[idx].is_chrome() {
+            pending = Some(idx); // newest chrome; an unjustified earlier one is dropped
         } else {
+            if let Some(c) = pending.take() {
+                result.push(c);
+            }
             result.push(idx);
         }
     }
-    while result
-        .last()
-        .map(|&l| entries[l].is_separator())
-        .unwrap_or(false)
-    {
-        result.pop();
-    }
+    // A trailing pending header (no following real row) is dropped.
     result
 }
 
@@ -550,7 +548,7 @@ pub fn run(tmux: &Tmux) -> Result<Action> {
                                 creating = Some((e.repo.clone(), String::new()));
                                 input_error = None;
                             }
-                            Kind::Separator => {}
+                            Kind::Header => {}
                         }
                     }
                 }
@@ -644,7 +642,7 @@ fn move_selection(entries: &[Entry], filtered: &[usize], state: &mut TableState,
 
     for _ in 0..len {
         if let Some(&idx) = filtered.get(next as usize)
-            && !entries[idx].is_separator()
+            && !entries[idx].is_chrome()
         {
             break;
         }
@@ -654,7 +652,7 @@ fn move_selection(entries: &[Entry], filtered: &[usize], state: &mut TableState,
     state.select(Some(next as usize));
 }
 
-/// Select the nearest non-separator entry at or after `start`.
+/// Select the nearest selectable entry at or after `start`.
 fn select_nearest_real(
     entries: &[Entry],
     filtered: &[usize],
@@ -663,7 +661,7 @@ fn select_nearest_real(
 ) {
     for i in start..filtered.len() {
         if let Some(&idx) = filtered.get(i)
-            && !entries[idx].is_separator()
+            && !entries[idx].is_chrome()
         {
             state.select(Some(i));
             return;
@@ -731,17 +729,24 @@ fn draw_table(
         .map(|&idx| {
             let e = &entries[idx];
 
-            if e.is_separator() {
-                let sep = Style::default().fg(Color::Rgb(50, 50, 55));
+            if e.kind == Kind::Header {
+                // Bold colored band across the whole row -- the large
+                // per-harness differentiator. Black text on the repo color.
+                let band = Style::default()
+                    .bg(e.color)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD);
+                let label = format!("  ▌ {}", e.repo.to_uppercase());
                 return Row::new(vec![
-                    Cell::from(Span::styled("────────────────", sep)),
-                    Cell::from(Span::styled("──────────────────", sep)),
-                    Cell::from(Span::styled("────────", sep)),
-                    Cell::from(Span::styled("─────", sep)),
-                    Cell::from(Span::styled("─────────", sep)),
-                    Cell::from(Span::styled("───────", sep)),
-                    Cell::from(Span::styled("──────", sep)),
+                    Cell::from(Span::styled(label, band)),
+                    Cell::from(Span::styled("", band)),
+                    Cell::from(Span::styled("", band)),
+                    Cell::from(Span::styled("", band)),
+                    Cell::from(Span::styled("", band)),
+                    Cell::from(Span::styled("", band)),
+                    Cell::from(Span::styled("", band)),
                 ])
+                .style(band)
                 .height(1);
             }
 
@@ -1092,17 +1097,18 @@ mod tests {
     }
 
     #[test]
-    fn filter_active_only_hides_dormant_and_trims_orphan_separator() {
+    fn filter_active_only_hides_dormant_and_trims_orphan_header() {
         let entries = vec![
-            make_entry("work", "api", Kind::Running),
-            Entry::separator(),
-            make_entry("personal", "blog", Kind::Dormant),
+            Entry::header("work", Color::Gray),            // 0
+            make_entry("work", "api", Kind::Running),      // 1
+            Entry::header("personal", Color::Gray),        // 2
+            make_entry("personal", "blog", Kind::Dormant), // 3
         ];
-        // Default (active-only): dormant hidden, and the now-trailing
-        // separator is trimmed.
-        assert_eq!(filter_entries(&entries, "", false), vec![0]);
-        // show_all reveals everything.
-        assert_eq!(filter_entries(&entries, "", true), vec![0, 1, 2]);
+        // Default (active-only): personal is all-dormant, so its header is
+        // trimmed; work's header + live session remain.
+        assert_eq!(filter_entries(&entries, "", false), vec![0, 1]);
+        // show_all reveals everything, both bands included.
+        assert_eq!(filter_entries(&entries, "", true), vec![0, 1, 2, 3]);
     }
 
     #[test]
@@ -1128,16 +1134,21 @@ mod tests {
     }
 
     #[test]
-    fn filter_entries_skips_separators_and_stubs() {
+    fn filter_excludes_stubs_and_keeps_header_with_matches() {
+        // Realistic header-delimited layout: a repo band heads each group.
         let entries = vec![
-            make_entry("work", "api", Kind::Running),
-            Entry::separator(),
-            make_entry("work", "", Kind::NewStub),
-            make_entry("personal", "blog", Kind::Dormant),
+            Entry::header("work", Color::Gray),            // 0
+            make_entry("work", "api", Kind::Running),      // 1
+            make_entry("work", "", Kind::NewStub),         // 2
+            Entry::header("personal", Color::Gray),        // 3
+            make_entry("personal", "blog", Kind::Dormant), // 4
         ];
-        // query that would textually match the stub's repo still drops it.
-        assert_eq!(filter_entries(&entries, "blog", true), vec![3]);
-        assert_eq!(filter_entries(&entries, "work", true), vec![0]);
+        // "blog": only personal/blog matches -> its header kept, work group dropped.
+        assert_eq!(filter_entries(&entries, "blog", true), vec![3, 4]);
+        // "api": only work/api matches -> work header kept, personal dropped.
+        assert_eq!(filter_entries(&entries, "api", true), vec![0, 1]);
+        // a stub is never a query match (and its repo text doesn't pull it in).
+        assert_eq!(filter_entries(&entries, "work", true), vec![0, 1]);
     }
 
     #[test]
@@ -1147,17 +1158,17 @@ mod tests {
     }
 
     #[test]
-    fn move_selection_skips_separators() {
+    fn move_selection_skips_headers() {
         let entries = vec![
             make_entry("work", "api", Kind::Running),
-            Entry::separator(),
+            Entry::header("personal", Color::Gray),
             make_entry("personal", "blog", Kind::Dormant),
         ];
         let filtered = vec![0, 1, 2];
         let mut state = TableState::default();
         state.select(Some(0));
         move_selection(&entries, &filtered, &mut state, 1);
-        // Should skip the separator at index 1 and land on 2.
+        // Should skip the header band at index 1 and land on 2.
         assert_eq!(state.selected(), Some(2));
     }
 }

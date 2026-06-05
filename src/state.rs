@@ -137,6 +137,33 @@ pub fn pid_runs_bin(pid: u32, bin: &str) -> bool {
 }
 
 impl SavedState {
+    /// Load the saved state, or an empty state if no file exists yet.
+    pub fn load() -> Result<SavedState> {
+        let path = Config::state_path()?;
+        if !path.exists() {
+            return Ok(SavedState {
+                sessions: Vec::new(),
+            });
+        }
+        let content = std::fs::read_to_string(&path)?;
+        let state: SavedState = serde_json::from_str(&content)
+            .with_context(|| format!("Failed to parse {}", path.display()))?;
+        Ok(state)
+    }
+
+    /// The last-known conversation id recorded for a session name, if any.
+    /// This is what makes a dormant campaign resumable: `muxr save` records
+    /// each running session's id here, and `open` consults it to relaunch
+    /// with `--resume` instead of starting a cold conversation.
+    pub fn session_id_for(name: &str) -> Option<String> {
+        Self::load()
+            .ok()?
+            .sessions
+            .into_iter()
+            .find(|s| s.name == name)
+            .and_then(|s| s.session_id)
+    }
+
     /// Snapshot all current tmux sessions to the state file.
     pub fn save(config: &Config, tmux: &Tmux) -> Result<()> {
         let sessions = tmux.list_sessions()?;

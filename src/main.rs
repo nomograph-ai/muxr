@@ -375,12 +375,23 @@ fn cmd_open(tmux: &Tmux, config: &Config, repo_name: &str, campaign: &str) -> Re
         eprintln!("  entrypoint: {}", log_data.entrypoint);
     }
 
+    // A dormant campaign is resumable: if `muxr save` recorded a conversation
+    // id for this session name, relaunch with --resume so opening it picks up
+    // where it left off instead of starting cold. Fresh/never-run campaigns
+    // have no recorded id and launch new. (Running sessions already attached
+    // above.)
+    let resume_id = state::SavedState::session_id_for(&session_name);
+    if resume_id.is_some() {
+        eprintln!("  resuming previous conversation");
+    }
+
     // Build the launch command through the single composer so that a freshly
     // opened session, a restored session, and an upgraded session all receive
     // an identical command (modulo the resume id). This is the one place that
     // knows how to materialise a session's full launch: harness settings +
     // composed HARNESS/campaign/session prompt + campaign --add-dir paths.
-    let (tool_cmd, session_dir) = compose_launch_command(config, &session_name, None, None, false)?;
+    let (tool_cmd, session_dir) =
+        compose_launch_command(config, &session_name, resume_id.as_deref(), None, false)?;
 
     // Campaign metadata, loaded only for the launch banner below.
     let (campaign_data, _campaign_body) = primitives::load_campaign(&campaign_md)?;
