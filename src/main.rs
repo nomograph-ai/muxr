@@ -196,11 +196,13 @@ enum Commands {
     Recycle {
         /// Session to recycle (e.g. storr/deploy). Omit to use the current one.
         name: Option<String>,
-        /// Skip the `/serialize` nudge (use if you've already serialized).
+        /// Skip the flush-to-disk step; just exit and reopen fresh (use only
+        /// if the pointer/log.md is already current).
         #[arg(long)]
         no_serialize: bool,
-        /// Seconds to wait for `/serialize` to write log.md before exiting.
-        #[arg(long, default_value = "20")]
+        /// Max seconds to wait for the agent to flush + exit before forcing it.
+        /// muxr returns as soon as the agent exits; this is just the safety cap.
+        #[arg(long, default_value = "600")]
         wait: u64,
     },
     /// Migrate a repo's campaigns/ tree from the old 3-level layout
@@ -584,12 +586,15 @@ fn cmd_reorient(tmux: &Tmux, name: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Recycle a session: serialize, graceful exit, reopen FRESH from the pointer.
+/// Recycle a session: flush state to the pointer, then reopen FRESH.
 ///
-/// The deliberate alternative to compact-looping. Sends `/serialize` (so the
-/// pointer in log.md is current), gracefully exits the harness, kills the tmux
-/// session, then recreates it (detached) with a FRESH conversation composed
-/// from campaign.md + log.md. The prior conversation persists on disk and is
+/// The deliberate alternative to compact-looping. Before killing the session,
+/// muxr asks the agent to flush its current state into `log.md` (set a tight
+/// `entrypoint:` + append a dated log entry -- the procedure lives in the muxr
+/// skill, so it never drifts from the layout), then `/exit`. muxr WAITS for the
+/// agent to actually exit -- agent-paced, no wall-clock guess, since a flush can
+/// take a long time -- then reopens the session FRESH (no resume) so it
+/// rehydrates from that pointer. The prior conversation persists on disk and is
 /// recoverable via --resume, so recycling never destroys context.
 fn cmd_recycle(tmux: &Tmux, name: Option<&str>, no_serialize: bool, wait: u64) -> Result<()> {
     let config = Config::load()?;
@@ -600,40 +605,76 @@ fn cmd_recycle(tmux: &Tmux, name: Option<&str>, no_serialize: bool, wait: u64) -
             "Not inside a session. Run `muxr recycle <repo>/<campaign>` from the control plane.",
         )?,
     };
-    let (repo_name, _campaign) = parse_session(&session)
+    let (repo_name, campaign) = parse_session(&session)
         .with_context(|| format!("'{session}' is not a <repo>/<campaign> session"))?;
     if !tmux.session_exists(&session) {
         anyhow::bail!("No live session named {session}.");
     }
+    let repo_dir = config.resolve_dir(&repo_name)?;
+    let log_md = primitives::log_md_path(&repo_dir, &campaign);
 
-    // 1. Serialize so the pointer (log.md) reflects the latest state before we
-    //    drop the conversation. Best-effort: we wait a grace window, but the
-    //    old conversation stays on disk regardless, so an incomplete serialize
-    //    is recoverable.
-    if !no_serialize {
-        eprintln!("  /serialize (waiting {wait}s for the agent to update log.md)...");
-        tmux.send_text(&session, "/serialize")?;
-        std::thread::sleep(std::time::Duration::from_secs(wait));
+    // Locate the harness process so we can wait for the agent's own exit as
+    // the "flush complete" signal, rather than guessing a wall-clock delay.
+    let tool = config.resolve_tool(&repo_name, None);
+    let tool_def = config.tool_for(&tool);
+    let bin = tool_def
+        .as_ref()
+        .map(|t| t.bin.clone())
+        .unwrap_or_else(|| "claude".to_string());
+    let harness_pid = tmux.pane_pid(&session).ok().flatten().and_then(|sp| {
+        state::descendant_pids(sp)
+            .into_iter()
+            .find(|pid| state::pid_runs_bin(*pid, &bin))
+    });
+
+    if no_serialize {
+        // Skip the flush; just exit (caller asserts state is already on disk).
+        let exit_cmd = tool_def
+            .as_ref()
+            .and_then(|t| t.exit_command.clone())
+            .unwrap_or_else(|| "/exit".to_string());
+        ui::action(&format!("recycle {session}: exiting (no flush)"));
+        tmux.send_text(&session, &exit_cmd)?;
+        if let Some(pid) = harness_pid {
+            tool::wait_for_exit(pid, 20);
+        }
+    } else {
+        // Ask the agent to flush its state to the pointer, then exit. The
+        // instruction is self-contained (names the exact log.md path), so it
+        // doesn't depend on any external /serialize command being 2.0-aware.
+        let msg = format!(
+            "[muxr recycle] Before this session is recycled, flush your state to disk so a \
+             fresh session resumes cleanly: update {} -- set the `entrypoint:` frontmatter to a \
+             tight \"where we are / what's next\" line, and append a dated entry under `## Log` \
+             with the current state and open threads. Then run /exit. muxr is waiting for your \
+             exit and will reopen this session FRESH from that pointer. Take as long as you need.",
+            log_md.display()
+        );
+        ui::action(&format!(
+            "recycle {session}: asked the agent to flush -> {} then exit",
+            log_md.display()
+        ));
+        tmux.send_text(&session, &msg)?;
+        ui::note("waiting for the agent to finish and exit (agent-paced)…");
+        match harness_pid {
+            Some(pid) => tool::wait_for_exit(pid, wait as u32),
+            // No detectable harness process: fall back to a short grace.
+            None => std::thread::sleep(std::time::Duration::from_secs(5)),
+        }
     }
 
-    // 2. Graceful harness exit.
-    let tool = config.resolve_tool(&repo_name, None);
-    let exit_cmd = config
-        .tool_for(&tool)
-        .and_then(|t| t.exit_command)
-        .unwrap_or_else(|| "/exit".to_string());
-    eprintln!("  graceful exit ({exit_cmd})");
-    tmux.send_text(&session, &exit_cmd)?;
-    std::thread::sleep(std::time::Duration::from_secs(4));
-
-    // 3. Kill the tmux session for a clean slate, then recreate fresh.
-    tmux.kill_session(&session)?;
+    // Clean slate, then recreate fresh from the (now-updated) pointer.
+    if tmux.session_exists(&session) {
+        tmux.kill_session(&session)?;
+    }
     let (tool_cmd, session_dir) = compose_launch_command(&config, &session, None, None, false)?;
     config.run_pre_create_hooks(&session_dir);
     tmux.create_session(&session, &session_dir, &tool_cmd)?;
 
-    eprintln!("Recycled {session} -- fresh conversation, rehydrated from the pointer.");
-    eprintln!("The previous conversation remains on disk (recoverable via --resume).");
+    ui::ok(&format!(
+        "recycled {session} -- fresh conversation, rehydrated from the pointer"
+    ));
+    ui::note("previous conversation remains on disk (recoverable via --resume)");
     Ok(())
 }
 
@@ -1304,7 +1345,7 @@ fn cmd_switch(tmux: &Tmux) -> Result<()> {
             cmd_switch(tmux)
         }
         switcher::Action::Recycle(session) => {
-            if let Err(e) = cmd_recycle(tmux, Some(&session), false, 20) {
+            if let Err(e) = cmd_recycle(tmux, Some(&session), false, 600) {
                 eprintln!("recycle failed: {e}");
             }
             cmd_switch(tmux)

@@ -56,13 +56,17 @@ sibling campaigns, not a third name segment. This release absorbs the
   `--resume`, so it picks up where it left off instead of starting cold.
   `SavedState` gains `load()` + `session_id_for()`.
 - **`muxr recycle [name]` + `--fresh`** -- the deliberate alternative to
-  compact-looping. `recycle` sends `/serialize`, gracefully exits, then
-  reopens the session as a FRESH conversation that rehydrates from
-  campaign.md + log.md (no compounding compaction drift). `--fresh` on open
-  starts a new conversation instead of resuming. The prior conversation
-  stays on disk (recoverable via `--resume`), so recycling never destroys
-  context -- it trades a degrading summary for a clean read of the
-  authoritative on-disk state.
+  compact-looping. `recycle` asks the live session to flush its state into
+  `log.md` (set a tight `entrypoint:` + append a dated log entry -- the
+  procedure lives in the muxr skill, so it doesn't depend on a drifting
+  external `/serialize` command), then **waits for the agent to actually
+  exit** (agent-paced, no wall-clock guess, since a flush can take a long
+  time) and reopens the session FRESH so it rehydrates from that pointer.
+  `--fresh` on open starts a new conversation instead of resuming. The prior
+  conversation stays on disk (recoverable via `--resume`), so recycling never
+  destroys context -- it trades a degrading summary for a clean read of the
+  authoritative on-disk state. The serialize/flush procedure is documented in
+  the emitted skill.
 - **`muxr archive <campaign>` + chooser `x`.** Move a campaign to
   `campaigns/archive/` so it leaves the chooser while staying on disk
   (reversible); `list_campaigns` skips the archive dir. Refuses a campaign

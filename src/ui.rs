@@ -67,3 +67,8 @@ pub fn warn(msg: &str) {
 pub fn action(msg: &str) {
     eprintln!("{}", sgr(BOLD, &format!("→ {msg}")));
 }
+
+/// Dim aside text, indented.
+pub fn note(msg: &str) {
+    eprintln!("  {}", sgr(DIM, msg));
+}

@@ -260,7 +260,7 @@ pub fn compact(
 }
 
 /// Wait for a process to exit, escalating to SIGKILL after timeout.
-fn wait_for_exit(pid: u32, timeout_secs: u32) {
+pub(crate) fn wait_for_exit(pid: u32, timeout_secs: u32) {
     for _ in 0..timeout_secs * 10 {
         // Check if still alive. Suppress stderr -- when pid is gone,
         // `kill -0` prints "No such process" which is not an error condition

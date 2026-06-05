@@ -95,26 +95,40 @@ muxr reorient            # nudge the current session to re-read its files now
 muxr reorient <repo>/<campaign>
 ```
 
-`/serialize` is how you **move the pointer**: keep `log.md`'s `entrypoint` a
-tight "where we are / what's next" line so a reorient (or a fresh launch)
-re-anchors in seconds.
+### Flushing state to the pointer (the serialize procedure)
+
+"Serializing" is not a special command — it's **flushing your state into the
+pointer so a fresh session can resume**. muxr owns the `log.md` format, so the
+procedure lives here (no separate skill to drift out of sync with the layout).
+To flush, edit `campaigns/<campaign>/log.md`:
+
+1. Set the `entrypoint:` frontmatter to a tight, current "where we are / what's
+   next" line (a few sentences max — this is the pointer a fresh session reads
+   first).
+2. Append a dated entry under `## Log` capturing the current state, decisions,
+   and open threads — the detail that doesn't fit in the entrypoint.
+
+Keep `campaign.md` (the what/how) updated too when conventions change. This
+flush is what makes a fresh launch or a `reorient` re-anchor in seconds.
 
 ### Recycle instead of compact-looping
 
 `/compact` summarizes the conversation, and repeating it compounds loss — the
 working context drifts from the project intention. When a session fills up or
-feels drifted, **recycle** instead: serialize, then reopen a FRESH conversation
-that rehydrates from the durable on-disk pointer.
+feels drifted, **recycle** instead: flush state to the pointer, then reopen a
+FRESH conversation that rehydrates from it.
 
 ```bash
-muxr recycle                     # /serialize -> graceful exit -> reopen fresh from the pointer
+muxr recycle                     # flush -> exit -> reopen fresh from the pointer
 muxr <repo> <campaign> --fresh   # open a new conversation (don't resume)
 ```
 
-The previous conversation stays on disk (recoverable via `--resume`), so
-recycling never destroys context — it trades a degrading summary for a clean
-read of the authoritative state. Default `muxr <repo> <campaign>` resumes the
-last conversation; `--fresh` / `recycle` is the deliberate reset.
+`muxr recycle` asks the live session to flush its state to `log.md` (the
+procedure above), then **waits for the agent to exit** — agent-paced, so a long
+flush is fine — and reopens fresh. The previous conversation stays on disk
+(recoverable via `--resume`), so recycling never destroys context — it trades a
+degrading summary for a clean read of the authoritative state. Default
+`muxr <repo> <campaign>` resumes; `--fresh` / `recycle` is the deliberate reset.
 
 ## Lifecycle verbs
 
