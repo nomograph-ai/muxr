@@ -97,19 +97,24 @@ muxr reorient <repo>/<campaign>
 
 ### Flushing state to the pointer (the serialize procedure)
 
-"Serializing" is not a special command — it's **flushing your state into the
-pointer so a fresh session can resume**. muxr owns the `log.md` format, so the
-procedure lives here (no separate skill to drift out of sync with the layout).
-To flush, edit `campaigns/<campaign>/log.md`:
+"Serializing" is not a special command — it's **flushing your state into every
+locale you've been working in so a fresh session can resume**. muxr owns the
+`log.md` format, so the procedure lives here (no separate skill to drift out of
+sync with the layout). A campaign's work spans repos: the narrative/pointer
+lives in the harness repo, but deliverables land in the **project repos** (the
+campaign's `paths:`). Flush to all of them:
 
-1. Set the `entrypoint:` frontmatter to a tight, current "where we are / what's
-   next" line (a few sentences max — this is the pointer a fresh session reads
-   first).
-2. Append a dated entry under `## Log` capturing the current state, decisions,
-   and open threads — the detail that doesn't fit in the entrypoint.
+1. **The pointer** — edit `campaigns/<campaign>/log.md`: set `entrypoint:` to a
+   tight, current "where we are / what's next" line (the first thing a fresh
+   session reads), and append a dated entry under `## Log` with state,
+   decisions, and open threads.
+2. **Each project repo you touched** — make in-flight work durable: commit it,
+   or record the branch + uncommitted changes + next step in the log entry so
+   nothing is stranded outside the harness repo.
 
 Keep `campaign.md` (the what/how) updated too when conventions change. This
-flush is what makes a fresh launch or a `reorient` re-anchor in seconds.
+multi-locale flush is what makes a fresh launch or a `reorient` re-anchor in
+seconds, across every repo the campaign spans.
 
 ### Recycle instead of compact-looping
 

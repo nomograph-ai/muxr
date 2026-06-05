@@ -612,6 +612,13 @@ fn cmd_recycle(tmux: &Tmux, name: Option<&str>, no_serialize: bool, wait: u64) -
     }
     let repo_dir = config.resolve_dir(&repo_name)?;
     let log_md = primitives::log_md_path(&repo_dir, &campaign);
+    // The campaign's declared work surface: the project repos this session
+    // touches. A flush must reach all of these, not just log.md, or in-flight
+    // work in the project repos is stranded when the session dies.
+    let locales = primitives::campaign_md_path(&repo_dir, &campaign);
+    let locales = primitives::load_campaign(&locales)
+        .map(|(c, _)| c.paths)
+        .unwrap_or_default();
 
     // Locate the harness process so we can wait for the agent's own exit as
     // the "flush complete" signal, rather than guessing a wall-clock delay.
@@ -642,13 +649,25 @@ fn cmd_recycle(tmux: &Tmux, name: Option<&str>, no_serialize: bool, wait: u64) -
         // Ask the agent to flush its state to the pointer, then exit. The
         // instruction is self-contained (names the exact log.md path), so it
         // doesn't depend on any external /serialize command being 2.0-aware.
+        let locale_clause = if locales.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " (2) For each project repo you've touched ({}): make sure in-flight work is \
+                 captured -- commit it, or record the branch + uncommitted changes + next step \
+                 (in the log entry) so nothing is stranded there.",
+                locales.join(", ")
+            )
+        };
         let msg = format!(
-            "[muxr recycle] Before this session is recycled, flush your state to disk so a \
-             fresh session resumes cleanly: update {} -- set the `entrypoint:` frontmatter to a \
-             tight \"where we are / what's next\" line, and append a dated entry under `## Log` \
-             with the current state and open threads. Then run /exit. muxr is waiting for your \
-             exit and will reopen this session FRESH from that pointer. Take as long as you need.",
-            log_md.display()
+            "[muxr recycle] Before this session is recycled, flush your state to ALL the locales \
+             you've been working in so a fresh session resumes cleanly. (1) Update {} -- set the \
+             `entrypoint:` frontmatter to a tight \"where we are / what's next\" line and append a \
+             dated entry under `## Log` with current state and open threads.{} Then run /exit. \
+             muxr is waiting for your exit and will reopen this session FRESH from that pointer. \
+             Take as long as you need.",
+            log_md.display(),
+            locale_clause
         );
         ui::action(&format!(
             "recycle {session}: asked the agent to flush -> {} then exit",
