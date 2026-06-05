@@ -5,7 +5,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState};
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -747,24 +747,32 @@ fn draw_table(
             let e = &entries[idx];
 
             if e.kind == Kind::Header {
-                // Bold colored band across the whole row -- the large
-                // per-harness differentiator. Black text on the repo color.
+                // Two-row band: a blank line for vertical separation between
+                // groups, then a bold colored band across the whole row (the
+                // large per-harness differentiator). The band style lives on
+                // the second line's spans so the first line stays an empty gap.
                 let band = Style::default()
                     .bg(e.color)
                     .fg(Color::Black)
                     .add_modifier(Modifier::BOLD);
-                let label = format!("  ▌ {}", e.repo.to_uppercase());
+                let fill = " ".repeat(28);
+                let cell = |text: String| {
+                    Cell::from(Text::from(vec![
+                        Line::from(""),
+                        Line::from(Span::styled(text, band)),
+                    ]))
+                };
+                let label = format!("  ▌ {}{fill}", e.repo.to_uppercase());
                 return Row::new(vec![
-                    Cell::from(Span::styled(label, band)),
-                    Cell::from(Span::styled("", band)),
-                    Cell::from(Span::styled("", band)),
-                    Cell::from(Span::styled("", band)),
-                    Cell::from(Span::styled("", band)),
-                    Cell::from(Span::styled("", band)),
-                    Cell::from(Span::styled("", band)),
+                    cell(label),
+                    cell(fill.clone()),
+                    cell(fill.clone()),
+                    cell(fill.clone()),
+                    cell(fill.clone()),
+                    cell(fill.clone()),
+                    cell(fill.clone()),
                 ])
-                .style(band)
-                .height(1);
+                .height(2);
             }
 
             if e.kind == Kind::NewStub {
