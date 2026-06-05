@@ -49,7 +49,7 @@ muxr save                                # snapshot before reboot
 muxr restore                             # bring everything back
 ```
 
-Sessions are addressed as `<repo>/<campaign>` — two levels. Campaigns are
+Sessions are addressed as `<repo>/<campaign>` -- two levels. Campaigns are
 kebab-case and name the initiative (e.g. `cicd-stub-fix`,
 `retrieval-precision`); they are not date-stamped. The per-repo switchboard
 is a singleton at `<repo>/switchboard`. When a topic crystallizes inside a
@@ -110,10 +110,10 @@ restarts because tmux keeps them alive.
 `muxr switch` opens an interactive chooser that merges everything you can
 act on into one list, grouped by repo:
 
-- **live sessions** — Enter attaches.
-- **dormant campaigns** (on disk, not running) — Enter launches them, so
+- **live sessions** -- Enter attaches.
+- **dormant campaigns** (on disk, not running) -- Enter launches them, so
   every campaign is visible at a glance, not just the running ones.
-- **`+ new campaign…`** per repo — Enter prompts for a slug and creates it.
+- **`+ new campaign…`** per repo -- Enter prompts for a slug and creates it.
 
 Shards render indented under their hub. Remote sessions appear alongside
 local ones.
@@ -153,7 +153,7 @@ Connections auto-reconnect on drops with exponential backoff.
 muxr composes the launch prompt as repo HARNESS rules + the campaign's
 what/how + a **pointer**: the one-line `entrypoint` plus the absolute paths
 of `campaign.md`/`log.md` and an instruction to re-read them. It does not
-inline the growing log body — a fat prompt is resent every turn (burning the
+inline the growing log body -- a fat prompt is resent every turn (burning the
 context window) and goes stale the moment you `/serialize`.
 
 Because the system prompt survives `/compact`, the re-read instruction
@@ -165,7 +165,7 @@ muxr reorient                   # nudge the current session to re-read its files
 muxr reorient work/api          # or a named session
 ```
 
-Keep `log.md`'s `entrypoint` a tight "where we are / what's next" line —
+Keep `log.md`'s `entrypoint` a tight "where we are / what's next" line --
 that's the pointer you move as work advances.
 
 ## Save and restore

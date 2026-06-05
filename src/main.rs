@@ -623,7 +623,7 @@ fn cmd_retire(tmux: &Tmux, name: &str) -> Result<()> {
     }
 
     // Refresh state.json from post-retire tmux state. Retired sessions no
-    // longer exist in tmux, so `save` naturally excludes them — no manual
+    // longer exist in tmux, so `save` naturally excludes them -- no manual
     // list-editing required.
     if let Some(ref cfg) = config
         && let Err(e) = state::SavedState::save(cfg, tmux)
@@ -636,7 +636,7 @@ fn cmd_retire(tmux: &Tmux, name: &str) -> Result<()> {
 
 /// Wait up to `timeout_secs` for a PID to exit. Escalates to SIGKILL if
 /// the process is still alive when the timeout elapses. Stderr from
-/// `kill -0` polls is suppressed — when the pid is gone the helper prints
+/// `kill -0` polls is suppressed -- when the pid is gone the helper prints
 /// "No such process" which is not an error condition here.
 fn wait_for_pid_exit(pid: u32, timeout_secs: u32) {
     use std::process::Stdio;

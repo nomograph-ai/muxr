@@ -461,7 +461,7 @@ Rewrite `~/.config/muxr/config.toml`:
   `retire all` retires every session. `--keep-worktree` skips the
   worktree deletion for the edge case where you want the tree on disk.
   Main checkouts (`<vertical>/default`) never have their working tree
-  removed — only worktree-shaped contexts.
+  removed -- only worktree-shaped contexts.
 
 ### Fixed
 - Harness-process detection matches against full argv, not just `comm`.

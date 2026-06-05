@@ -13,9 +13,9 @@ muxr manages tmux sessions for AI coding harnesses. A session name is always
 two levels: **`<repo>/<campaign>`** (or `<repo>/switchboard` for the
 per-repo dispatcher). One session per campaign.
 
-- **repo** — a coding repo muxr opens, an entry in the `[repos]` map of
+- **repo** -- a coding repo muxr opens, an entry in the `[repos]` map of
   muxr's config (`~/.config/muxr/config.toml`).
-- **campaign** — a long-lived initiative within that repo, a directory at
+- **campaign** -- a long-lived initiative within that repo, a directory at
   `<repo>/campaigns/<campaign>/` holding `campaign.md` (metadata +
   conventions, with `category:` in frontmatter) and `log.md` (entrypoint +
   dated log). Kebab-case, topical, never a date.
@@ -23,7 +23,7 @@ per-repo dispatcher). One session per campaign.
 ## Intent → command (reach for the verb; don't hand-roll tmux)
 
 muxr owns tmux session lifecycle. For any of these, run the muxr verb
-**directly** — do not first inspect raw `tmux`/files or build your own
+**directly** -- do not first inspect raw `tmux`/files or build your own
 `tmux` script, and do not use raw `tmux` to do the job muxr has a verb for.
 
 | You want to… | Run |
@@ -44,7 +44,7 @@ muxr owns tmux session lifecycle. For any of these, run the muxr verb
 
 The first positional to `muxr` is a **repo key** from `[repos]`, not an
 arbitrary path. The key usually matches the repo's directory name, but the
-config is the source of truth — so **inspect, don't guess**:
+config is the source of truth -- so **inspect, don't guess**:
 
 ```bash
 muxr ls          # active sessions, listed as <repo>/<campaign>
@@ -71,9 +71,9 @@ onboards it conversationally on first launch.
 `muxr switch` opens an interactive TUI that merges everything you can act on
 into one list, grouped by repo:
 
-- **live sessions** — Enter attaches.
-- **dormant campaigns** (on disk, not running) — Enter launches them.
-- **`+ new campaign…`** per repo — Enter prompts for a slug and creates it.
+- **live sessions** -- Enter attaches.
+- **dormant campaigns** (on disk, not running) -- Enter launches them.
+- **`+ new campaign…`** per repo -- Enter prompts for a slug and creates it.
 
 Shards render indented under their hub. Keys: `j/k` move, `/` filter, `enter`
 switch/open/create, `a` show all/active, `n` new campaign, `c` recycle a live
@@ -97,7 +97,7 @@ so the chooser groups it under its hub. Then it launches.
 ## The system prompt is a pointer, not a snapshot
 
 muxr composes the launch system prompt as: repo HARNESS rules + the
-campaign's what/how + a **pointer** — the one-line `entrypoint` plus the
+campaign's what/how + a **pointer** -- the one-line `entrypoint` plus the
 absolute paths of `campaign.md` and `log.md` and a standing instruction to
 re-read them. It deliberately does **not** inline the growing log body: a fat
 prompt is resent every turn (burning the context window that forces
@@ -117,18 +117,18 @@ muxr reorient <repo>/<campaign>
 
 ### Flushing state to the pointer (the serialize procedure)
 
-"Serializing" is not a special command — it's **flushing your state into every
+"Serializing" is not a special command -- it's **flushing your state into every
 locale you've been working in so a fresh session can resume**. muxr owns the
 `log.md` format, so the procedure lives here (no separate skill to drift out of
 sync with the layout). A campaign's work spans repos: the narrative/pointer
 lives in the harness repo, but deliverables land in the **project repos** (the
 campaign's `paths:`). Flush to all of them:
 
-1. **The pointer** — edit `campaigns/<campaign>/log.md`: set `entrypoint:` to a
+1. **The pointer** -- edit `campaigns/<campaign>/log.md`: set `entrypoint:` to a
    tight, current "where we are / what's next" line (the first thing a fresh
    session reads), and append a dated entry under `## Log` with state,
    decisions, and open threads.
-2. **Each project repo you touched** — make in-flight work durable: commit it,
+2. **Each project repo you touched** -- make in-flight work durable: commit it,
    or record the branch + uncommitted changes + next step in the log entry so
    nothing is stranded outside the harness repo.
 
@@ -138,7 +138,7 @@ seconds, across every repo the campaign spans.
 
 ### Recycle instead of compact-looping
 
-`/compact` summarizes the conversation, and repeating it compounds loss — the
+`/compact` summarizes the conversation, and repeating it compounds loss -- the
 working context drifts from the project intention. When a session fills up or
 feels drifted, **recycle** instead: flush state to the pointer, then reopen a
 FRESH conversation that rehydrates from it.
@@ -149,9 +149,9 @@ muxr <repo> <campaign> --fresh   # open a new conversation (don't resume)
 ```
 
 `muxr recycle` asks the live session to flush its state to `log.md` (the
-procedure above), then **waits for the agent to exit** — agent-paced, so a long
-flush is fine — and reopens fresh. The previous conversation stays on disk
-(recoverable via `--resume`), so recycling never destroys context — it trades a
+procedure above), then **waits for the agent to exit** -- agent-paced, so a long
+flush is fine -- and reopens fresh. The previous conversation stays on disk
+(recoverable via `--resume`), so recycling never destroys context -- it trades a
 degrading summary for a clean read of the authoritative state. Default
 `muxr <repo> <campaign>` resumes; `--fresh` / `recycle` is the deliberate reset.
 
@@ -181,13 +181,13 @@ Notes:
   (the two status commands are scoped: `tmux-status`, `claude-status`).
 - `retire` vs `kill`: retire when work is **done** (drops it from restore);
   kill when you want the pane gone but intend to bring it back. `upgrade`
-  relaunches live work onto a new binary — it is not kill+open.
+  relaunches live work onto a new binary -- it is not kill+open.
 
 ## Upgrading running sessions onto a new harness version
 
 When a new harness binary (e.g. a new Claude Code) lands and you want your
 long-running sessions on it without losing their conversations, use
-`muxr upgrade` (alias `muxr migrate`) — NOT raw `tmux`, and don't hand-roll
+`muxr upgrade` (alias `muxr migrate`) -- NOT raw `tmux`, and don't hand-roll
 session discovery:
 
 ```bash
@@ -206,7 +206,7 @@ session (process discovery can't see sibling panes from within one).
 
 ```bash
 muxr save        # before reboot
-muxr restore     # after reboot — recreates each session, resuming in place
+muxr restore     # after reboot -- recreates each session, resuming in place
 ```
 
 The bare `muxr` control-plane shell is intentionally not saved or restored;
