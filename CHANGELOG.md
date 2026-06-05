@@ -55,6 +55,14 @@ sibling campaigns, not a third name segment. This release absorbs the
   consults the saved state for its last conversation id and relaunches with
   `--resume`, so it picks up where it left off instead of starting cold.
   `SavedState` gains `load()` + `session_id_for()`.
+- **`muxr recycle [name]` + `--fresh`** -- the deliberate alternative to
+  compact-looping. `recycle` sends `/serialize`, gracefully exits, then
+  reopens the session as a FRESH conversation that rehydrates from
+  campaign.md + log.md (no compounding compaction drift). `--fresh` on open
+  starts a new conversation instead of resuming. The prior conversation
+  stays on disk (recoverable via `--resume`), so recycling never destroys
+  context -- it trades a degrading summary for a clean read of the
+  authoritative on-disk state.
 - **`muxr archive <campaign>` + chooser `x`.** Move a campaign to
   `campaigns/archive/` so it leaves the chooser while staying on disk
   (reversible); `list_campaigns` skips the archive dir. Refuses a campaign

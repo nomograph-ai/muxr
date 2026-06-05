@@ -140,6 +140,7 @@ top_level = [
   "skill",
   "shard",
   "reorient",
+  "recycle",
   "archive",
   "migrate-layout",
 ]

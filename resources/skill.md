@@ -98,6 +98,23 @@ muxr reorient <repo>/<campaign>
 tight "where we are / what's next" line so a reorient (or a fresh launch)
 re-anchors in seconds.
 
+### Recycle instead of compact-looping
+
+`/compact` summarizes the conversation, and repeating it compounds loss — the
+working context drifts from the project intention. When a session fills up or
+feels drifted, **recycle** instead: serialize, then reopen a FRESH conversation
+that rehydrates from the durable on-disk pointer.
+
+```bash
+muxr recycle                     # /serialize -> graceful exit -> reopen fresh from the pointer
+muxr <repo> <campaign> --fresh   # open a new conversation (don't resume)
+```
+
+The previous conversation stays on disk (recoverable via `--resume`), so
+recycling never destroys context — it trades a degrading summary for a clean
+read of the authoritative state. Default `muxr <repo> <campaign>` resumes the
+last conversation; `--fresh` / `recycle` is the deliberate reset.
+
 ## Lifecycle verbs
 
 | Command | What it does |
@@ -106,6 +123,7 @@ re-anchors in seconds.
 | `muxr switch` | Interactive chooser: switch / open dormant / create |
 | `muxr shard <new>` | Spin a topic out of the current campaign into a sibling |
 | `muxr reorient [name]` | Nudge a session to re-read its campaign.md + log.md (use after `/compact`) |
+| `muxr recycle [name]` | Serialize → exit → reopen FRESH from the pointer (the alternative to compact-looping) |
 | `muxr archive <campaign>` | Move a campaign to `campaigns/archive/` so it leaves the chooser (reversible); `x` in the chooser does the same |
 | `muxr save` | Snapshot all sessions (name, dir, tool, session id) |
 | `muxr restore` | Recreate snapshotted sessions after a reboot, resuming each in place |

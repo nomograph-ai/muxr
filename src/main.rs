@@ -35,6 +35,12 @@ pub(crate) struct Cli {
     #[arg(long, env = "MUXR_TMUX_SERVER")]
     server: Option<String>,
 
+    /// Open a FRESH conversation that rehydrates from the campaign pointer
+    /// (campaign.md + log.md) instead of resuming the last conversation.
+    /// The recycle model: prefer this over compacting a long session.
+    #[arg(long)]
+    fresh: bool,
+
     /// Harness name (e.g., work, personal, oss)
     #[arg(num_args = 0..)]
     args: Vec<String>,
@@ -179,6 +185,23 @@ enum Commands {
         /// Session to reorient (e.g. storr/deploy). Omit to use the current one.
         name: Option<String>,
     },
+    /// Recycle a session: serialize, then reopen it FRESH from the pointer.
+    ///
+    /// The deliberate alternative to compacting a long session. Sends
+    /// `/serialize` (so log.md is current), gracefully exits, then reopens a
+    /// FRESH conversation that rehydrates from campaign.md + log.md -- no
+    /// accumulated compaction drift. The previous conversation stays on disk,
+    /// recoverable via --resume. No NAME uses the current session.
+    Recycle {
+        /// Session to recycle (e.g. storr/deploy). Omit to use the current one.
+        name: Option<String>,
+        /// Skip the `/serialize` nudge (use if you've already serialized).
+        #[arg(long)]
+        no_serialize: bool,
+        /// Seconds to wait for `/serialize` to write log.md before exiting.
+        #[arg(long, default_value = "20")]
+        wait: u64,
+    },
     /// Migrate a repo's campaigns/ tree from the old 3-level layout
     /// (campaigns/<category>/sessions/<topic>.md) to the 2-level repo/campaign
     /// model (campaigns/<campaign>/{campaign.md,log.md}).
@@ -265,6 +288,11 @@ fn main() -> Result<()> {
             from,
         }) => cmd_shard(&tmux, &campaign, repo.as_deref(), from.as_deref()),
         Some(Commands::Reorient { name }) => cmd_reorient(&tmux, name.as_deref()),
+        Some(Commands::Recycle {
+            name,
+            no_serialize,
+            wait,
+        }) => cmd_recycle(&tmux, name.as_deref(), no_serialize, wait),
         Some(Commands::Archive { campaign, repo }) => {
             cmd_archive(&tmux, &campaign, repo.as_deref())
         }
@@ -295,7 +323,7 @@ fn main() -> Result<()> {
                     let config = config.unwrap();
                     cmd_harness_dispatch(&tmux, &config, &cli.args)
                 } else {
-                    cmd_open_dispatch(&tmux, &cli.args, cli.tool.as_deref())
+                    cmd_open_dispatch(&tmux, &cli.args, cli.tool.as_deref(), cli.fresh)
                 }
             }
         }
@@ -321,7 +349,12 @@ fn cmd_control_plane(tmux: &Tmux) -> Result<()> {
 ///
 /// `muxr <repo>` opens the repo switchboard; `muxr <repo> <campaign>` opens
 /// (or scaffolds) that campaign. Remotes are dispatched to their own handler.
-fn cmd_open_dispatch(tmux: &Tmux, args: &[String], tool_override: Option<&str>) -> Result<()> {
+fn cmd_open_dispatch(
+    tmux: &Tmux,
+    args: &[String],
+    tool_override: Option<&str>,
+    fresh: bool,
+) -> Result<()> {
     let config = Config::load()?;
     let name = &args[0];
 
@@ -341,7 +374,7 @@ fn cmd_open_dispatch(tmux: &Tmux, args: &[String], tool_override: Option<&str>) 
     // No campaign arg -> route to the per-repo switchboard.
     if args.get(1).is_none() {
         primitives::scaffold_switchboard(&dir)?;
-        return cmd_open(tmux, &config, name, primitives::SWITCHBOARD);
+        return cmd_open(tmux, &config, name, primitives::SWITCHBOARD, false);
     }
 
     let campaign = args[1].as_str();
@@ -354,7 +387,7 @@ fn cmd_open_dispatch(tmux: &Tmux, args: &[String], tool_override: Option<&str>) 
         );
     }
 
-    cmd_open(tmux, &config, name, campaign)
+    cmd_open(tmux, &config, name, campaign, fresh)
 }
 
 /// Open or attach to a campaign session: muxr <repo> <campaign>
@@ -363,7 +396,13 @@ fn cmd_open_dispatch(tmux: &Tmux, args: &[String], tool_override: Option<&str>) 
 /// if missing. Composes the system prompt from the repo HARNESS prompt +
 /// campaign body + log body; passes each campaign `paths:` entry as
 /// `--add-dir`. The session is named `<repo>/<campaign>`.
-fn cmd_open(tmux: &Tmux, config: &Config, repo_name: &str, campaign: &str) -> Result<()> {
+fn cmd_open(
+    tmux: &Tmux,
+    config: &Config,
+    repo_name: &str,
+    campaign: &str,
+    fresh: bool,
+) -> Result<()> {
     let repo_dir = config.resolve_dir(repo_name)?;
     // If the campaign doesn't exist yet, scaffold a stub so the human can
     // onboard it in-flow. Keeps the launch single-command from the control
@@ -394,9 +433,18 @@ fn cmd_open(tmux: &Tmux, config: &Config, repo_name: &str, campaign: &str) -> Re
     // where it left off instead of starting cold. Fresh/never-run campaigns
     // have no recorded id and launch new. (Running sessions already attached
     // above.)
-    let resume_id = state::SavedState::session_id_for(&session_name);
+    // --fresh forces a new conversation that rehydrates from the pointer
+    // (campaign.md + log.md) rather than resuming -- the recycle model. The
+    // prior conversation stays on disk, recoverable via --resume if needed.
+    let resume_id = if fresh {
+        None
+    } else {
+        state::SavedState::session_id_for(&session_name)
+    };
     if resume_id.is_some() {
         eprintln!("  resuming previous conversation");
+    } else if fresh {
+        eprintln!("  fresh conversation -- rehydrating from the pointer");
     }
 
     // Build the launch command through the single composer so that a freshly
@@ -479,7 +527,7 @@ fn cmd_shard(tmux: &Tmux, new: &str, repo: Option<&str>, from: Option<&str>) -> 
     eprintln!("Sharded '{hub}' -> '{new}' ({})", new_md.display());
     eprintln!();
 
-    cmd_open(tmux, &config, &repo_name, new)
+    cmd_open(tmux, &config, &repo_name, new, false)
 }
 
 /// Re-anchor a live session to its current on-disk campaign + log: muxr reorient [name]
@@ -524,6 +572,59 @@ fn cmd_reorient(tmux: &Tmux, name: Option<&str>) -> Result<()> {
 
     tmux.send_text(&session, &nudge)?;
     eprintln!("Reoriented {session} (nudged to re-read campaign.md + log.md).");
+    Ok(())
+}
+
+/// Recycle a session: serialize, graceful exit, reopen FRESH from the pointer.
+///
+/// The deliberate alternative to compact-looping. Sends `/serialize` (so the
+/// pointer in log.md is current), gracefully exits the harness, kills the tmux
+/// session, then recreates it (detached) with a FRESH conversation composed
+/// from campaign.md + log.md. The prior conversation persists on disk and is
+/// recoverable via --resume, so recycling never destroys context.
+fn cmd_recycle(tmux: &Tmux, name: Option<&str>, no_serialize: bool, wait: u64) -> Result<()> {
+    let config = Config::load()?;
+
+    let session = match name {
+        Some(n) => n.to_string(),
+        None => tmux.current_session().context(
+            "Not inside a session. Run `muxr recycle <repo>/<campaign>` from the control plane.",
+        )?,
+    };
+    let (repo_name, _campaign) = parse_session(&session)
+        .with_context(|| format!("'{session}' is not a <repo>/<campaign> session"))?;
+    if !tmux.session_exists(&session) {
+        anyhow::bail!("No live session named {session}.");
+    }
+
+    // 1. Serialize so the pointer (log.md) reflects the latest state before we
+    //    drop the conversation. Best-effort: we wait a grace window, but the
+    //    old conversation stays on disk regardless, so an incomplete serialize
+    //    is recoverable.
+    if !no_serialize {
+        eprintln!("  /serialize (waiting {wait}s for the agent to update log.md)...");
+        tmux.send_text(&session, "/serialize")?;
+        std::thread::sleep(std::time::Duration::from_secs(wait));
+    }
+
+    // 2. Graceful harness exit.
+    let tool = config.resolve_tool(&repo_name, None);
+    let exit_cmd = config
+        .tool_for(&tool)
+        .and_then(|t| t.exit_command)
+        .unwrap_or_else(|| "/exit".to_string());
+    eprintln!("  graceful exit ({exit_cmd})");
+    tmux.send_text(&session, &exit_cmd)?;
+    std::thread::sleep(std::time::Duration::from_secs(4));
+
+    // 3. Kill the tmux session for a clean slate, then recreate fresh.
+    tmux.kill_session(&session)?;
+    let (tool_cmd, session_dir) = compose_launch_command(&config, &session, None, None, false)?;
+    config.run_pre_create_hooks(&session_dir);
+    tmux.create_session(&session, &session_dir, &tool_cmd)?;
+
+    eprintln!("Recycled {session} -- fresh conversation, rehydrated from the pointer.");
+    eprintln!("The previous conversation remains on disk (recoverable via --resume).");
     Ok(())
 }
 
@@ -1185,7 +1286,7 @@ fn cmd_switch(tmux: &Tmux) -> Result<()> {
         switcher::Action::Switch(session) => tmux.attach(&session),
         switcher::Action::Open(repo, campaign) => {
             let config = Config::load()?;
-            cmd_open(tmux, &config, &repo, &campaign)
+            cmd_open(tmux, &config, &repo, &campaign, false)
         }
         switcher::Action::Archive(repo, campaign) => {
             if let Err(e) = cmd_archive(tmux, &campaign, Some(&repo)) {
