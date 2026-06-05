@@ -143,6 +143,9 @@ pub fn list_campaigns(repo_dir: &Path) -> Result<Vec<CampaignInfo>> {
             Ok(n) => n,
             Err(_) => continue, // non-UTF8 dir name -- not a valid slug
         };
+        if name == ARCHIVE_DIR {
+            continue; // archived campaigns are hidden from the launcher
+        }
         let md = campaign_md_path(repo_dir, &name);
         // Best-effort: a dir without a parseable campaign.md isn't a campaign
         // we can launch, so skip it rather than failing the whole scan.
@@ -163,6 +166,30 @@ pub fn list_campaigns(repo_dir: &Path) -> Result<Vec<CampaignInfo>> {
 /// Reserved campaign slug for the repo switchboard. One per repo.
 /// Launched by `muxr <repo>` with no campaign arg, as `<repo>/switchboard`.
 pub const SWITCHBOARD: &str = "switchboard";
+
+/// Reserved dir under `campaigns/` holding archived campaigns. Skipped by
+/// `list_campaigns`, so archived campaigns vanish from the chooser while
+/// staying on disk -- pruning the launcher without deleting anything.
+pub const ARCHIVE_DIR: &str = "archive";
+
+/// Archive a campaign: move `campaigns/<campaign>/` to
+/// `campaigns/archive/<campaign>/`. Reversible (it's a move), and the chooser
+/// stops listing it. Errors if the campaign is missing or already archived.
+pub fn archive_campaign(repo_dir: &Path, campaign: &str) -> Result<PathBuf> {
+    let src = campaign_dir(repo_dir, campaign);
+    if !src.is_dir() {
+        anyhow::bail!("Campaign '{campaign}' not found at {}.", src.display());
+    }
+    let archive_root = repo_dir.join("campaigns").join(ARCHIVE_DIR);
+    fs::create_dir_all(&archive_root)?;
+    let dest = archive_root.join(campaign);
+    if dest.exists() {
+        anyhow::bail!("'{campaign}' is already archived at {}.", dest.display());
+    }
+    fs::rename(&src, &dest)
+        .with_context(|| format!("Failed to archive {} -> {}", src.display(), dest.display()))?;
+    Ok(dest)
+}
 
 /// Validate a campaign slug. Campaigns name directories and tmux sessions, so
 /// they must be filesystem- and tmux-safe.
@@ -719,6 +746,34 @@ mod tests {
         assert_eq!(campaigns[0].sharded_from.as_deref(), Some("zeta"));
         assert_eq!(campaigns[1].name, "zeta");
         assert!(campaigns[1].sharded_from.is_none());
+    }
+
+    #[test]
+    fn archive_campaign_moves_and_hides_from_listing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_dir = tmp.path();
+        scaffold_campaign_stub(repo_dir, "stale-one").unwrap();
+        scaffold_campaign_stub(repo_dir, "keep-me").unwrap();
+        assert_eq!(list_campaigns(repo_dir).unwrap().len(), 2);
+
+        let dest = archive_campaign(repo_dir, "stale-one").unwrap();
+        assert!(dest.ends_with("campaigns/archive/stale-one"));
+        assert!(dest.join("campaign.md").is_file(), "content moved, not lost");
+        // No longer in the listing; the archive/ dir itself is skipped too.
+        let names: Vec<String> = list_campaigns(repo_dir).unwrap().into_iter().map(|c| c.name).collect();
+        assert_eq!(names, vec!["keep-me"]);
+    }
+
+    #[test]
+    fn archive_campaign_rejects_missing_and_double_archive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_dir = tmp.path();
+        assert!(archive_campaign(repo_dir, "ghost").unwrap_err().to_string().contains("not found"));
+        scaffold_campaign_stub(repo_dir, "x").unwrap();
+        archive_campaign(repo_dir, "x").unwrap();
+        // re-creating x then archiving again collides with the archived copy.
+        scaffold_campaign_stub(repo_dir, "x").unwrap();
+        assert!(archive_campaign(repo_dir, "x").unwrap_err().to_string().contains("already archived"));
     }
 
     #[test]

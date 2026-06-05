@@ -356,6 +356,8 @@ pub enum Action {
     /// Launch a campaign (existing dormant one, or a freshly named new one):
     /// (repo, campaign).
     Open(String, String),
+    /// Archive a dormant campaign out of the chooser: (repo, campaign).
+    Archive(String, String),
     Kill(String),
     Rename(String, String),
     None,
@@ -580,6 +582,21 @@ pub fn run(tmux: &Tmux) -> Result<Action> {
                     {
                         creating = Some((entries[idx].repo.clone(), String::new()));
                         input_error = None;
+                    }
+                }
+                KeyCode::Char('x') if !filtering => {
+                    // Archive a dormant campaign out of the chooser (reversible).
+                    // Only dormant rows -- live work must be retired/killed first.
+                    if let Some(selected) = table_state.selected()
+                        && let Some(&idx) = filtered.get(selected)
+                        && entries[idx].kind == Kind::Dormant
+                    {
+                        terminal::disable_raw_mode()?;
+                        crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+                        return Ok(Action::Archive(
+                            entries[idx].repo.clone(),
+                            entries[idx].campaign.clone(),
+                        ));
                     }
                 }
                 KeyCode::Char('a') if !filtering => {
@@ -999,6 +1016,8 @@ fn draw_footer(
             Span::styled(enter_hint, dim),
             Span::styled("n", dim),
             Span::styled(" new  ", dim),
+            Span::styled("x", dim),
+            Span::styled(" archive  ", dim),
             Span::styled("r", dim),
             Span::styled(" rename  ", dim),
             Span::styled("d", dim),

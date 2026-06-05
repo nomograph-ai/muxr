@@ -156,6 +156,17 @@ enum Commands {
         #[arg(long)]
         from: Option<String>,
     },
+    /// Archive a campaign: move it to campaigns/archive/ so it drops out of
+    /// the chooser while staying on disk (reversible). Prunes the launcher
+    /// sprawl without deleting anything. Refuses a campaign with a live
+    /// session. No --repo infers the repo from the current session.
+    Archive {
+        /// Campaign slug to archive.
+        campaign: String,
+        /// Repo it lives in (default: inferred from the current session).
+        #[arg(long)]
+        repo: Option<String>,
+    },
     /// Re-anchor a live session to its current on-disk state.
     ///
     /// Reads the session's campaign + log paths and injects a one-line nudge
@@ -254,6 +265,9 @@ fn main() -> Result<()> {
             from,
         }) => cmd_shard(&tmux, &campaign, repo.as_deref(), from.as_deref()),
         Some(Commands::Reorient { name }) => cmd_reorient(&tmux, name.as_deref()),
+        Some(Commands::Archive { campaign, repo }) => {
+            cmd_archive(&tmux, &campaign, repo.as_deref())
+        }
         Some(Commands::MigrateLayout {
             repo,
             dir,
@@ -510,6 +524,45 @@ fn cmd_reorient(tmux: &Tmux, name: Option<&str>) -> Result<()> {
 
     tmux.send_text(&session, &nudge)?;
     eprintln!("Reoriented {session} (nudged to re-read campaign.md + log.md).");
+    Ok(())
+}
+
+/// Archive a campaign out of the chooser: muxr archive <campaign> [--repo <repo>]
+///
+/// Resolves the repo (flag or current session), refuses if the campaign has a
+/// live tmux session (don't archive running work), then moves it under
+/// campaigns/archive/. Reversible.
+fn cmd_archive(tmux: &Tmux, campaign: &str, repo: Option<&str>) -> Result<()> {
+    let config = Config::load()?;
+
+    let repo_name = match repo {
+        Some(r) => r.to_string(),
+        None => {
+            let current = tmux.display_message("#{session_name}").unwrap_or_default();
+            match parse_session(&current) {
+                Some((r, _)) => r,
+                None => anyhow::bail!(
+                    "Cannot infer the repo from here. Pass `--repo <repo>` (or run from a session)."
+                ),
+            }
+        }
+    };
+
+    if !config.repos.contains_key(&repo_name) {
+        let names = config.all_names().join(", ");
+        anyhow::bail!("Unknown repo: {repo_name}\nKnown: {names}");
+    }
+
+    let session_name = format!("{repo_name}/{campaign}");
+    if tmux.session_exists(&session_name) {
+        anyhow::bail!(
+            "{session_name} has a live session -- retire or kill it before archiving."
+        );
+    }
+
+    let repo_dir = config.resolve_dir(&repo_name)?;
+    let dest = primitives::archive_campaign(&repo_dir, campaign)?;
+    eprintln!("Archived {repo_name}/{campaign} -> {}", dest.display());
     Ok(())
 }
 
@@ -1133,6 +1186,12 @@ fn cmd_switch(tmux: &Tmux) -> Result<()> {
         switcher::Action::Open(repo, campaign) => {
             let config = Config::load()?;
             cmd_open(tmux, &config, &repo, &campaign)
+        }
+        switcher::Action::Archive(repo, campaign) => {
+            if let Err(e) = cmd_archive(tmux, &campaign, Some(&repo)) {
+                eprintln!("archive failed: {e}");
+            }
+            cmd_switch(tmux)
         }
         switcher::Action::Kill(session) => {
             tmux.kill_session(&session)?;

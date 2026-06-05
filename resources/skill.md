@@ -106,6 +106,7 @@ re-anchors in seconds.
 | `muxr switch` | Interactive chooser: switch / open dormant / create |
 | `muxr shard <new>` | Spin a topic out of the current campaign into a sibling |
 | `muxr reorient [name]` | Nudge a session to re-read its campaign.md + log.md (use after `/compact`) |
+| `muxr archive <campaign>` | Move a campaign to `campaigns/archive/` so it leaves the chooser (reversible); `x` in the chooser does the same |
 | `muxr save` | Snapshot all sessions (name, dir, tool, session id) |
 | `muxr restore` | Recreate snapshotted sessions after a reboot, resuming each in place |
 | `muxr upgrade [name]` (alias `migrate`) | Move running sessions onto the freshly installed binary, in place. `--dry-run`, `--tool`, `--model`. Omit name for all |
