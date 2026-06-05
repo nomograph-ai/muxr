@@ -715,16 +715,25 @@ impl Config {
         }
         let path = self.hooks_path();
         for cmd in &self.hooks.pre_create {
-            eprintln!("  hook: {cmd}");
+            // Capture output so a hook's raw stdout (kit/rune sync) doesn't
+            // dump into the launch. Show a clean status line; reveal the
+            // captured output only when the hook fails.
             let result = std::process::Command::new("sh")
                 .args(["-c", cmd])
                 .current_dir(dir)
                 .env("PATH", &path)
-                .status();
+                .output();
             match result {
-                Ok(s) if !s.success() => eprintln!("  hook warning: {cmd} exited {s}"),
-                Err(e) => eprintln!("  hook warning: {cmd} failed: {e}"),
-                _ => {}
+                Ok(o) if o.status.success() => crate::ui::ok(&format!("setup: {cmd}")),
+                Ok(o) => {
+                    crate::ui::warn(&format!("setup: {cmd} exited {}", o.status));
+                    let out = String::from_utf8_lossy(&o.stdout);
+                    let err = String::from_utf8_lossy(&o.stderr);
+                    for line in out.lines().chain(err.lines()) {
+                        eprintln!("      {line}");
+                    }
+                }
+                Err(e) => crate::ui::warn(&format!("setup: {cmd} failed: {e}")),
             }
         }
     }

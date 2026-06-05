@@ -11,6 +11,7 @@ mod state;
 mod switcher;
 mod tmux;
 mod tool;
+mod ui;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -416,7 +417,7 @@ fn cmd_open(
     let session_name = format!("{repo_name}/{campaign}");
 
     if tmux.session_exists(&session_name) {
-        eprintln!("Attaching to {session_name}");
+        ui::action(&format!("attaching to {session_name}"));
         tmux.attach(&session_name)?;
         return Ok(());
     }
@@ -424,59 +425,67 @@ fn cmd_open(
     let tool = config.resolve_tool(repo_name, None);
 
     let (log_data, _log_body) = primitives::load_log(&log_path)?;
-    if !log_data.entrypoint.is_empty() {
-        eprintln!("  entrypoint: {}", log_data.entrypoint);
-    }
 
     // A dormant campaign is resumable: if `muxr save` recorded a conversation
     // id for this session name, relaunch with --resume so opening it picks up
-    // where it left off instead of starting cold. Fresh/never-run campaigns
-    // have no recorded id and launch new. (Running sessions already attached
-    // above.)
-    // --fresh forces a new conversation that rehydrates from the pointer
-    // (campaign.md + log.md) rather than resuming -- the recycle model. The
-    // prior conversation stays on disk, recoverable via --resume if needed.
+    // where it left off. --fresh forces a new conversation that rehydrates from
+    // the pointer (campaign.md + log.md) -- the recycle model; the prior
+    // conversation stays on disk, recoverable via --resume.
     let resume_id = if fresh {
         None
     } else {
         state::SavedState::session_id_for(&session_name)
     };
-    if resume_id.is_some() {
-        eprintln!("  resuming previous conversation");
-    } else if fresh {
-        eprintln!("  fresh conversation -- rehydrating from the pointer");
-    }
 
-    // Build the launch command through the single composer so that a freshly
-    // opened session, a restored session, and an upgraded session all receive
-    // an identical command (modulo the resume id). This is the one place that
-    // knows how to materialise a session's full launch: harness settings +
-    // composed HARNESS/campaign/session prompt + campaign --add-dir paths.
+    // Build the launch command through the single composer (the one place that
+    // materialises harness settings + composed prompt + campaign --add-dirs).
     let (tool_cmd, session_dir) =
         compose_launch_command(config, &session_name, resume_id.as_deref(), None, false)?;
-
-    // Campaign metadata, loaded only for the launch banner below.
     let (campaign_data, _campaign_body) = primitives::load_campaign(&campaign_md)?;
+
+    // A single coherent launch card instead of scattered lines.
+    ui::band(&session_name, "", config.color_for(repo_name));
+    ui::detail("dir", &abbreviate_home(&session_dir.to_string_lossy()));
+    let mode = if resume_id.is_some() {
+        " · resuming"
+    } else if fresh {
+        " · fresh"
+    } else {
+        ""
+    };
+    ui::detail("tool", &format!("{tool}{mode}"));
+    if !campaign_data.synthesist_trees.is_empty() {
+        ui::detail("trees", &campaign_data.synthesist_trees.join(", "));
+    }
+    if !campaign_data.paths.is_empty() {
+        ui::detail("paths", &format!("+{} --add-dir", campaign_data.paths.len()));
+    }
+    let ep = log_data.entrypoint.lines().next().unwrap_or("").trim();
+    if !ep.is_empty() {
+        let ep = if ep.chars().count() > 72 {
+            format!("{}…", ep.chars().take(72).collect::<String>())
+        } else {
+            ep.to_string()
+        };
+        ui::detail("entry", &ep);
+    }
 
     config.run_pre_create_hooks(&session_dir);
 
-    eprintln!(
-        "Creating {session_name} in {} ({})",
-        session_dir.display(),
-        tool
-    );
-    if !campaign_data.synthesist_trees.is_empty() {
-        eprintln!(
-            "  synthesist trees: {}",
-            campaign_data.synthesist_trees.join(", ")
-        );
-    }
-    if !campaign_data.paths.is_empty() {
-        eprintln!("  paths: {} added as --add-dir", campaign_data.paths.len());
-    }
+    ui::action("launching…");
     tmux.create_session(&session_name, &session_dir, &tool_cmd)?;
     tmux.attach(&session_name)?;
     Ok(())
+}
+
+/// Abbreviate a leading $HOME to `~` for compact path display.
+fn abbreviate_home(p: &str) -> String {
+    if let Some(home) = std::env::var_os("HOME").and_then(|h| h.into_string().ok())
+        && let Some(rest) = p.strip_prefix(&home)
+    {
+        return format!("~{rest}");
+    }
+    p.to_string()
 }
 
 /// Shard the current (or named) campaign into a new sibling campaign, then
