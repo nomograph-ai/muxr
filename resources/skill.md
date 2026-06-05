@@ -20,6 +20,26 @@ per-repo dispatcher). One session per campaign.
   conventions, with `category:` in frontmatter) and `log.md` (entrypoint +
   dated log). Kebab-case, topical, never a date.
 
+## Intent → command (reach for the verb; don't hand-roll tmux)
+
+muxr owns tmux session lifecycle. For any of these, run the muxr verb
+**directly** — do not first inspect raw `tmux`/files or build your own
+`tmux` script, and do not use raw `tmux` to do the job muxr has a verb for.
+
+| You want to… | Run |
+|---|---|
+| see what's running | `muxr ls` |
+| **save layout before a reboot** | `muxr save` (never hand-roll a `tmux` save script) |
+| bring it back after reboot | `muxr restore` |
+| finish a session for good | `muxr retire <name>` |
+| open / resume a campaign | `muxr <repo> <campaign>` |
+| pick one interactively | `muxr switch` |
+| continue cleanly after a full context | `muxr recycle` (not repeated `/compact`) |
+| re-anchor after a `/compact` | `muxr reorient` |
+| spin a topic off | `muxr shard <new>` |
+| declutter a stale campaign | `muxr archive <campaign>` |
+| move a new harness binary | `muxr upgrade` |
+
 ## The one thing to get right: the first arg is a repo *key*
 
 The first positional to `muxr` is a **repo key** from `[repos]`, not an
