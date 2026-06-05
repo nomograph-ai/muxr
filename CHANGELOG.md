@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [2.0.0] (unreleased)
+## [2.0.0] (2026-06-04)
 
 **Breaking: the repo/campaign redesign.** Sessions are now addressed as
 two levels, `<repo>/<campaign>`, instead of three
