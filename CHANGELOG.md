@@ -2,7 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
-## [2.0.0] (2026-06-04)
+## [2.0.1] (2026-06-04)
+
+First published 2.0 release. Identical in features to 2.0.0 below; the
+v2.0.0 tag failed the `readme-shape` CI gate (Unicode em dashes, a house
+rule) before building or publishing, and tags are immutable, so the fix
+ships as 2.0.1.
+
+### Fixed
+- Replaced Unicode em dashes with `--` across README, the emitted skill,
+  CHANGELOG, and src strings/comments. No behavior change.
+
+## [2.0.0] (2026-06-04, unpublished -- superseded by 2.0.1)
 
 **Breaking: the repo/campaign redesign.** Sessions are now addressed as
 two levels, `<repo>/<campaign>`, instead of three
