@@ -716,8 +716,11 @@ impl Config {
         let path = self.hooks_path();
         for cmd in &self.hooks.pre_create {
             // Capture output so a hook's raw stdout (kit/rune sync) doesn't
-            // dump into the launch. Show a clean status line; reveal the
-            // captured output only when the hook fails.
+            // dump into the launch. Show a transient "running" line first so
+            // a slow sync reads as progress, not a hang; the ok/warn result
+            // overwrites it. Reveal the captured output only when the hook
+            // fails.
+            crate::ui::step_start(&format!("setup: {cmd}"));
             let result = std::process::Command::new("sh")
                 .args(["-c", cmd])
                 .current_dir(dir)

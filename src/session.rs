@@ -134,7 +134,10 @@ pub(crate) fn cmd_open(
 
     config.run_pre_create_hooks(&session_dir);
 
-    ui::action("launching…");
+    // Name the tool and flush before the blocking create+attach so the
+    // last thing on screen is a clear state line, not a silent pause
+    // before tmux takes over.
+    ui::action(&format!("launching {tool}…"));
     tmux.create_session(&session_name, &session_dir, &tool_cmd)?;
     tmux.attach(&session_name)?;
     Ok(())
