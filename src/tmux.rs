@@ -11,6 +11,21 @@ pub struct Tmux {
     server: Option<String>,
 }
 
+/// Sanitize a muxr session name into a valid synthesist asserter segment.
+/// Synthesist (v3) rejects path-unsafe asserter segments, so map anything
+/// outside `[A-Za-z0-9_-]` (notably the `/` in `<repo>/<campaign>`) to `-`.
+fn sanitize_session(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
 impl Tmux {
     pub fn new(server: Option<String>) -> Self {
         Self { server }
@@ -62,9 +77,18 @@ impl Tmux {
     pub fn create_session(&self, name: &str, dir: &Path, tool_cmd: &str) -> Result<()> {
         let dir_str = dir.to_str().context("Invalid directory path")?;
 
+        // Bind a synthesist session to this muxr session: claims written
+        // inside it auto-attribute without a --session flag. Value = the
+        // session name sanitized to a valid asserter segment. Requires
+        // tmux 3.2+ (new-session -e); a per-campaign launch override can
+        // refine this later.
+        let synth_env = format!("SYNTHESIST_SESSION={}", sanitize_session(name));
+
         let status = self
             .command()
-            .args(["new-session", "-d", "-s", name, "-c", dir_str])
+            .args([
+                "new-session", "-d", "-s", name, "-c", dir_str, "-e", &synth_env,
+            ])
             .status()
             .context("Failed to create tmux session")?;
 
