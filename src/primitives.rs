@@ -19,6 +19,8 @@ use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::config::Layout;
+
 /// Campaign frontmatter (`campaigns/<campaign>/campaign.md`).
 #[derive(Debug, Default, Deserialize)]
 pub struct Campaign {
@@ -60,20 +62,21 @@ fn split_frontmatter(content: &str) -> Option<(&str, &str)> {
     Some((fm, body))
 }
 
-/// `<repo-dir>/campaigns/<campaign>/`.
-pub fn campaign_dir(repo_dir: &Path, campaign: &str) -> PathBuf {
-    repo_dir.join("campaigns").join(campaign)
+impl crate::config::Layout {
+    /// `<repo-dir>/<campaigns_dir>/<campaign>/`.
+    pub fn campaign_dir(&self, repo_dir: &Path, campaign: &str) -> PathBuf {
+        repo_dir.join(&self.campaigns_dir).join(campaign)
+    }
+    /// `<repo-dir>/<campaigns_dir>/<campaign>/<campaign_file>`.
+    pub fn campaign_md_path(&self, repo_dir: &Path, campaign: &str) -> PathBuf {
+        self.campaign_dir(repo_dir, campaign).join(&self.campaign_file)
+    }
+    /// `<repo-dir>/<campaigns_dir>/<campaign>/<log_file>`.
+    pub fn log_md_path(&self, repo_dir: &Path, campaign: &str) -> PathBuf {
+        self.campaign_dir(repo_dir, campaign).join(&self.log_file)
+    }
 }
 
-/// `<repo-dir>/campaigns/<campaign>/campaign.md`.
-pub fn campaign_md_path(repo_dir: &Path, campaign: &str) -> PathBuf {
-    campaign_dir(repo_dir, campaign).join("campaign.md")
-}
-
-/// `<repo-dir>/campaigns/<campaign>/log.md`.
-pub fn log_md_path(repo_dir: &Path, campaign: &str) -> PathBuf {
-    campaign_dir(repo_dir, campaign).join("log.md")
-}
 
 pub fn load_campaign(path: &Path) -> Result<(Campaign, String)> {
     let content = fs::read_to_string(path)
@@ -97,8 +100,8 @@ pub fn load_log(path: &Path) -> Result<(Log, String)> {
 
 /// Resolve `<repo-dir>/campaigns/<campaign>/campaign.md`, erroring if
 /// the campaign does not exist.
-pub fn campaign_file(repo_dir: &Path, campaign: &str) -> Result<PathBuf> {
-    let path = campaign_md_path(repo_dir, campaign);
+pub fn campaign_file(layout: &Layout, repo_dir: &Path, campaign: &str) -> Result<PathBuf> {
+    let path = layout.campaign_md_path(repo_dir, campaign);
     if !path.is_file() {
         anyhow::bail!("Campaign '{campaign}' not found at {}.", path.display());
     }
@@ -125,8 +128,8 @@ pub struct CampaignInfo {
 /// `campaign.md` is skipped (it isn't an onboarded campaign yet). Missing
 /// `campaigns/` is not an error -- a repo with no campaigns yields an empty
 /// list.
-pub fn list_campaigns(repo_dir: &Path) -> Result<Vec<CampaignInfo>> {
-    let campaigns_dir = repo_dir.join("campaigns");
+pub fn list_campaigns(layout: &Layout, repo_dir: &Path) -> Result<Vec<CampaignInfo>> {
+    let campaigns_dir = repo_dir.join(&layout.campaigns_dir);
     if !campaigns_dir.is_dir() {
         return Ok(Vec::new());
     }
@@ -143,10 +146,10 @@ pub fn list_campaigns(repo_dir: &Path) -> Result<Vec<CampaignInfo>> {
             Ok(n) => n,
             Err(_) => continue, // non-UTF8 dir name -- not a valid slug
         };
-        if name == ARCHIVE_DIR {
+        if name == layout.archive_dir {
             continue; // archived campaigns are hidden from the launcher
         }
-        let md = campaign_md_path(repo_dir, &name);
+        let md = layout.campaign_md_path(repo_dir, &name);
         // Best-effort: a dir without a parseable campaign.md isn't a campaign
         // we can launch, so skip it rather than failing the whole scan.
         let Ok((campaign, _body)) = load_campaign(&md) else {
@@ -163,24 +166,16 @@ pub fn list_campaigns(repo_dir: &Path) -> Result<Vec<CampaignInfo>> {
     Ok(out)
 }
 
-/// Reserved campaign slug for the repo switchboard. One per repo.
-/// Launched by `muxr <repo>` with no campaign arg, as `<repo>/switchboard`.
-pub const SWITCHBOARD: &str = "switchboard";
-
-/// Reserved dir under `campaigns/` holding archived campaigns. Skipped by
-/// `list_campaigns`, so archived campaigns vanish from the chooser while
-/// staying on disk -- pruning the launcher without deleting anything.
-pub const ARCHIVE_DIR: &str = "archive";
 
 /// Archive a campaign: move `campaigns/<campaign>/` to
 /// `campaigns/archive/<campaign>/`. Reversible (it's a move), and the chooser
 /// stops listing it. Errors if the campaign is missing or already archived.
-pub fn archive_campaign(repo_dir: &Path, campaign: &str) -> Result<PathBuf> {
-    let src = campaign_dir(repo_dir, campaign);
+pub fn archive_campaign(layout: &Layout, repo_dir: &Path, campaign: &str) -> Result<PathBuf> {
+    let src = layout.campaign_dir(repo_dir, campaign);
     if !src.is_dir() {
         anyhow::bail!("Campaign '{campaign}' not found at {}.", src.display());
     }
-    let archive_root = repo_dir.join("campaigns").join(ARCHIVE_DIR);
+    let archive_root = repo_dir.join(&layout.campaigns_dir).join(&layout.archive_dir);
     fs::create_dir_all(&archive_root)?;
     let dest = archive_root.join(campaign);
     if dest.exists() {
@@ -233,11 +228,11 @@ pub fn validate_topic(campaign: &str) -> Result<()> {
 /// The switchboard is the per-repo orchestrator AI. It lives at
 /// `campaigns/switchboard/` and gets a specific persona + bootstrap
 /// log entrypoint, distinct from regular campaign scaffolding.
-pub fn scaffold_switchboard(repo_dir: &Path) -> Result<PathBuf> {
-    let dir = campaign_dir(repo_dir, SWITCHBOARD);
+pub fn scaffold_switchboard(layout: &Layout, repo_dir: &Path) -> Result<PathBuf> {
+    let dir = layout.campaign_dir(repo_dir, &layout.switchboard_slug);
     fs::create_dir_all(&dir)?;
 
-    let campaign_md = campaign_md_path(repo_dir, SWITCHBOARD);
+    let campaign_md = layout.campaign_md_path(repo_dir, &layout.switchboard_slug);
     if !campaign_md.is_file() {
         let repo_name = repo_dir
             .file_name()
@@ -271,7 +266,7 @@ pub fn scaffold_switchboard(repo_dir: &Path) -> Result<PathBuf> {
 
     // Seed the switchboard log if missing. The switchboard is one
     // accumulating log per repo.
-    let log_md = log_md_path(repo_dir, SWITCHBOARD);
+    let log_md = layout.log_md_path(repo_dir, &layout.switchboard_slug);
     if !log_md.exists() {
         let content = "---\nentrypoint: \"Switchboard ready. First-glance: run `synthesist status` and ls campaigns/ so you know what's live. Then wait for the human's intent.\"\n---\n\n\
              # Switchboard\n\n\
@@ -293,8 +288,8 @@ pub fn scaffold_switchboard(repo_dir: &Path) -> Result<PathBuf> {
 /// and populate campaign.md via Edit. This keeps the launch command
 /// single-keystroke and moves the onboarding into a natural LLM
 /// conversation where typos, ambiguity, and defaults are cheap.
-pub fn scaffold_campaign_stub(repo_dir: &Path, campaign: &str) -> Result<PathBuf> {
-    let dir = campaign_dir(repo_dir, campaign);
+pub fn scaffold_campaign_stub(layout: &Layout, repo_dir: &Path, campaign: &str) -> Result<PathBuf> {
+    let dir = layout.campaign_dir(repo_dir, campaign);
     fs::create_dir_all(&dir)?;
 
     let campaign_content = format!(
@@ -305,12 +300,12 @@ pub fn scaffold_campaign_stub(repo_dir: &Path, campaign: &str) -> Result<PathBuf
          ## How to behave\n\
          (pending)\n"
     );
-    let campaign_md = campaign_md_path(repo_dir, campaign);
+    let campaign_md = layout.campaign_md_path(repo_dir, campaign);
     fs::write(&campaign_md, campaign_content)?;
 
     // Seed the log with a bootstrap entrypoint so the tool knows to run the
     // onboarding conversation on first response.
-    let log_md = log_md_path(repo_dir, campaign);
+    let log_md = layout.log_md_path(repo_dir, campaign);
     if !log_md.exists() {
         let entrypoint = format!(
             "Bootstrap campaign '{campaign}'. campaign.md is a stub. \
@@ -351,12 +346,12 @@ pub fn scaffold_campaign_stub(repo_dir: &Path, campaign: &str) -> Result<PathBuf
 /// Errors if the hub has no `campaign.md` (can't shard a non-campaign) or the
 /// new slug already exists (never clobber). The new slug must already be
 /// validated by the caller.
-pub fn scaffold_shard(repo_dir: &Path, hub: &str, new: &str) -> Result<PathBuf> {
-    let hub_md = campaign_md_path(repo_dir, hub);
+pub fn scaffold_shard(layout: &Layout, repo_dir: &Path, hub: &str, new: &str) -> Result<PathBuf> {
+    let hub_md = layout.campaign_md_path(repo_dir, hub);
     let (hub_campaign, _body) = load_campaign(&hub_md)
         .with_context(|| format!("Cannot shard: hub campaign '{hub}' not found or unreadable"))?;
 
-    let new_md = campaign_md_path(repo_dir, new);
+    let new_md = layout.campaign_md_path(repo_dir, new);
     if new_md.exists() {
         anyhow::bail!(
             "Campaign '{new}' already exists at {}. Pick a different shard slug.",
@@ -364,7 +359,7 @@ pub fn scaffold_shard(repo_dir: &Path, hub: &str, new: &str) -> Result<PathBuf> 
         );
     }
 
-    let dir = campaign_dir(repo_dir, new);
+    let dir = layout.campaign_dir(repo_dir, new);
     fs::create_dir_all(&dir)?;
 
     let category = if hub_campaign.category.is_empty() {
@@ -384,7 +379,7 @@ pub fn scaffold_shard(repo_dir: &Path, hub: &str, new: &str) -> Result<PathBuf> 
     );
     fs::write(&new_md, campaign_content)?;
 
-    let log_md = log_md_path(repo_dir, new);
+    let log_md = layout.log_md_path(repo_dir, new);
     let entrypoint = format!(
         "Sharded from the '{hub}' hub campaign. This session focuses one topic \
          that crystallized inside {hub}. First action: confirm the scope with \
@@ -406,13 +401,17 @@ pub fn scaffold_shard(repo_dir: &Path, hub: &str, new: &str) -> Result<PathBuf> 
 /// Find or scaffold the log file for the given campaign.
 /// If `campaigns/<campaign>/log.md` exists, returns it. Otherwise scaffolds
 /// the campaign dir + a minimal log.md and returns the new path.
-pub fn resolve_or_scaffold_session(repo_dir: &Path, campaign: &str) -> Result<PathBuf> {
-    let log_md = log_md_path(repo_dir, campaign);
+pub fn resolve_or_scaffold_session(
+    layout: &Layout,
+    repo_dir: &Path,
+    campaign: &str,
+) -> Result<PathBuf> {
+    let log_md = layout.log_md_path(repo_dir, campaign);
     if log_md.is_file() {
         return Ok(log_md);
     }
 
-    let dir = campaign_dir(repo_dir, campaign);
+    let dir = layout.campaign_dir(repo_dir, campaign);
     fs::create_dir_all(&dir)?;
     let content = format!("---\nentrypoint: \"\"\n---\n\n# {campaign}\n\n## Log\n\n");
     fs::write(&log_md, content)?;
@@ -467,6 +466,38 @@ pub fn expand_home(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Test shims: the layout-dependent ops take a `Layout` in the real API.
+    // Tests exercise the built-in DEFAULT layout, so adapt here rather than
+    // threading `Layout::default()` through every test body.
+    const SWITCHBOARD: &str = "switchboard";
+    fn campaign_dir(r: &Path, c: &str) -> PathBuf {
+        Layout::default().campaign_dir(r, c)
+    }
+    fn campaign_md_path(r: &Path, c: &str) -> PathBuf {
+        Layout::default().campaign_md_path(r, c)
+    }
+    fn log_md_path(r: &Path, c: &str) -> PathBuf {
+        Layout::default().log_md_path(r, c)
+    }
+    fn scaffold_switchboard(r: &Path) -> Result<PathBuf> {
+        super::scaffold_switchboard(&Layout::default(), r)
+    }
+    fn scaffold_campaign_stub(r: &Path, c: &str) -> Result<PathBuf> {
+        super::scaffold_campaign_stub(&Layout::default(), r, c)
+    }
+    fn scaffold_shard(r: &Path, h: &str, n: &str) -> Result<PathBuf> {
+        super::scaffold_shard(&Layout::default(), r, h, n)
+    }
+    fn resolve_or_scaffold_session(r: &Path, c: &str) -> Result<PathBuf> {
+        super::resolve_or_scaffold_session(&Layout::default(), r, c)
+    }
+    fn archive_campaign(r: &Path, c: &str) -> Result<PathBuf> {
+        super::archive_campaign(&Layout::default(), r, c)
+    }
+    fn list_campaigns(r: &Path) -> Result<Vec<CampaignInfo>> {
+        super::list_campaigns(&Layout::default(), r)
+    }
 
     #[test]
     fn split_frontmatter_basic() {
@@ -799,5 +830,32 @@ mod tests {
 
         scaffold_switchboard(repo_dir).unwrap();
         assert_eq!(fs::read_to_string(&log_md).unwrap(), "custom content");
+    }
+
+    #[test]
+    fn custom_layout_overrides_paths() {
+        let layout = Layout {
+            campaigns_dir: "initiatives".into(),
+            campaign_file: "spec.md".into(),
+            log_file: "journal.md".into(),
+            archive_dir: "attic".into(),
+            switchboard_slug: "hub".into(),
+        };
+        let r = Path::new("/repo");
+        assert_eq!(
+            layout.campaign_dir(r, "x"),
+            Path::new("/repo/initiatives/x")
+        );
+        assert_eq!(
+            layout.campaign_md_path(r, "x"),
+            Path::new("/repo/initiatives/x/spec.md")
+        );
+        assert_eq!(
+            layout.log_md_path(r, "x"),
+            Path::new("/repo/initiatives/x/journal.md")
+        );
+        // and the default reproduces the built-in 2-level model
+        let d = Layout::default();
+        assert_eq!(d.campaign_md_path(r, "x"), Path::new("/repo/campaigns/x/campaign.md"));
     }
 }

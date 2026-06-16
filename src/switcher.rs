@@ -146,7 +146,7 @@ fn build_entries(config: &Config, tmux: &Tmux) -> Result<Vec<Entry>> {
         let Ok(dir) = config.resolve_dir(repo) else {
             continue;
         };
-        let campaigns = primitives::list_campaigns(&dir).unwrap_or_default();
+        let campaigns = primitives::list_campaigns(&config.layout, &dir).unwrap_or_default();
 
         // Resolve run-state + health for each campaign.
         let present: HashSet<String> = campaigns.iter().map(|c| c.name.clone()).collect();
