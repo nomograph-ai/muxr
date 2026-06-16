@@ -19,6 +19,32 @@ pub struct Config {
     /// layout DATA, not compiled-in.
     #[serde(default)]
     pub layout: Layout,
+    /// Subprocess extension points. Each is a command muxr invokes at an
+    /// opinionated chokepoint (JSON in -> JSON out); absent -> the built-in
+    /// default. See `extension.rs` for the contract.
+    #[serde(default)]
+    pub extensions: Extensions,
+}
+
+/// The 3.0 extension contract: one subprocess mechanism for every fiddly bit
+/// that keeps changing. Each field is a command (`sh -c <cmd>`) invoked with
+/// structured JSON on stdin and structured JSON on stdout. An unset field
+/// means muxr runs its built-in default and behaves exactly as 2.1 -- so a
+/// config with no `[extensions]` is a fully usable launcher.
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
+pub struct Extensions {
+    /// RESOLVER: given a launch intent (`{session, repo, campaign, resume_id,
+    /// model}`) return the layout facts (`{dir, campaign_md, log_path,
+    /// runtime, add_dirs, resume_id}`); any omitted field falls back to the
+    /// built-in `[layout]` computation. Absent -> the 2.1 config-drive layout.
+    #[serde(default)]
+    pub resolver: Option<String>,
+    /// MAKE-DURABLE: fired before a session is recycled or closed. Receives
+    /// `{session, repo, campaign, dir, campaign_md, log_path}` and supplies
+    /// the agent-facing flush message (JSON `{message}`) -- or an empty
+    /// message to skip. Absent -> the built-in recycle-flush prompt.
+    #[serde(default)]
+    pub make_durable: Option<String>,
 }
 
 /// Filesystem layout of muxr-managed repos. Defaults reproduce the built-in

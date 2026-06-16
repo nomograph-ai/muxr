@@ -3,6 +3,7 @@
 mod claude_status;
 mod completions;
 mod config;
+mod extension;
 mod init;
 mod migrate;
 mod primitives;
@@ -923,6 +924,82 @@ mod tests {
         );
         assert!(session_dir.join("campaigns/factory/campaign.md").is_file());
         assert!(session_dir.join("campaigns/factory/log.md").is_file());
+    }
+
+    #[test]
+    fn resolver_extension_overrides_dir_and_adds_dirs() {
+        // The 3.0 resolver contract: a configured [extensions].resolver is
+        // invoked with the launch intent on stdin and returns layout facts on
+        // stdout. Here it relocates `dir` to a second tree and contributes an
+        // extra --add-dir; muxr must launch in the resolved dir (so the
+        // campaign/log paths follow it) and carry the extra working dir.
+        let real = tempfile::tempdir().unwrap();
+        let campaign_dir = real.path().join("campaigns/factory");
+        std::fs::create_dir_all(&campaign_dir).unwrap();
+        let extra = real.path().join("resolver-extra");
+        std::fs::create_dir_all(&extra).unwrap();
+        std::fs::write(
+            campaign_dir.join("campaign.md"),
+            "---\ncategory: \"\"\nsynthesist_trees: []\npaths: []\n---\n\n# factory\nbody\n",
+        )
+        .unwrap();
+        std::fs::write(
+            campaign_dir.join("log.md"),
+            "---\nentrypoint: \"\"\n---\n\n# factory\nlog body\n",
+        )
+        .unwrap();
+
+        // The repo's configured dir is a DECOY: an empty tree with no campaign.
+        // Only the resolver's override makes the launch succeed, proving it ran.
+        let decoy = tempfile::tempdir().unwrap();
+        // `cat >/dev/null` drains the intent JSON so the writer never sees a
+        // broken pipe; then we emit the outcome on stdout.
+        let resolver = format!(
+            "cat >/dev/null; printf '%s' '{{\"dir\":{real:?},\"add_dirs\":[{extra:?}]}}'",
+            real = real.path().to_string_lossy(),
+            extra = extra.display().to_string(),
+        );
+        let toml = format!(
+            "[extensions]\nresolver = {resolver:?}\n\n[repos.nomograph]\ndir = {decoy:?}\ncolor = \"#fff\"\n",
+            decoy = decoy.path(),
+        );
+        let config: Config = toml::from_str(&toml).unwrap();
+
+        let (cmd, session_dir) =
+            compose_launch_command(&config, "nomograph/factory", None, None, false).unwrap();
+
+        assert_eq!(
+            session_dir,
+            real.path(),
+            "resolver dir override not applied: {session_dir:?}"
+        );
+        assert!(
+            cmd.contains(&extra.display().to_string()),
+            "resolver add_dir missing: {cmd}"
+        );
+        assert!(
+            session_dir.join("campaigns/factory/campaign.md").is_file(),
+            "campaign path did not follow the resolved dir"
+        );
+    }
+
+    #[test]
+    fn resolver_extension_failure_is_fatal() {
+        // Fail closed: a configured resolver that errors must abort the launch,
+        // not silently fall back to the default layout (which could attach to
+        // the wrong campaign).
+        let dir = tempfile::tempdir().unwrap();
+        let toml = format!(
+            "[extensions]\nresolver = \"exit 3\"\n\n[repos.nomograph]\ndir = {dir:?}\ncolor = \"#fff\"\n",
+            dir = dir.path(),
+        );
+        let config: Config = toml::from_str(&toml).unwrap();
+        let err = compose_launch_command(&config, "nomograph/factory", None, None, false)
+            .expect_err("resolver failure should be fatal");
+        assert!(
+            err.to_string().contains("resolver extension"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
