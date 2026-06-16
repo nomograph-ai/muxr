@@ -2,6 +2,53 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.0.0-rc.1] (2026-06-16)
+
+**One small stable core plus one subprocess extension contract for every
+fiddly bit.** 3.0 re-architects muxr around a single extension mechanism: at
+an opinionated chokepoint muxr OPTIONALLY runs a configured command (`sh -c`)
+with structured JSON on stdin and reads structured JSON from stdout, falling
+back to a built-in default when none is configured. The transport is a
+subprocess (mirroring the existing `status_command` and `pre_create` hooks),
+deliberately not WASM or a plugin ABI -- the social contract between tools
+stays thin: JSON in, JSON out, default when absent. A config with no
+`[extensions]`/`[session_env]`/`[chooser]` reproduces 2.1 behavior exactly, so
+this is non-breaking for existing setups despite the major bump (the bump is
+for the core/extension re-architecture). Release candidate: shipping to
+validate the contract through real use before tagging 3.0.0.
+
+### Added
+- **`[extensions]` subprocess contract** (`extension.rs`): `invoke(cmd, point,
+  input)` runs `sh -c cmd` with JSON on stdin, parses JSON from stdout, exports
+  `MUXR_EXTENSION_POINT`, inherits stderr, and fails closed and loud.
+- **RESOLVER extension** (`[extensions].resolver`): the launch chokepoint
+  (`compose_launch_command`) now resolves layout facts (`dir`, `campaign_md`,
+  `log_path`, `runtime`, `add_dirs`, `resume_id`) through `resolve_layout`. The
+  default reproduces the 2.1 config-drive `[layout]` exactly; a configured
+  resolver may override any field (omitted -> default) and add `--add-dir`s.
+  Overriding `dir` relocates the campaign/log path defaults with it. A resolver
+  error aborts the launch (no silent wrong-campaign fallback).
+- **MAKE-DURABLE event** (`[extensions].make_durable`): the recycle flush is now
+  a lifecycle event. A configured command supplies the agent-facing flush
+  message; absent -> the built-in self-contained prompt; an empty message means
+  "nothing to flush, just exit". Serialization stops being baked into muxr.
+- **`[session_env]` generic env-passthrough**: per-session tmux variables
+  (`new-session -e`, tmux 3.2+) templated with `{session}`, `{repo}`,
+  `{campaign}`, `{session_slug}` (path-safe). Session<->tool coupling (e.g.
+  `SYNTHESIST_SESSION = "{session_slug}"`) is now config, not core.
+- **`[chooser].command`**: opt out of the built-in TUI to an external picker
+  (e.g. sesh) for plain attach. Absent -> the built-in campaign-aware TUI.
+- **`supports_add_dirs`** on `[tools.<name>]`: a runtime opts out of `--add-dir`
+  via this capability instead of muxr branching on the binary name.
+
+### Changed
+- Adding a runtime is now pure config: the one hardcoded `if self.bin != "pi"`
+  branch suppressing `--add-dir` is replaced by the `supports_add_dirs`
+  capability (Claude: yes, Pi: no, by built-in default).
+- Session creation shows liveness during slow `pre_create` hooks and the
+  blocking launch (transient `step_start` lines overwritten by the result),
+  and the launch line names the tool, instead of a silent pause.
+
 ## [2.1.0] (2026-06-16)
 
 **Config-drive resolver: the layout is now data, not compiled-in.** The

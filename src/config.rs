@@ -965,6 +965,25 @@ default_tool = "claude"
 # [tools.opencode]
 # bin = "opencode"
 # session_discovery = { type = "none" }
+# supports_add_dirs = false   # runtime has no --add-dir (sandbox is external)
+
+# Extensions (3.0): one subprocess contract for the fiddly bits. Each is a
+# command run with JSON on stdin -> JSON on stdout; absent -> built-in default.
+#
+# [extensions]
+# resolver = "my-resolver"        # layout decision; default = the [layout] above
+# make_durable = "my-flush"       # recycle-flush message; default = built-in prompt
+
+# Per-session tmux env (new-session -e). Templated with {session} {repo}
+# {campaign} {session_slug}. Couples a session to an external tool generically.
+#
+# [session_env]
+# SYNTHESIST_SESSION = "{session_slug}"
+
+# Delegate the interactive picker to an external tool (default = built-in TUI).
+#
+# [chooser]
+# command = "sesh connect \"$(sesh list | fzf)\""
 "##
         .to_string()
     }
