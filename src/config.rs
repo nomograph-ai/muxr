@@ -216,6 +216,20 @@ pub struct Tool {
     /// `String` reads the file and passes `--append-system-prompt <content>` (Pi).
     #[serde(default)]
     pub prompt_mode: PromptMode,
+    /// Whether this runtime accepts `--add-dir <path>` for extra working dirs.
+    /// `None` inherits the built-in (Claude: yes; Pi: no -- sandboxing is
+    /// external). A runtime adapter sets this instead of muxr branching on the
+    /// bin name, so adding a runtime stays pure config.
+    #[serde(default)]
+    pub supports_add_dirs: Option<bool>,
+}
+
+impl Tool {
+    /// Whether `--add-dir` should be emitted for this runtime. Defaults to
+    /// true (most CLIs accept it); a runtime opts out via `supports_add_dirs`.
+    fn emits_add_dirs(&self) -> bool {
+        self.supports_add_dirs.unwrap_or(true)
+    }
 }
 
 /// How a tool consumes the appended system prompt.
@@ -289,6 +303,9 @@ fn merge_tool_with_builtin(user: Tool, builtin: Tool) -> Tool {
         // would be indistinguishable from the default; treat user value as
         // authoritative whenever they configured the tool at all.
         prompt_mode: user.prompt_mode,
+        // None on the user side inherits the built-in's add-dir capability;
+        // an explicit Some overrides it.
+        supports_add_dirs: user.supports_add_dirs.or(builtin.supports_add_dirs),
     }
 }
 
@@ -337,6 +354,7 @@ impl Tool {
             status_command: Some("muxr claude-status".to_string()),
             wrapper: None,
             prompt_mode: PromptMode::File,
+            supports_add_dirs: Some(true),
         }
     }
 
@@ -367,6 +385,7 @@ impl Tool {
             status_command: None,
             wrapper: None,
             prompt_mode: PromptMode::String,
+            supports_add_dirs: Some(false),
         }
     }
 
@@ -512,9 +531,10 @@ impl Tool {
                 }
             }
         }
-        // Pi has no --add-dir equivalent; sandboxing is external (e.g. nono).
-        // Other tools (claude) keep getting --add-dir as today.
-        if self.bin != "pi" {
+        // Runtimes that don't accept --add-dir (e.g. Pi -- sandboxing is
+        // external via nono) opt out via `supports_add_dirs`; the rest
+        // (claude) keep getting --add-dir as today. No bin-name branching.
+        if self.emits_add_dirs() {
             for dir in &settings.add_dirs {
                 let expanded = shellexpand::tilde(dir);
                 cmd.push_str(&format!(" --add-dir {}", shell_escape(&expanded)));
@@ -1373,6 +1393,7 @@ session_discovery = { type = "none" }
             status_command: None,
             wrapper: Some("nono run --profile X --".to_string()),
             prompt_mode: PromptMode::String,
+            supports_add_dirs: Some(false),
         };
 
         let settings = LaunchSettings {
