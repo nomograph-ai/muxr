@@ -33,6 +33,25 @@ pub struct Config {
     /// about that tool.
     #[serde(default)]
     pub session_env: std::collections::HashMap<String, String>,
+    /// Interactive chooser. Absent -> muxr's built-in campaign-aware TUI (the
+    /// default; knows about dormant campaigns, health, recycle/archive). Set
+    /// `command` to delegate selection to an external session picker (e.g.
+    /// `sesh connect $(sesh list)`); that picker owns attach, and muxr's
+    /// campaign lifecycle stays available via subcommands.
+    #[serde(default)]
+    pub chooser: Chooser,
+}
+
+/// External chooser delegation. The built-in TUI does far more than a generic
+/// tmux picker (opens dormant campaigns, shows context/cost health, recycle/
+/// archive/rename); `command` is a thin opt-out for users who prefer their own
+/// picker for plain attach, NOT a full replacement.
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
+pub struct Chooser {
+    /// Shell command run (with an inherited terminal) instead of the built-in
+    /// TUI. The command owns listing + attaching. Absent -> built-in.
+    #[serde(default)]
+    pub command: Option<String>,
 }
 
 /// The 3.0 extension contract: one subprocess mechanism for every fiddly bit

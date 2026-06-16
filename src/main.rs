@@ -717,8 +717,22 @@ fn cmd_ls(tmux: &Tmux, active_only: bool) -> Result<()> {
 }
 
 /// Interactive TUI chooser: switch to a live session, open a dormant
-/// campaign, or create a new one.
+/// campaign, or create a new one. When `[chooser].command` is set, delegate
+/// selection to that external picker (e.g. sesh) instead of the built-in TUI.
 fn cmd_switch(tmux: &Tmux) -> Result<()> {
+    if let Ok(config) = Config::load()
+        && let Some(cmd) = config.chooser.command.as_deref()
+    {
+        // Hand the terminal to the external picker; it owns listing + attach.
+        let status = std::process::Command::new("sh")
+            .args(["-c", cmd])
+            .status()
+            .with_context(|| format!("running chooser command: {cmd}"))?;
+        if !status.success() {
+            anyhow::bail!("chooser command `{cmd}` exited {status}");
+        }
+        return Ok(());
+    }
     match switcher::run(tmux)? {
         switcher::Action::Switch(session) => tmux.attach(&session),
         switcher::Action::Open(repo, campaign) => {
