@@ -60,19 +60,34 @@ fn split_frontmatter(content: &str) -> Option<(&str, &str)> {
     Some((fm, body))
 }
 
-/// `<repo-dir>/campaigns/<campaign>/`.
+impl crate::config::Layout {
+    /// `<repo-dir>/<campaigns_dir>/<campaign>/`.
+    pub fn campaign_dir(&self, repo_dir: &Path, campaign: &str) -> PathBuf {
+        repo_dir.join(&self.campaigns_dir).join(campaign)
+    }
+    /// `<repo-dir>/<campaigns_dir>/<campaign>/<campaign_file>`.
+    pub fn campaign_md_path(&self, repo_dir: &Path, campaign: &str) -> PathBuf {
+        self.campaign_dir(repo_dir, campaign).join(&self.campaign_file)
+    }
+    /// `<repo-dir>/<campaigns_dir>/<campaign>/<log_file>`.
+    pub fn log_md_path(&self, repo_dir: &Path, campaign: &str) -> PathBuf {
+        self.campaign_dir(repo_dir, campaign).join(&self.log_file)
+    }
+}
+
+/// `<repo-dir>/campaigns/<campaign>/` (built-in default layout).
 pub fn campaign_dir(repo_dir: &Path, campaign: &str) -> PathBuf {
-    repo_dir.join("campaigns").join(campaign)
+    crate::config::Layout::default().campaign_dir(repo_dir, campaign)
 }
 
-/// `<repo-dir>/campaigns/<campaign>/campaign.md`.
+/// `<repo-dir>/campaigns/<campaign>/campaign.md` (built-in default layout).
 pub fn campaign_md_path(repo_dir: &Path, campaign: &str) -> PathBuf {
-    campaign_dir(repo_dir, campaign).join("campaign.md")
+    crate::config::Layout::default().campaign_md_path(repo_dir, campaign)
 }
 
-/// `<repo-dir>/campaigns/<campaign>/log.md`.
+/// `<repo-dir>/campaigns/<campaign>/log.md` (built-in default layout).
 pub fn log_md_path(repo_dir: &Path, campaign: &str) -> PathBuf {
-    campaign_dir(repo_dir, campaign).join("log.md")
+    crate::config::Layout::default().log_md_path(repo_dir, campaign)
 }
 
 pub fn load_campaign(path: &Path) -> Result<(Campaign, String)> {

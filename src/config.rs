@@ -14,6 +14,62 @@ pub struct Config {
     pub hooks: Hooks,
     #[serde(default)]
     pub tools: HashMap<String, Tool>,
+    /// Filesystem layout of managed repos (campaigns dir, file names, reserved
+    /// slugs). Omitted -> the built-in 2-level defaults. Makes the harness
+    /// layout DATA, not compiled-in.
+    #[serde(default)]
+    pub layout: Layout,
+}
+
+/// Filesystem layout of muxr-managed repos. Defaults reproduce the built-in
+/// 2-level model (`campaigns/<campaign>/{campaign.md,log.md}`); a repo can
+/// override via `[layout]` so the harness layout is data, not compiled-in.
+/// Path-construction methods are implemented in `primitives.rs`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Layout {
+    /// Directory under a repo holding campaigns. Default `campaigns`.
+    #[serde(default = "default_campaigns_dir")]
+    pub campaigns_dir: String,
+    /// Per-campaign conventions file. Default `campaign.md`.
+    #[serde(default = "default_campaign_file")]
+    pub campaign_file: String,
+    /// Per-campaign append-only log file. Default `log.md`.
+    #[serde(default = "default_log_file")]
+    pub log_file: String,
+    /// Reserved dir under the campaigns dir for archived campaigns. Default `archive`.
+    #[serde(default = "default_archive_dir")]
+    pub archive_dir: String,
+    /// Reserved campaign slug for the repo switchboard. Default `switchboard`.
+    #[serde(default = "default_switchboard_slug")]
+    pub switchboard_slug: String,
+}
+
+fn default_campaigns_dir() -> String {
+    "campaigns".to_string()
+}
+fn default_campaign_file() -> String {
+    "campaign.md".to_string()
+}
+fn default_log_file() -> String {
+    "log.md".to_string()
+}
+fn default_archive_dir() -> String {
+    "archive".to_string()
+}
+fn default_switchboard_slug() -> String {
+    "switchboard".to_string()
+}
+
+impl Default for Layout {
+    fn default() -> Self {
+        Self {
+            campaigns_dir: default_campaigns_dir(),
+            campaign_file: default_campaign_file(),
+            log_file: default_log_file(),
+            archive_dir: default_archive_dir(),
+            switchboard_slug: default_switchboard_slug(),
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
