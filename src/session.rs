@@ -134,8 +134,16 @@ pub(crate) fn cmd_open(
 
     config.run_pre_create_hooks(&session_dir);
 
-    ui::action("launching…");
-    tmux.create_session(&session_name, &session_dir, &tool_cmd)?;
+    // Name the tool and flush before the blocking create+attach so the last
+    // thing on screen is a clear state line, not a silent pause before tmux
+    // takes over.
+    ui::action(&format!("launching {tool}…"));
+    tmux.create_session(
+        &session_name,
+        &session_dir,
+        &tool_cmd,
+        &config.session_env_for(&session_name),
+    )?;
     tmux.attach(&session_name)?;
     Ok(())
 }
@@ -306,34 +314,27 @@ pub(crate) fn cmd_recycle(
             tool::wait_for_exit(pid, 20);
         }
     } else {
-        // Ask the agent to flush its state to the pointer, then exit. The
-        // instruction is self-contained (names the exact log.md path), so it
-        // doesn't depend on any external /serialize command being 2.0-aware.
-        let locale_clause = if locales.is_empty() {
-            String::new()
+        // The MAKE-DURABLE event: muxr fires it before recycling so the
+        // agent serializes its state. A configured `[extensions].make_durable`
+        // supplies the flush message (so "what to serialize" is the harness's
+        // concern, not muxr's); absent -> the built-in self-contained prompt.
+        // An empty message means "nothing to flush" -> just exit.
+        let msg = make_durable_message(&config, &session, &repo_name, &campaign, &log_md, &locales)?;
+        let exit_cmd = tool_def
+            .as_ref()
+            .and_then(|t| t.exit_command.clone())
+            .unwrap_or_else(|| "/exit".to_string());
+
+        if msg.trim().is_empty() {
+            ui::action(&format!("recycle {session}: nothing to flush -> exiting"));
+            tmux.send_text(&session, &exit_cmd)?;
         } else {
-            format!(
-                " (2) For each project repo you've touched ({}): make sure in-flight work is \
-                 captured -- commit it, or record the branch + uncommitted changes + next step \
-                 (in the log entry) so nothing is stranded there.",
-                locales.join(", ")
-            )
-        };
-        let msg = format!(
-            "[muxr recycle] Before this session is recycled, flush your state to ALL the locales \
-             you've been working in so a fresh session resumes cleanly. (1) Update {} -- set the \
-             `entrypoint:` frontmatter to a tight \"where we are / what's next\" line and append a \
-             dated entry under `## Log` with current state and open threads.{} Then run /exit. \
-             muxr is waiting for your exit and will reopen this session FRESH from that pointer. \
-             Take as long as you need.",
-            log_md.display(),
-            locale_clause
-        );
-        ui::action(&format!(
-            "recycle {session}: asked the agent to flush -> {} then exit",
-            log_md.display()
-        ));
-        tmux.send_text(&session, &msg)?;
+            ui::action(&format!(
+                "recycle {session}: asked the agent to flush -> {} then exit",
+                log_md.display()
+            ));
+            tmux.send_text(&session, &msg)?;
+        }
         ui::note("waiting for the agent to finish and exit (agent-paced)…");
         match harness_pid {
             Some(pid) => tool::wait_for_exit(pid, wait as u32),
@@ -348,7 +349,12 @@ pub(crate) fn cmd_recycle(
     }
     let (tool_cmd, session_dir) = compose_launch_command(&config, &session, None, None, false)?;
     config.run_pre_create_hooks(&session_dir);
-    tmux.create_session(&session, &session_dir, &tool_cmd)?;
+    tmux.create_session(
+        &session,
+        &session_dir,
+        &tool_cmd,
+        &config.session_env_for(&session),
+    )?;
 
     ui::ok(&format!(
         "recycled {session} -- fresh conversation, rehydrated from the pointer"
@@ -456,6 +462,185 @@ pub(crate) fn parse_session(name: &str) -> Option<(String, String)> {
 /// The campaign and log files are loaded best-effort; callers that might not
 /// have them (restore/upgrade of an archived session) get a degraded
 /// composition rather than a failure.
+/// Context for a make-durable extension: the session about to be recycled and
+/// the locales (project repos) it touches.
+#[derive(serde::Serialize)]
+struct MakeDurableInput<'a> {
+    session: &'a str,
+    repo: &'a str,
+    campaign: &'a str,
+    log_path: &'a str,
+    /// Project repos declared by the campaign (its `paths:`).
+    locales: &'a [String],
+}
+
+/// A make-durable extension's answer: the agent-facing flush message. An empty
+/// message means "nothing to flush" -- muxr just exits.
+#[derive(serde::Deserialize, Default)]
+struct MakeDurableOutput {
+    #[serde(default)]
+    message: String,
+}
+
+/// Resolve the flush message for a recycle. A configured
+/// `[extensions].make_durable` is invoked with the session context and
+/// supplies the message; absent -> muxr's built-in self-contained prompt
+/// (names the exact log.md path, so it never depends on a `/serialize` skill).
+fn make_durable_message(
+    config: &Config,
+    session: &str,
+    repo: &str,
+    campaign: &str,
+    log_md: &std::path::Path,
+    locales: &[String],
+) -> Result<String> {
+    if let Some(cmd) = config.extensions.make_durable.as_deref() {
+        let input = MakeDurableInput {
+            session,
+            repo,
+            campaign,
+            log_path: &log_md.to_string_lossy(),
+            locales,
+        };
+        let out: MakeDurableOutput = crate::extension::invoke(cmd, "make-durable", &input)
+            .with_context(|| format!("make-durable extension for '{session}'"))?;
+        return Ok(out.message);
+    }
+
+    let locale_clause = if locales.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " (2) For each project repo you've touched ({}): make sure in-flight work is \
+             captured -- commit it, or record the branch + uncommitted changes + next step \
+             (in the log entry) so nothing is stranded there.",
+            locales.join(", ")
+        )
+    };
+    Ok(format!(
+        "[muxr recycle] Before this session is recycled, flush your state to ALL the locales \
+         you've been working in so a fresh session resumes cleanly. (1) Update {} -- set the \
+         `entrypoint:` frontmatter to a tight \"where we are / what's next\" line and append a \
+         dated entry under `## Log` with current state and open threads.{} Then run /exit. \
+         muxr is waiting for your exit and will reopen this session FRESH from that pointer. \
+         Take as long as you need.",
+        log_md.display(),
+        locale_clause
+    ))
+}
+
+/// The launch intent handed to a resolver extension. Identifies WHAT muxr is
+/// trying to launch; the extension answers WHERE/HOW (see `ResolveOutcome`).
+#[derive(serde::Serialize)]
+struct ResolveIntent<'a> {
+    /// The full `<repo>/<campaign>` session name.
+    session: &'a str,
+    repo: &'a str,
+    campaign: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resume_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<&'a str>,
+}
+
+/// A resolver extension's answer. Every field is optional: an omitted field
+/// falls back to muxr's built-in `[layout]` computation, so an extension can
+/// override just the parts it cares about (e.g. only `dir`).
+#[derive(serde::Deserialize, Default)]
+struct ResolveOutcome {
+    /// Working directory for the session. Default: `config.resolve_dir(repo)`.
+    dir: Option<String>,
+    /// Campaign conventions file path. Default: the `[layout]` campaign path.
+    campaign_md: Option<String>,
+    /// Append-only log file path. Default: the `[layout]` log path.
+    log_path: Option<String>,
+    /// Runtime/tool name. Default: `config.resolve_tool(repo)`.
+    runtime: Option<String>,
+    /// Extra `--add-dir` paths, layered on top of the campaign's own paths.
+    #[serde(default)]
+    add_dirs: Vec<String>,
+    /// Resume id override. Default: the resume id muxr was already given.
+    resume_id: Option<String>,
+}
+
+/// The resolved layout facts `compose_launch_command` builds a launch from.
+struct ResolvedLayout {
+    dir: std::path::PathBuf,
+    campaign_md: std::path::PathBuf,
+    log_path: std::path::PathBuf,
+    runtime: String,
+    extra_add_dirs: Vec<String>,
+    resume_id: Option<String>,
+}
+
+/// Resolve the layout facts for a launch. The built-in default reproduces the
+/// 2.1 config-drive behavior exactly; when `[extensions].resolver` is set,
+/// muxr invokes it (JSON intent in, JSON outcome out) and layers the returned
+/// fields over those defaults. A resolver error is fatal (fail closed): once
+/// you opt into deciding where a session launches, a silent fallback could
+/// attach to the wrong campaign.
+fn resolve_layout(
+    config: &Config,
+    repo_name: &str,
+    campaign: &str,
+    session_name: &str,
+    resume_id: Option<&str>,
+    model: Option<&str>,
+) -> Result<ResolvedLayout> {
+    let default_dir = config.resolve_dir(repo_name)?;
+    let default_runtime = config.resolve_tool(repo_name, None);
+
+    // Helper: derive the campaign/log path defaults from whatever dir won, so
+    // an extension that overrides only `dir` relocates the whole layout
+    // consistently rather than leaving the files pointed at the old root.
+    let layout_paths = |dir: &std::path::Path| {
+        (
+            config.layout.campaign_md_path(dir, campaign),
+            config.layout.log_md_path(dir, campaign),
+        )
+    };
+
+    let Some(cmd) = config.extensions.resolver.as_deref() else {
+        let (campaign_md, log_path) = layout_paths(&default_dir);
+        return Ok(ResolvedLayout {
+            dir: default_dir,
+            campaign_md,
+            log_path,
+            runtime: default_runtime,
+            extra_add_dirs: Vec::new(),
+            resume_id: resume_id.map(str::to_string),
+        });
+    };
+
+    let intent = ResolveIntent {
+        session: session_name,
+        repo: repo_name,
+        campaign,
+        resume_id,
+        model,
+    };
+    let outcome: ResolveOutcome = crate::extension::invoke(cmd, "resolver", &intent)
+        .with_context(|| format!("resolver extension for '{session_name}'"))?;
+
+    let dir = outcome.dir.map(std::path::PathBuf::from).unwrap_or(default_dir);
+    let (default_campaign_md, default_log_path) = layout_paths(&dir);
+
+    Ok(ResolvedLayout {
+        campaign_md: outcome
+            .campaign_md
+            .map(std::path::PathBuf::from)
+            .unwrap_or(default_campaign_md),
+        log_path: outcome
+            .log_path
+            .map(std::path::PathBuf::from)
+            .unwrap_or(default_log_path),
+        dir,
+        runtime: outcome.runtime.unwrap_or(default_runtime),
+        extra_add_dirs: outcome.add_dirs,
+        resume_id: outcome.resume_id.or_else(|| resume_id.map(str::to_string)),
+    })
+}
+
 pub(crate) fn compose_launch_command(
     config: &Config,
     session_name: &str,
@@ -466,11 +651,17 @@ pub(crate) fn compose_launch_command(
     let (repo_name, campaign) = parse_session(session_name)
         .with_context(|| format!("cannot derive repo/campaign from '{session_name}'"))?;
 
-    let repo_dir = config.resolve_dir(&repo_name)?;
-    let campaign_md = config.layout.campaign_md_path(&repo_dir, &campaign);
-    let log_path = config.layout.log_md_path(&repo_dir, &campaign);
+    // The RESOLVER chokepoint (3.0): a launch intent in, the layout facts out.
+    // The default reproduces the 2.1 config-drive layout exactly; a configured
+    // `[extensions].resolver` may override any of dir/campaign_md/log_path/
+    // runtime/resume_id and contribute extra --add-dirs.
+    let resolved = resolve_layout(config, &repo_name, &campaign, session_name, resume_id, model)?;
+    let repo_dir = resolved.dir;
+    let campaign_md = resolved.campaign_md;
+    let log_path = resolved.log_path;
+    let resume_id = resolved.resume_id.as_deref();
 
-    let tool = config.resolve_tool(&repo_name, None);
+    let tool = resolved.runtime;
     let tool_config = config.tool_for(&tool);
     let repo = config.repos.get(&repo_name);
 
@@ -556,6 +747,15 @@ pub(crate) fn compose_launch_command(
         }
     }
 
+    // Extra working dirs contributed by a resolver extension, on top of the
+    // campaign's own paths. De-duped against whatever is already present.
+    for path in &resolved.extra_add_dirs {
+        let expanded = primitives::expand_home(path);
+        if !settings.add_dirs.iter().any(|d| d == &expanded) {
+            settings.add_dirs.push(expanded);
+        }
+    }
+
     let tool_cmd = match &tool_config {
         Some(h) => {
             let mut cmd =
@@ -609,7 +809,7 @@ fn cmd_open_remote(tmux: &Tmux, config: &Config, remote_name: &str, args: &[Stri
         let connect_cmd = remote::connect_command(remote, &instance, &context)?;
         eprintln!("Creating {session} -> {instance} via {}", remote.connect);
         let home = dirs::home_dir().context("No home directory")?;
-        tmux.create_session(&session, &home, &connect_cmd)?;
+        tmux.create_session(&session, &home, &connect_cmd, &[])?;
         tmux.attach(&session)?;
     }
 

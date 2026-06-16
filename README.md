@@ -89,6 +89,43 @@ first argument to `muxr`. Remotes are GCE instances resolved via `gcloud`.
 Each gets a color that shows up in the chooser and the tmux status bar.
 Remotes require the [gcloud CLI](https://cloud.google.com/sdk/docs/install).
 
+## Extensions
+
+muxr has a small stable core and one extension mechanism for the fiddly bits
+that change. At an opinionated chokepoint muxr OPTIONALLY runs a configured
+command (`sh -c <cmd>`) with structured JSON on stdin and reads structured
+JSON from stdout; the point name is in `MUXR_EXTENSION_POINT`. With nothing
+configured, muxr runs its built-in default and behaves exactly as before --
+so bare muxr is a fully usable launcher. The transport is a subprocess (it
+mirrors `status_command` and the `pre_create` hooks), not a plugin ABI.
+
+```toml
+[extensions]
+# RESOLVER: intent {session,repo,campaign,resume_id,model} in -> layout facts
+# {dir,campaign_md,log_path,runtime,add_dirs,resume_id} out. Any omitted field
+# falls back to the built-in [layout]. Absent -> the built-in config-drive layout.
+resolver = "my-resolver"
+# MAKE-DURABLE: fired before a session is recycled/closed. Context in ->
+# {message} out (the agent-facing flush prompt). Empty message -> just exit.
+# Absent -> muxr's built-in recycle-flush prompt.
+make_durable = "my-flush"
+
+# Per-session tmux env (new-session -e, tmux 3.2+). Values templated with
+# {session} {repo} {campaign} {session_slug}. This is how you couple a session
+# to an external tool generically, e.g. binding synthesist:
+[session_env]
+SYNTHESIST_SESSION = "{session_slug}"
+
+# Delegate the interactive picker to an external tool (e.g. sesh) for plain
+# attach. Absent -> muxr's built-in campaign-aware TUI (the default).
+[chooser]
+command = "sesh connect \"$(sesh list | fzf)\""
+```
+
+A runtime that does not accept `--add-dir` (e.g. Pi) sets
+`supports_add_dirs = false` in its `[tools.<name>]` block; adding a runtime is
+otherwise pure config.
+
 ## How sessions work
 
 muxr is a thin layer over tmux. Each session gets a named tmux session,

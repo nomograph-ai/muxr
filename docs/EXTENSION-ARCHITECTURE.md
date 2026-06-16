@@ -4,6 +4,25 @@ Durable design record (2026-06-16). Self-contained so a fresh/compacted session
 can build toward 3.0 without re-deriving. Full estate context + cutover history:
 `nomograph/keaton` -> `campaigns/harness/sessions/baseline.md` (2026-06-16 entries).
 
+## Shipped in 3.0.0-rc.1 (2026-06-16)
+All of P0-P4 landed on branch `feat/3.0-extensions`; 134 tests, clippy clean;
+behavior-compatible (no `[extensions]`/`[session_env]`/`[chooser]` => 2.1).
+- **P0** `src/extension.rs` -- `invoke(cmd, point, input)`: `sh -c`, JSON
+  stdin -> JSON stdout, `MUXR_EXTENSION_POINT`, fail-closed-and-loud.
+- **P1** RESOLVER (`[extensions].resolver`) at `resolve_layout` in session.rs;
+  default = the 2.1 `[layout]`; override dir relocates campaign/log defaults.
+- **P2** runtime-adapter: `supports_add_dirs` capability replaces the one
+  hardcoded `bin != "pi"` branch. statusline stays a contract instance
+  (runtime-invoked via its own hook -- transport intentionally not muxr's).
+- **P3** MAKE-DURABLE event (`[extensions].make_durable`) at the recycle flush;
+  generic `[session_env]` (templated, `new-session -e`) which generalizes +
+  closes muxr!4; folded in muxr!3 transition UX (`ui::step_start`).
+- **P4** `[chooser].command` -- config-gated external picker; built-in TUI stays
+  default (full shed to sesh would lose campaign/health/lifecycle).
+
+RC intent: validate the contract through real daily use, THEN tag 3.0.0 (and
+lock the contract). The plan/discipline below is the original design rationale.
+
 ## Where muxr is (history)
 - **2.0.1** — last pre-cutover release (http: generic-package era).
 - **2.1.0 (2026-06-16)** — config-drive resolver: a `[layout]` config struct makes

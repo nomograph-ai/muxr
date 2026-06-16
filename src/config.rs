@@ -19,6 +19,60 @@ pub struct Config {
     /// layout DATA, not compiled-in.
     #[serde(default)]
     pub layout: Layout,
+    /// Subprocess extension points. Each is a command muxr invokes at an
+    /// opinionated chokepoint (JSON in -> JSON out); absent -> the built-in
+    /// default. See `extension.rs` for the contract.
+    #[serde(default)]
+    pub extensions: Extensions,
+    /// Environment variables set on each campaign tmux session (`new-session
+    /// -e KEY=VALUE`, tmux 3.2+). Values are templated with `{session}`,
+    /// `{repo}`, `{campaign}`, and `{session_slug}` (the session name with any
+    /// char outside `[A-Za-z0-9_-]` mapped to `-`). This is how a session gets
+    /// coupled to an external tool generically -- e.g. binding synthesist with
+    /// `SYNTHESIST_SESSION = "{session_slug}"` -- without muxr core knowing
+    /// about that tool.
+    #[serde(default)]
+    pub session_env: std::collections::HashMap<String, String>,
+    /// Interactive chooser. Absent -> muxr's built-in campaign-aware TUI (the
+    /// default; knows about dormant campaigns, health, recycle/archive). Set
+    /// `command` to delegate selection to an external session picker (e.g.
+    /// `sesh connect $(sesh list)`); that picker owns attach, and muxr's
+    /// campaign lifecycle stays available via subcommands.
+    #[serde(default)]
+    pub chooser: Chooser,
+}
+
+/// External chooser delegation. The built-in TUI does far more than a generic
+/// tmux picker (opens dormant campaigns, shows context/cost health, recycle/
+/// archive/rename); `command` is a thin opt-out for users who prefer their own
+/// picker for plain attach, NOT a full replacement.
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
+pub struct Chooser {
+    /// Shell command run (with an inherited terminal) instead of the built-in
+    /// TUI. The command owns listing + attaching. Absent -> built-in.
+    #[serde(default)]
+    pub command: Option<String>,
+}
+
+/// The 3.0 extension contract: one subprocess mechanism for every fiddly bit
+/// that keeps changing. Each field is a command (`sh -c <cmd>`) invoked with
+/// structured JSON on stdin and structured JSON on stdout. An unset field
+/// means muxr runs its built-in default and behaves exactly as 2.1 -- so a
+/// config with no `[extensions]` is a fully usable launcher.
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
+pub struct Extensions {
+    /// RESOLVER: given a launch intent (`{session, repo, campaign, resume_id,
+    /// model}`) return the layout facts (`{dir, campaign_md, log_path,
+    /// runtime, add_dirs, resume_id}`); any omitted field falls back to the
+    /// built-in `[layout]` computation. Absent -> the 2.1 config-drive layout.
+    #[serde(default)]
+    pub resolver: Option<String>,
+    /// MAKE-DURABLE: fired before a session is recycled or closed. Receives
+    /// `{session, repo, campaign, dir, campaign_md, log_path}` and supplies
+    /// the agent-facing flush message (JSON `{message}`) -- or an empty
+    /// message to skip. Absent -> the built-in recycle-flush prompt.
+    #[serde(default)]
+    pub make_durable: Option<String>,
 }
 
 /// Filesystem layout of muxr-managed repos. Defaults reproduce the built-in
@@ -190,6 +244,20 @@ pub struct Tool {
     /// `String` reads the file and passes `--append-system-prompt <content>` (Pi).
     #[serde(default)]
     pub prompt_mode: PromptMode,
+    /// Whether this runtime accepts `--add-dir <path>` for extra working dirs.
+    /// `None` inherits the built-in (Claude: yes; Pi: no -- sandboxing is
+    /// external). A runtime adapter sets this instead of muxr branching on the
+    /// bin name, so adding a runtime stays pure config.
+    #[serde(default)]
+    pub supports_add_dirs: Option<bool>,
+}
+
+impl Tool {
+    /// Whether `--add-dir` should be emitted for this runtime. Defaults to
+    /// true (most CLIs accept it); a runtime opts out via `supports_add_dirs`.
+    fn emits_add_dirs(&self) -> bool {
+        self.supports_add_dirs.unwrap_or(true)
+    }
 }
 
 /// How a tool consumes the appended system prompt.
@@ -263,6 +331,9 @@ fn merge_tool_with_builtin(user: Tool, builtin: Tool) -> Tool {
         // would be indistinguishable from the default; treat user value as
         // authoritative whenever they configured the tool at all.
         prompt_mode: user.prompt_mode,
+        // None on the user side inherits the built-in's add-dir capability;
+        // an explicit Some overrides it.
+        supports_add_dirs: user.supports_add_dirs.or(builtin.supports_add_dirs),
     }
 }
 
@@ -311,6 +382,7 @@ impl Tool {
             status_command: Some("muxr claude-status".to_string()),
             wrapper: None,
             prompt_mode: PromptMode::File,
+            supports_add_dirs: Some(true),
         }
     }
 
@@ -341,6 +413,7 @@ impl Tool {
             status_command: None,
             wrapper: None,
             prompt_mode: PromptMode::String,
+            supports_add_dirs: Some(false),
         }
     }
 
@@ -486,9 +559,10 @@ impl Tool {
                 }
             }
         }
-        // Pi has no --add-dir equivalent; sandboxing is external (e.g. nono).
-        // Other tools (claude) keep getting --add-dir as today.
-        if self.bin != "pi" {
+        // Runtimes that don't accept --add-dir (e.g. Pi -- sandboxing is
+        // external via nono) opt out via `supports_add_dirs`; the rest
+        // (claude) keep getting --add-dir as today. No bin-name branching.
+        if self.emits_add_dirs() {
             for dir in &settings.add_dirs {
                 let expanded = shellexpand::tilde(dir);
                 cmd.push_str(&format!(" --add-dir {}", shell_escape(&expanded)));
@@ -712,6 +786,41 @@ impl Config {
         self.default_tool.clone()
     }
 
+    /// Resolve the templated `[session_env]` map for a concrete session name
+    /// into the literal `KEY=VALUE` pairs to set on its tmux session. Tokens
+    /// `{session}`, `{repo}`, `{campaign}`, `{session_slug}` are interpolated;
+    /// the slug maps any char outside `[A-Za-z0-9_-]` to `-` (path-safe for
+    /// tools like synthesist that reject `/` in a session segment).
+    pub fn session_env_for(&self, session_name: &str) -> Vec<(String, String)> {
+        if self.session_env.is_empty() {
+            return Vec::new();
+        }
+        let (repo, campaign) = session_name
+            .split_once('/')
+            .unwrap_or((session_name, ""));
+        let slug: String = session_name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        self.session_env
+            .iter()
+            .map(|(k, v)| {
+                let value = v
+                    .replace("{session_slug}", &slug)
+                    .replace("{session}", session_name)
+                    .replace("{repo}", repo)
+                    .replace("{campaign}", campaign);
+                (k.clone(), value)
+            })
+            .collect()
+    }
+
     /// Get the harness config for a tool name.
     ///
     /// User config in `[tools.<name>]` is treated as a PARTIAL override over
@@ -772,8 +881,11 @@ impl Config {
         let path = self.hooks_path();
         for cmd in &self.hooks.pre_create {
             // Capture output so a hook's raw stdout (kit/rune sync) doesn't
-            // dump into the launch. Show a clean status line; reveal the
-            // captured output only when the hook fails.
+            // dump into the launch. Show a transient "running" line first so a
+            // slow sync reads as progress, not a hang; the ok/warn result
+            // overwrites it. Reveal the captured output only when the hook
+            // fails.
+            crate::ui::step_start(&format!("setup: {cmd}"));
             let result = std::process::Command::new("sh")
                 .args(["-c", cmd])
                 .current_dir(dir)
@@ -853,6 +965,25 @@ default_tool = "claude"
 # [tools.opencode]
 # bin = "opencode"
 # session_discovery = { type = "none" }
+# supports_add_dirs = false   # runtime has no --add-dir (sandbox is external)
+
+# Extensions (3.0): one subprocess contract for the fiddly bits. Each is a
+# command run with JSON on stdin -> JSON on stdout; absent -> built-in default.
+#
+# [extensions]
+# resolver = "my-resolver"        # layout decision; default = the [layout] above
+# make_durable = "my-flush"       # recycle-flush message; default = built-in prompt
+
+# Per-session tmux env (new-session -e). Templated with {session} {repo}
+# {campaign} {session_slug}. Couples a session to an external tool generically.
+#
+# [session_env]
+# SYNTHESIST_SESSION = "{session_slug}"
+
+# Delegate the interactive picker to an external tool (default = built-in TUI).
+#
+# [chooser]
+# command = "sesh connect \"$(sesh list | fzf)\""
 "##
         .to_string()
     }
@@ -861,6 +992,33 @@ default_tool = "claude"
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_env_interpolates_tokens_and_slug() {
+        let config: Config = toml::from_str(
+            "[repos]\n\n[session_env]\nSYNTHESIST_SESSION = \"{session_slug}\"\nINFO = \"{repo}:{campaign}\"\n",
+        )
+        .unwrap();
+        let mut env = config.session_env_for("work/in-place/fix");
+        env.sort();
+        assert_eq!(
+            env,
+            vec![
+                ("INFO".to_string(), "work:in-place/fix".to_string()),
+                (
+                    "SYNTHESIST_SESSION".to_string(),
+                    // slug maps the two slashes to dashes
+                    "work-in-place-fix".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn session_env_empty_when_unconfigured() {
+        let config: Config = toml::from_str("[repos]").unwrap();
+        assert!(config.session_env_for("work/x").is_empty());
+    }
 
     fn sample_config() -> Config {
         let toml_str = r##"
@@ -1347,6 +1505,7 @@ session_discovery = { type = "none" }
             status_command: None,
             wrapper: Some("nono run --profile X --".to_string()),
             prompt_mode: PromptMode::String,
+            supports_add_dirs: Some(false),
         };
 
         let settings = LaunchSettings {
