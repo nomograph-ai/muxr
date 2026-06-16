@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.1.0] (2026-06-16)
+
+**Config-drive resolver: the layout is now data, not compiled-in.** The
+filesystem layout of a muxr-managed repo (campaigns directory, per-campaign
+`campaign.md`/`log.md` file names, the reserved `archive` directory, and the
+`switchboard` slug) is read end-to-end from a `[layout]` config struct rather
+than from hard-coded constants. A repo can override any of these via
+`[layout]` in `config.toml`; omitting the section reproduces the built-in
+2-level model exactly, so the change is non-breaking. This lays the resolver
+boundary that a future subprocess-based layout extension can hook (mirroring
+`status_command`), without introducing a trait or wasmtime.
+
+### Added
+- **`[layout]` config struct** (`campaigns_dir`, `campaign_file`, `log_file`,
+  `archive_dir`, `switchboard_slug`), each with a default that reproduces
+  today's behavior. `[layout]` in `config.toml` genuinely overrides the
+  built-in 2-level model.
+
+### Changed
+- The layout-dependent primitives (campaign/log/dir path construction;
+  `list_campaigns` / `scaffold_*` / `archive_campaign` / `campaign_file` /
+  `resolve_or_scaffold_session`) and `compose_launch_command` now read
+  `config.layout` end-to-end; all callers (session, main, switcher) thread it
+  through. The delegating free functions and the `ARCHIVE_DIR` / `SWITCHBOARD`
+  constants are retired. No behavior change with default layout.
+
 ## [2.0.1] (2026-06-04)
 
 First published 2.0 release. Identical in features to 2.0.0 below; the
