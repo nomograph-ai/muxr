@@ -347,7 +347,7 @@ fn cmd_control_plane(tmux: &Tmux) -> Result<()> {
     if tmux.session_exists(session) {
         tmux.attach(session)?;
     } else {
-        tmux.create_session(session, &home, "")?;
+        tmux.create_session(session, &home, "", &[])?;
         tmux.attach(session)?;
     }
 

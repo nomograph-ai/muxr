@@ -134,8 +134,16 @@ pub(crate) fn cmd_open(
 
     config.run_pre_create_hooks(&session_dir);
 
-    ui::action("launching…");
-    tmux.create_session(&session_name, &session_dir, &tool_cmd)?;
+    // Name the tool and flush before the blocking create+attach so the last
+    // thing on screen is a clear state line, not a silent pause before tmux
+    // takes over.
+    ui::action(&format!("launching {tool}…"));
+    tmux.create_session(
+        &session_name,
+        &session_dir,
+        &tool_cmd,
+        &config.session_env_for(&session_name),
+    )?;
     tmux.attach(&session_name)?;
     Ok(())
 }
@@ -306,34 +314,27 @@ pub(crate) fn cmd_recycle(
             tool::wait_for_exit(pid, 20);
         }
     } else {
-        // Ask the agent to flush its state to the pointer, then exit. The
-        // instruction is self-contained (names the exact log.md path), so it
-        // doesn't depend on any external /serialize command being 2.0-aware.
-        let locale_clause = if locales.is_empty() {
-            String::new()
+        // The MAKE-DURABLE event: muxr fires it before recycling so the
+        // agent serializes its state. A configured `[extensions].make_durable`
+        // supplies the flush message (so "what to serialize" is the harness's
+        // concern, not muxr's); absent -> the built-in self-contained prompt.
+        // An empty message means "nothing to flush" -> just exit.
+        let msg = make_durable_message(&config, &session, &repo_name, &campaign, &log_md, &locales)?;
+        let exit_cmd = tool_def
+            .as_ref()
+            .and_then(|t| t.exit_command.clone())
+            .unwrap_or_else(|| "/exit".to_string());
+
+        if msg.trim().is_empty() {
+            ui::action(&format!("recycle {session}: nothing to flush -> exiting"));
+            tmux.send_text(&session, &exit_cmd)?;
         } else {
-            format!(
-                " (2) For each project repo you've touched ({}): make sure in-flight work is \
-                 captured -- commit it, or record the branch + uncommitted changes + next step \
-                 (in the log entry) so nothing is stranded there.",
-                locales.join(", ")
-            )
-        };
-        let msg = format!(
-            "[muxr recycle] Before this session is recycled, flush your state to ALL the locales \
-             you've been working in so a fresh session resumes cleanly. (1) Update {} -- set the \
-             `entrypoint:` frontmatter to a tight \"where we are / what's next\" line and append a \
-             dated entry under `## Log` with current state and open threads.{} Then run /exit. \
-             muxr is waiting for your exit and will reopen this session FRESH from that pointer. \
-             Take as long as you need.",
-            log_md.display(),
-            locale_clause
-        );
-        ui::action(&format!(
-            "recycle {session}: asked the agent to flush -> {} then exit",
-            log_md.display()
-        ));
-        tmux.send_text(&session, &msg)?;
+            ui::action(&format!(
+                "recycle {session}: asked the agent to flush -> {} then exit",
+                log_md.display()
+            ));
+            tmux.send_text(&session, &msg)?;
+        }
         ui::note("waiting for the agent to finish and exit (agent-paced)…");
         match harness_pid {
             Some(pid) => tool::wait_for_exit(pid, wait as u32),
@@ -348,7 +349,12 @@ pub(crate) fn cmd_recycle(
     }
     let (tool_cmd, session_dir) = compose_launch_command(&config, &session, None, None, false)?;
     config.run_pre_create_hooks(&session_dir);
-    tmux.create_session(&session, &session_dir, &tool_cmd)?;
+    tmux.create_session(
+        &session,
+        &session_dir,
+        &tool_cmd,
+        &config.session_env_for(&session),
+    )?;
 
     ui::ok(&format!(
         "recycled {session} -- fresh conversation, rehydrated from the pointer"
@@ -456,6 +462,73 @@ pub(crate) fn parse_session(name: &str) -> Option<(String, String)> {
 /// The campaign and log files are loaded best-effort; callers that might not
 /// have them (restore/upgrade of an archived session) get a degraded
 /// composition rather than a failure.
+/// Context for a make-durable extension: the session about to be recycled and
+/// the locales (project repos) it touches.
+#[derive(serde::Serialize)]
+struct MakeDurableInput<'a> {
+    session: &'a str,
+    repo: &'a str,
+    campaign: &'a str,
+    log_path: &'a str,
+    /// Project repos declared by the campaign (its `paths:`).
+    locales: &'a [String],
+}
+
+/// A make-durable extension's answer: the agent-facing flush message. An empty
+/// message means "nothing to flush" -- muxr just exits.
+#[derive(serde::Deserialize, Default)]
+struct MakeDurableOutput {
+    #[serde(default)]
+    message: String,
+}
+
+/// Resolve the flush message for a recycle. A configured
+/// `[extensions].make_durable` is invoked with the session context and
+/// supplies the message; absent -> muxr's built-in self-contained prompt
+/// (names the exact log.md path, so it never depends on a `/serialize` skill).
+fn make_durable_message(
+    config: &Config,
+    session: &str,
+    repo: &str,
+    campaign: &str,
+    log_md: &std::path::Path,
+    locales: &[String],
+) -> Result<String> {
+    if let Some(cmd) = config.extensions.make_durable.as_deref() {
+        let input = MakeDurableInput {
+            session,
+            repo,
+            campaign,
+            log_path: &log_md.to_string_lossy(),
+            locales,
+        };
+        let out: MakeDurableOutput = crate::extension::invoke(cmd, "make-durable", &input)
+            .with_context(|| format!("make-durable extension for '{session}'"))?;
+        return Ok(out.message);
+    }
+
+    let locale_clause = if locales.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " (2) For each project repo you've touched ({}): make sure in-flight work is \
+             captured -- commit it, or record the branch + uncommitted changes + next step \
+             (in the log entry) so nothing is stranded there.",
+            locales.join(", ")
+        )
+    };
+    Ok(format!(
+        "[muxr recycle] Before this session is recycled, flush your state to ALL the locales \
+         you've been working in so a fresh session resumes cleanly. (1) Update {} -- set the \
+         `entrypoint:` frontmatter to a tight \"where we are / what's next\" line and append a \
+         dated entry under `## Log` with current state and open threads.{} Then run /exit. \
+         muxr is waiting for your exit and will reopen this session FRESH from that pointer. \
+         Take as long as you need.",
+        log_md.display(),
+        locale_clause
+    ))
+}
+
 /// The launch intent handed to a resolver extension. Identifies WHAT muxr is
 /// trying to launch; the extension answers WHERE/HOW (see `ResolveOutcome`).
 #[derive(serde::Serialize)]
@@ -736,7 +809,7 @@ fn cmd_open_remote(tmux: &Tmux, config: &Config, remote_name: &str, args: &[Stri
         let connect_cmd = remote::connect_command(remote, &instance, &context)?;
         eprintln!("Creating {session} -> {instance} via {}", remote.connect);
         let home = dirs::home_dir().context("No home directory")?;
-        tmux.create_session(&session, &home, &connect_cmd)?;
+        tmux.create_session(&session, &home, &connect_cmd, &[])?;
         tmux.attach(&session)?;
     }
 

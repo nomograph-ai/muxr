@@ -59,12 +59,23 @@ impl Tmux {
 
     /// Create a new tmux session (detached).
     /// If `tool_cmd` is empty, creates a bare shell session.
-    pub fn create_session(&self, name: &str, dir: &Path, tool_cmd: &str) -> Result<()> {
+    /// `env` sets session-scoped variables via `new-session -e KEY=VALUE`
+    /// (tmux 3.2+); pass `&[]` for none.
+    pub fn create_session(
+        &self,
+        name: &str,
+        dir: &Path,
+        tool_cmd: &str,
+        env: &[(String, String)],
+    ) -> Result<()> {
         let dir_str = dir.to_str().context("Invalid directory path")?;
 
-        let status = self
-            .command()
-            .args(["new-session", "-d", "-s", name, "-c", dir_str])
+        let mut new_session = self.command();
+        new_session.args(["new-session", "-d", "-s", name, "-c", dir_str]);
+        for (k, v) in env {
+            new_session.arg("-e").arg(format!("{k}={v}"));
+        }
+        let status = new_session
             .status()
             .context("Failed to create tmux session")?;
 

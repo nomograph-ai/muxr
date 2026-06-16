@@ -24,6 +24,15 @@ pub struct Config {
     /// default. See `extension.rs` for the contract.
     #[serde(default)]
     pub extensions: Extensions,
+    /// Environment variables set on each campaign tmux session (`new-session
+    /// -e KEY=VALUE`, tmux 3.2+). Values are templated with `{session}`,
+    /// `{repo}`, `{campaign}`, and `{session_slug}` (the session name with any
+    /// char outside `[A-Za-z0-9_-]` mapped to `-`). This is how a session gets
+    /// coupled to an external tool generically -- e.g. binding synthesist with
+    /// `SYNTHESIST_SESSION = "{session_slug}"` -- without muxr core knowing
+    /// about that tool.
+    #[serde(default)]
+    pub session_env: std::collections::HashMap<String, String>,
 }
 
 /// The 3.0 extension contract: one subprocess mechanism for every fiddly bit
@@ -758,6 +767,41 @@ impl Config {
         self.default_tool.clone()
     }
 
+    /// Resolve the templated `[session_env]` map for a concrete session name
+    /// into the literal `KEY=VALUE` pairs to set on its tmux session. Tokens
+    /// `{session}`, `{repo}`, `{campaign}`, `{session_slug}` are interpolated;
+    /// the slug maps any char outside `[A-Za-z0-9_-]` to `-` (path-safe for
+    /// tools like synthesist that reject `/` in a session segment).
+    pub fn session_env_for(&self, session_name: &str) -> Vec<(String, String)> {
+        if self.session_env.is_empty() {
+            return Vec::new();
+        }
+        let (repo, campaign) = session_name
+            .split_once('/')
+            .unwrap_or((session_name, ""));
+        let slug: String = session_name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        self.session_env
+            .iter()
+            .map(|(k, v)| {
+                let value = v
+                    .replace("{session_slug}", &slug)
+                    .replace("{session}", session_name)
+                    .replace("{repo}", repo)
+                    .replace("{campaign}", campaign);
+                (k.clone(), value)
+            })
+            .collect()
+    }
+
     /// Get the harness config for a tool name.
     ///
     /// User config in `[tools.<name>]` is treated as a PARTIAL override over
@@ -818,8 +862,11 @@ impl Config {
         let path = self.hooks_path();
         for cmd in &self.hooks.pre_create {
             // Capture output so a hook's raw stdout (kit/rune sync) doesn't
-            // dump into the launch. Show a clean status line; reveal the
-            // captured output only when the hook fails.
+            // dump into the launch. Show a transient "running" line first so a
+            // slow sync reads as progress, not a hang; the ok/warn result
+            // overwrites it. Reveal the captured output only when the hook
+            // fails.
+            crate::ui::step_start(&format!("setup: {cmd}"));
             let result = std::process::Command::new("sh")
                 .args(["-c", cmd])
                 .current_dir(dir)
@@ -907,6 +954,33 @@ default_tool = "claude"
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_env_interpolates_tokens_and_slug() {
+        let config: Config = toml::from_str(
+            "[repos]\n\n[session_env]\nSYNTHESIST_SESSION = \"{session_slug}\"\nINFO = \"{repo}:{campaign}\"\n",
+        )
+        .unwrap();
+        let mut env = config.session_env_for("work/in-place/fix");
+        env.sort();
+        assert_eq!(
+            env,
+            vec![
+                ("INFO".to_string(), "work:in-place/fix".to_string()),
+                (
+                    "SYNTHESIST_SESSION".to_string(),
+                    // slug maps the two slashes to dashes
+                    "work-in-place-fix".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn session_env_empty_when_unconfigured() {
+        let config: Config = toml::from_str("[repos]").unwrap();
+        assert!(config.session_env_for("work/x").is_empty());
+    }
 
     fn sample_config() -> Config {
         let toml_str = r##"
