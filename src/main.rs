@@ -429,8 +429,8 @@ fn try_move_session_file(config: &Config, old: &str, new: &str) {
         Ok(p) => p,
         Err(_) => return,
     };
-    let old_path = primitives::campaign_dir(&dir, &old_campaign);
-    let new_path = primitives::campaign_dir(&dir, &new_campaign);
+    let old_path = config.layout.campaign_dir(&dir, &old_campaign);
+    let new_path = config.layout.campaign_dir(&dir, &new_campaign);
     if !old_path.exists() {
         return;
     }

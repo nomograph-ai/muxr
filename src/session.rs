@@ -36,8 +36,8 @@ pub(crate) fn cmd_open_dispatch(
 
     // No campaign arg -> route to the per-repo switchboard.
     if args.get(1).is_none() {
-        primitives::scaffold_switchboard(&dir)?;
-        return cmd_open(tmux, &config, name, primitives::SWITCHBOARD, false);
+        primitives::scaffold_switchboard(&config.layout, &dir)?;
+        return cmd_open(tmux, &config, name, &config.layout.switchboard_slug, false);
     }
 
     let campaign = args[1].as_str();
@@ -70,11 +70,11 @@ pub(crate) fn cmd_open(
     // If the campaign doesn't exist yet, scaffold a stub so the human can
     // onboard it in-flow. Keeps the launch single-command from the control
     // plane.
-    if !primitives::campaign_md_path(&repo_dir, campaign).is_file() {
-        primitives::scaffold_campaign_stub(&repo_dir, campaign)?;
+    if !config.layout.campaign_md_path(&repo_dir, campaign).is_file() {
+        primitives::scaffold_campaign_stub(&config.layout, &repo_dir, campaign)?;
     }
-    let campaign_md = primitives::campaign_file(&repo_dir, campaign)?;
-    let log_path = primitives::resolve_or_scaffold_session(&repo_dir, campaign)?;
+    let campaign_md = primitives::campaign_file(&config.layout, &repo_dir, campaign)?;
+    let log_path = primitives::resolve_or_scaffold_session(&config.layout, &repo_dir, campaign)?;
 
     let session_name = format!("{repo_name}/{campaign}");
 
@@ -199,7 +199,7 @@ pub(crate) fn cmd_shard(
     }
     let repo_dir = config.resolve_dir(&repo_name)?;
 
-    let new_md = primitives::scaffold_shard(&repo_dir, &hub, new)?;
+    let new_md = primitives::scaffold_shard(&config.layout, &repo_dir, &hub, new)?;
     eprintln!();
     eprintln!("Sharded '{hub}' -> '{new}' ({})", new_md.display());
     eprintln!();
@@ -221,8 +221,8 @@ pub(crate) fn cmd_reorient(tmux: &Tmux, name: Option<&str>) -> Result<()> {
     let (repo_name, campaign) = parse_session(&session)
         .with_context(|| format!("'{session}' is not a <repo>/<campaign> session"))?;
     let repo_dir = config.resolve_dir(&repo_name)?;
-    let campaign_md = primitives::campaign_md_path(&repo_dir, &campaign);
-    let log_md = primitives::log_md_path(&repo_dir, &campaign);
+    let campaign_md = config.layout.campaign_md_path(&repo_dir, &campaign);
+    let log_md = config.layout.log_md_path(&repo_dir, &campaign);
 
     if !campaign_md.is_file() {
         anyhow::bail!(
@@ -271,11 +271,11 @@ pub(crate) fn cmd_recycle(
         anyhow::bail!("No live session named {session}.");
     }
     let repo_dir = config.resolve_dir(&repo_name)?;
-    let log_md = primitives::log_md_path(&repo_dir, &campaign);
+    let log_md = config.layout.log_md_path(&repo_dir, &campaign);
     // The campaign's declared work surface: the project repos this session
     // touches. A flush must reach all of these, not just log.md, or in-flight
     // work in the project repos is stranded when the session dies.
-    let locales = primitives::campaign_md_path(&repo_dir, &campaign);
+    let locales = config.layout.campaign_md_path(&repo_dir, &campaign);
     let locales = primitives::load_campaign(&locales)
         .map(|(c, _)| c.paths)
         .unwrap_or_default();
@@ -389,7 +389,7 @@ pub(crate) fn cmd_archive(tmux: &Tmux, campaign: &str, repo: Option<&str>) -> Re
     }
 
     let repo_dir = config.resolve_dir(&repo_name)?;
-    let dest = primitives::archive_campaign(&repo_dir, campaign)?;
+    let dest = primitives::archive_campaign(&config.layout, &repo_dir, campaign)?;
     eprintln!("Archived {repo_name}/{campaign} -> {}", dest.display());
     Ok(())
 }
@@ -467,8 +467,8 @@ pub(crate) fn compose_launch_command(
         .with_context(|| format!("cannot derive repo/campaign from '{session_name}'"))?;
 
     let repo_dir = config.resolve_dir(&repo_name)?;
-    let campaign_md = primitives::campaign_md_path(&repo_dir, &campaign);
-    let log_path = primitives::log_md_path(&repo_dir, &campaign);
+    let campaign_md = config.layout.campaign_md_path(&repo_dir, &campaign);
+    let log_path = config.layout.log_md_path(&repo_dir, &campaign);
 
     let tool = config.resolve_tool(&repo_name, None);
     let tool_config = config.tool_for(&tool);
