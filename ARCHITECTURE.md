@@ -54,6 +54,46 @@ Points (all default-when-absent; bare muxr with no `[extensions]` /
 6. **PRE-CREATE HOOKS** -- the shell provisioning seam (`mise install` + the skill
    shim).
 
+## The runtime-adapter shape (what a new runtime implements)
+A runtime adapter is a `[tools.<name>]` block -- pure config, no code. It is the
+contract any CLI (Claude, pi, opencode, ...) follows to be drivable by muxr. The
+fields, and where they bend per runtime:
+
+| field | purpose | `{...}` tokens |
+| --- | --- | --- |
+| `bin` | executable | -- |
+| `args` | initial launch | `{name}` |
+| `resume_args` | resume by id | `{session_id}` |
+| `continue_args` | resume when no id is known | -- |
+| `fork_args` | branch a new id off an existing conversation | `{session_id}` |
+| `model_args` | set model at launch | `{model}` |
+| `rename_command` / `model_switch_command` / `exit_command` | slash commands typed into the LIVE pane (not launch flags); `exit_command` drives recycle + `muxr upgrade` | `{name}` / `{model}` |
+| `prompt_mode` | `"file"` (`--append-system-prompt-file`) or `"string"` | -- |
+| `supports_add_dirs` | whether the CLI takes `--add-dir` for extra roots | -- |
+| `wrapper` | optional command prefixed ahead of `bin` (e.g. a sandbox) | -- |
+| `session_discovery` | `{type="file", pattern="…/{pid}.json", id_key="…"}` to recover the conversation id, or `{type="none"}` | `{pid}` |
+
+The seams the subprocess contract covers: a runtime with no per-pid session file
+sets `session_discovery.type = "none"` and recovers its id in a **resolver**; a
+runtime with no `--name`/`--add-dir` simply omits them and sets
+`supports_add_dirs = false`. Worked example with all three bends:
+`extensions/adapters/opencode.toml`.
+
+## Reference extensions & distribution
+`extensions/` ships the reference set and is the canonical home for the shape:
+- `adapters/{claude,pi,opencode}.toml` -- the declarative adapters above. claude
+  + pi mirror the compiled-in defaults; opencode is a config-only third-party
+  port. (3.1 demotes the compiled-in `builtin_claude`/`builtin_pi` to these
+  shipped files, so core carries zero runtime knowledge.)
+- `examples/{resolver,make-durable}.sh` -- copyable templates for the two
+  subprocess points (JSON in/out).
+
+Distribution has no registry: declarative adapters are TOML (blessed set ships
+in the release; your own live in / are `include`d from your estate repo);
+subprocess extensions are scripts that live in your estate repo, invoked by
+absolute path. The dir is part of this repo while the contract settles, designed
+to split into a standalone `muxr-extensions` bundle once external runtimes adopt.
+
 ## What is deliberately NOT in core
 - **The statusline.** It was Claude-Code-specific chrome (parsed CC's statusLine
   JSON) and doubled as the writer of a session-health cache. Shed in 3.0.0:

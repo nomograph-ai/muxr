@@ -1,0 +1,48 @@
+# opencode runtime adapter for muxr.
+#
+# This adapter is NOT compiled into muxr -- it is a worked example of porting a
+# third-party runtime by config alone, and of where the shape BENDS. Flags below
+# are from `opencode --help` / `opencode run --help` (verify against your version).
+#
+# What maps cleanly:
+#   -s/--session <id>   resume by id          -> resume_args
+#   -c/--continue       continue last session -> continue_args
+#   --fork              fork on continue      -> fork_args (boolean)
+#   -m/--model <p/m>    set model             -> model_args
+#   --prompt <str>      system/seed prompt    -> prompt_mode = "string"
+#
+# Where it bends (the seams the contract exists for):
+#   * No `--name`: opencode has no session-name flag (it uses --title from the
+#     prompt). muxr still names the tmux session; launch args just omit it.
+#   * No `--add-dir`: opencode takes a single positional project dir, so extra
+#     working roots aren't a launch flag -> supports_add_dirs = false.
+#   * No per-pid session file: ids live behind `opencode session` / `opencode
+#     export`, not a `~/.../{pid}.json`. So File discovery can't find them ->
+#     discovery is "none" here, and resume-by-id needs a RESOLVER extension that
+#     shells `opencode session` to map a tmux session to its opencode id. That
+#     is precisely what [extensions].resolver is for (see examples/resolver.sh).
+#   * No known slash commands for live rename / model-switch -> left unset; muxr
+#     simply skips those live actions for this runtime.
+
+[tools.opencode]
+bin = "opencode"
+
+# No --name; opencode launches its TUI in the cwd.
+args = []
+
+resume_args   = ["--session", "{session_id}"]
+continue_args = ["--continue"]
+fork_args     = ["--fork"]                       # boolean; pairs with resume/continue
+model_args    = ["--model", "{model}"]           # model format: provider/model
+
+# rename_command / model_switch_command / exit_command intentionally unset --
+# opencode exposes no slash equivalents we rely on. recycle falls back to muxr's
+# own pane-kill path when exit_command is absent.
+
+prompt_mode       = "string"
+supports_add_dirs = false
+
+# No per-pid session file -> no File discovery. Resume by id requires a resolver
+# extension (examples/resolver.sh) that queries `opencode session`.
+[tools.opencode.session_discovery]
+type = "none"

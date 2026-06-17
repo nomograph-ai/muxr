@@ -1,0 +1,48 @@
+# Claude Code runtime adapter for muxr.
+#
+# A runtime adapter is pure config: it tells muxr how to drive ONE coding CLI
+# (launch, resume, fork, switch model, exit, find the session id). muxr core
+# has no per-runtime code -- adding a runtime is writing one of these blocks.
+#
+# This file mirrors the compiled-in `Tool::builtin_claude()` default. It is
+# shipped so Claude becomes "just an adapter that happens to be in the box,"
+# not a special case in the engine. Paste this block into your muxr config, or
+# `include` this file (see extensions/README.md).
+
+[tools.claude]
+bin = "claude"
+
+# Initial launch. `{name}` -> the tmux session name (<repo>/<campaign>).
+args = ["--name", "{name}"]
+
+# Resume a prior conversation by id. `{session_id}` comes from discovery below.
+resume_args = ["--resume", "{session_id}"]
+
+# Fallback when no session id is known yet (continue the most recent).
+continue_args = ["--continue"]
+
+# Fork: branch a NEW conversation id off an existing one.
+fork_args = ["--fork-session"]
+
+# Set the model at launch. `{model}` -> the requested model.
+model_args = ["--model", "{model}"]
+
+# Slash commands sent into the live pane (not launch flags).
+rename_command       = "/rename {name}"
+model_switch_command = "/model {model}"
+exit_command         = "/exit"          # used by recycle + `muxr upgrade`
+
+# How the appended system prompt (HARNESS rules) is delivered.
+#   "file"   -> --append-system-prompt-file <path>   (Claude)
+#   "string" -> --append-system-prompt <contents>
+prompt_mode = "file"
+
+# Claude accepts extra working roots via --add-dir.
+supports_add_dirs = true
+
+# How muxr recovers the conversation id for `muxr save`: walk the session's
+# process tree, and for each pid read a per-pid JSON file, pulling `id_key`.
+[tools.claude.session_discovery]
+type = "file"
+pattern = "~/.claude/sessions/{pid}.json"
+id_key = "sessionId"
