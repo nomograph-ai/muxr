@@ -7,6 +7,10 @@ use std::path::PathBuf;
 pub struct Config {
     #[serde(default = "default_tool")]
     pub default_tool: String,
+    // Defaults to empty so a fresh `muxr init` config (no repos yet) parses;
+    // using an unknown repo then fails with a clear "unknown repo" error
+    // rather than a serde "missing field repos" at load time.
+    #[serde(default)]
     pub repos: HashMap<String, Repo>,
     #[serde(default)]
     pub remotes: HashMap<String, Remote>,
@@ -1210,6 +1214,21 @@ session_discovery = { type = "none" }
     fn default_template_contains_default_tool() {
         let template = Config::default_template();
         assert!(template.contains("default_tool = \"claude\""));
+    }
+
+    #[test]
+    fn default_template_parses_as_valid_config() {
+        // `muxr init` writes this template; it must deserialize cleanly (the
+        // commented [extensions]/[session_env]/[chooser] examples must not be
+        // active, and the active body must be valid).
+        let template = Config::default_template();
+        let cfg: Config = toml::from_str(&template).expect("default template must parse");
+        assert_eq!(cfg.default_tool, "claude");
+        // No extensions/env/chooser configured by default -> bare launcher.
+        assert!(cfg.extensions.resolver.is_none());
+        assert!(cfg.extensions.make_durable.is_none());
+        assert!(cfg.session_env.is_empty());
+        assert!(cfg.chooser.command.is_none());
     }
 
     // -- Harness config tests --

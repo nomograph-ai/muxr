@@ -333,7 +333,7 @@ pub(crate) fn cmd_recycle(
                 "recycle {session}: asked the agent to flush -> {} then exit",
                 log_md.display()
             ));
-            tmux.send_text(&session, &msg)?;
+            tmux.send_text(&session, &compose_recycle_message(&msg, &exit_cmd))?;
         }
         ui::note("waiting for the agent to finish and exit (agent-paced)…");
         match harness_pid {
@@ -486,6 +486,19 @@ struct MakeDurableOutput {
 /// `[extensions].make_durable` is invoked with the session context and
 /// supplies the message; absent -> muxr's built-in self-contained prompt
 /// (names the exact log.md path, so it never depends on a `/serialize` skill).
+/// Compose the agent-facing recycle message: flush instructions (built-in or
+/// from a `make_durable` extension) + muxr's own exit directive. The exit
+/// directive is ALWAYS appended, so a custom extension message that forgets to
+/// tell the agent to exit can't hang recycle until the SIGKILL timeout.
+pub(crate) fn compose_recycle_message(flush: &str, exit_cmd: &str) -> String {
+    format!(
+        "{}\n\nWhen you've finished, run {} -- muxr is waiting and will reopen \
+         this session FRESH from the pointer. Take as long as you need.",
+        flush.trim_end(),
+        exit_cmd
+    )
+}
+
 fn make_durable_message(
     config: &Config,
     session: &str,
@@ -517,13 +530,14 @@ fn make_durable_message(
             locales.join(", ")
         )
     };
+    // NB: no exit/wait/reopen mechanics here -- the recycle caller appends a
+    // uniform exit directive to whatever message is sent (built-in or from a
+    // make_durable extension), so the agent is always told how to exit.
     Ok(format!(
         "[muxr recycle] Before this session is recycled, flush your state to ALL the locales \
          you've been working in so a fresh session resumes cleanly. (1) Update {} -- set the \
          `entrypoint:` frontmatter to a tight \"where we are / what's next\" line and append a \
-         dated entry under `## Log` with current state and open threads.{} Then run /exit. \
-         muxr is waiting for your exit and will reopen this session FRESH from that pointer. \
-         Take as long as you need.",
+         dated entry under `## Log` with current state and open threads.{}",
         log_md.display(),
         locale_clause
     ))

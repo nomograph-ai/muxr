@@ -828,7 +828,18 @@ fn cmd_tmux_status(tmux: &Tmux) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::compose_launch_command;
+    use crate::session::{compose_launch_command, compose_recycle_message};
+
+    #[test]
+    fn recycle_message_always_appends_exit_directive() {
+        // A make_durable extension that forgets to instruct an exit must still
+        // get muxr's exit directive appended, or recycle hangs to SIGKILL.
+        let m = compose_recycle_message("flush your state", "/exit");
+        assert!(m.starts_with("flush your state"), "flush content kept: {m}");
+        assert!(m.contains("run /exit"), "exit directive appended: {m}");
+        // Honors a custom exit command (e.g. Pi's /quit).
+        assert!(compose_recycle_message("do the thing", "/quit").contains("run /quit"));
+    }
 
     #[test]
     fn resolve_tool_uses_override() {

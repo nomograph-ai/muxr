@@ -36,6 +36,13 @@ where
     I: Serialize,
     O: DeserializeOwned,
 {
+    // INVARIANT: extension inputs must stay small (well under the OS pipe
+    // buffer, ~16-64KB). We write the whole payload to the child's stdin
+    // before draining its stdout, so a child that emitted pipe-buffer-scale
+    // stdout while we were still writing stdin could deadlock. muxr's inputs
+    // (resolve intent, make-durable context) are tiny JSON, so write_all
+    // completes in one shot and this never blocks. If an input ever grows
+    // large, move the stdin write to a spawned thread.
     let payload = serde_json::to_vec(input)
         .with_context(|| format!("serialize {point} extension input"))?;
 
