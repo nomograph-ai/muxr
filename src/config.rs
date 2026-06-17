@@ -215,9 +215,6 @@ pub struct Tool {
     /// Command to send for live model switch. Supports `{model}` interpolation.
     #[serde(default)]
     pub model_switch_command: Option<String>,
-    /// Command to compact context.
-    #[serde(default)]
-    pub compact_command: Option<String>,
     /// Command to exit the harness gracefully.
     #[serde(default)]
     pub exit_command: Option<String>,
@@ -305,7 +302,6 @@ fn merge_tool_with_builtin(user: Tool, builtin: Tool) -> Tool {
         },
         rename_command: user.rename_command.or(builtin.rename_command),
         model_switch_command: user.model_switch_command.or(builtin.model_switch_command),
-        compact_command: user.compact_command.or(builtin.compact_command),
         exit_command: user.exit_command.or(builtin.exit_command),
         continue_args: if user.continue_args.is_empty() {
             builtin.continue_args
@@ -366,7 +362,6 @@ impl Tool {
             model_args: vec!["--model".to_string(), "{model}".to_string()],
             rename_command: Some("/rename {name}".to_string()),
             model_switch_command: Some("/model {model}".to_string()),
-            compact_command: Some("/compact".to_string()),
             exit_command: Some("/exit".to_string()),
             continue_args: vec!["--continue".to_string()],
             fork_args: vec!["--fork-session".to_string()],
@@ -396,7 +391,6 @@ impl Tool {
             model_args: vec!["--model".to_string(), "{model}".to_string()],
             rename_command: Some("/name {name}".to_string()),
             model_switch_command: Some("/model {model}".to_string()),
-            compact_command: Some("/compact".to_string()),
             exit_command: Some("/quit".to_string()),
             continue_args: vec!["--continue".to_string()],
             fork_args: vec!["--fork".to_string(), "{session_id}".to_string()],
@@ -1490,7 +1484,6 @@ session_discovery = { type = "none" }
             model_args: vec!["--model".to_string(), "{model}".to_string()],
             rename_command: Some("/name {name}".to_string()),
             model_switch_command: Some("/model {model}".to_string()),
-            compact_command: Some("/compact".to_string()),
             exit_command: Some("/quit".to_string()),
             continue_args: vec!["--continue".to_string()],
             fork_args: vec!["--fork".to_string(), "{session_id}".to_string()],
