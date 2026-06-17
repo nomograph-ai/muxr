@@ -81,10 +81,12 @@ runtime with no `--name`/`--add-dir` simply omits them and sets
 
 ## Reference extensions & distribution
 `extensions/` ships the reference set and is the canonical home for the shape:
-- `adapters/{claude,pi,opencode}.toml` -- the declarative adapters above. claude
-  + pi mirror the compiled-in defaults; opencode is a config-only third-party
-  port. (3.1 demotes the compiled-in `builtin_claude`/`builtin_pi` to these
-  shipped files, so core carries zero runtime knowledge.)
+- `adapters/{claude,pi,opencode}.toml` -- the declarative adapters above. As of
+  **3.1** claude + pi ARE muxr's built-in defaults: the binary embeds these two
+  files (`include_str!`) and parses them into the adapter table at load, so core
+  carries no hand-written per-runtime struct and `tool_for`/`tool_names` resolve
+  generically. opencode is a config-only third-party port (a worked example, not
+  a default).
 - `examples/{resolver,make-durable}.sh` -- copyable templates for the two
   subprocess points (JSON in/out).
 
@@ -124,3 +126,11 @@ to split into a standalone `muxr-extensions` bundle once external runtimes adopt
   session-env, P4 chooser), each behavior-compatible; recycle hardened (sysinfo
   PID match so the flush wait survives a `ps`-blocking sandbox; exit directive
   always appended). Independent adversarial review confirmed GO + behavior-compat.
+- **3.0.1 (2026-06-17)** -- macOS harness-detection fix: `pid_runs_bin` matches the
+  executable `name()` too (sysinfo's `cmd()` argv is empty on macOS, so 3.0.0's
+  argv-only match reported "no harness process" -> broke recycle + `muxr upgrade`).
+- **3.1.0 (2026-06-17)** -- zero runtime knowledge in core: the built-in claude + pi
+  adapters became the shipped `extensions/adapters/*.toml` (embedded via
+  `include_str!`), `tool_for`/`tool_names` resolve generically through the adapter
+  table, and the hardcoded per-runtime branches were removed. Additive,
+  behavior-compatible (so a minor bump). Closes nomograph/muxr#4.

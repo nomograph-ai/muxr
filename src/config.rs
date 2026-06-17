@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Config {
@@ -356,56 +357,60 @@ const RESERVED_NAMES: &[&str] = &[
     "completions",
 ];
 
-impl Tool {
-    /// Built-in Claude Code harness definition.
-    pub fn builtin_claude() -> Self {
-        Self {
-            bin: "claude".to_string(),
-            args: vec!["--name".to_string(), "{name}".to_string()],
-            resume_args: vec!["--resume".to_string(), "{session_id}".to_string()],
-            model_args: vec!["--model".to_string(), "{model}".to_string()],
-            rename_command: Some("/rename {name}".to_string()),
-            model_switch_command: Some("/model {model}".to_string()),
-            exit_command: Some("/exit".to_string()),
-            continue_args: vec!["--continue".to_string()],
-            fork_args: vec!["--fork-session".to_string()],
-            session_discovery: SessionDiscovery::File {
-                pattern: "~/.claude/sessions/{pid}.json".to_string(),
-                id_key: "sessionId".to_string(),
-            },
-            wrapper: None,
-            prompt_mode: PromptMode::File,
-            supports_add_dirs: Some(true),
+/// One shipped adapter file: `extensions/adapters/<name>.toml` is a single
+/// `[tools.<name>]` block, so it deserializes into this one-entry table.
+#[derive(Deserialize)]
+struct AdapterFile {
+    #[serde(default)]
+    tools: HashMap<String, Tool>,
+}
+
+/// The runtime adapters muxr ships in the box.
+///
+/// These ARE the `extensions/adapters/*.toml` files (the same ones documented
+/// in `extensions/README.md`), embedded at compile time and parsed once. The
+/// shipped TOML is the single source of truth -- core no longer carries a
+/// hand-written per-runtime struct, and `tool_for`/`tool_names` resolve through
+/// this table generically rather than matching on a hardcoded tool name.
+///
+/// Only claude + pi ship as defaults (matching pre-3.1 behavior byte-for-byte);
+/// opencode.toml in that dir is a worked example, not a default. A malformed
+/// shipped file is a build invariant violation (covered by `shipped_adapters_*`
+/// tests), so parse failure panics rather than degrading silently.
+fn builtin_adapters() -> &'static HashMap<String, Tool> {
+    static ADAPTERS: OnceLock<HashMap<String, Tool>> = OnceLock::new();
+    ADAPTERS.get_or_init(|| {
+        let mut m = HashMap::new();
+        for src in [
+            include_str!("../extensions/adapters/claude.toml"),
+            include_str!("../extensions/adapters/pi.toml"),
+        ] {
+            let parsed: AdapterFile =
+                toml::from_str(src).expect("shipped adapter TOML must parse");
+            m.extend(parsed.tools);
         }
+        m
+    })
+}
+
+impl Tool {
+    /// The shipped Claude Code adapter. Thin accessor over `builtin_adapters()`
+    /// (the TOML is authoritative); used only by tests that assert its fields.
+    #[cfg(test)]
+    pub fn builtin_claude() -> Self {
+        builtin_adapters()
+            .get("claude")
+            .cloned()
+            .expect("claude adapter ships in the box")
     }
 
-    /// Built-in Pi harness definition.
-    ///
-    /// Pi reads `.pi/settings.json` from cwd, so launch args stay empty;
-    /// the model is selected via `--model {model}` like Claude.
-    /// Session discovery references `~/.pi/sessions/{pid}.json`, which is
-    /// written by an external Pi extension (not Pi itself).
-    /// `wrapper` defaults to None and is overridable in user config (e.g.
-    /// to wrap launch in a sandboxing tool).
+    /// The shipped Pi adapter. Thin accessor over `builtin_adapters()`.
+    #[cfg(test)]
     pub fn builtin_pi() -> Self {
-        Self {
-            bin: "pi".to_string(),
-            args: vec![],
-            resume_args: vec!["--resume".to_string(), "{session_id}".to_string()],
-            model_args: vec!["--model".to_string(), "{model}".to_string()],
-            rename_command: Some("/name {name}".to_string()),
-            model_switch_command: Some("/model {model}".to_string()),
-            exit_command: Some("/quit".to_string()),
-            continue_args: vec!["--continue".to_string()],
-            fork_args: vec!["--fork".to_string(), "{session_id}".to_string()],
-            session_discovery: SessionDiscovery::File {
-                pattern: "~/.pi/sessions/{pid}.json".to_string(),
-                id_key: "sessionId".to_string(),
-            },
-            wrapper: None,
-            prompt_mode: PromptMode::String,
-            supports_add_dirs: Some(false),
-        }
+        builtin_adapters()
+            .get("pi")
+            .cloned()
+            .expect("pi adapter ships in the box")
     }
 
     /// Build the launch command with template interpolation.
@@ -828,11 +833,7 @@ impl Config {
     /// trade-off is acceptable because clearing a builtin's resume-args or
     /// session-discovery rarely makes sense.
     pub fn tool_for(&self, tool: &str) -> Option<Tool> {
-        let builtin = match tool {
-            "claude" => Some(Tool::builtin_claude()),
-            "pi" => Some(Tool::builtin_pi()),
-            _ => None,
-        };
+        let builtin = builtin_adapters().get(tool).cloned();
         match (self.tools.get(tool).cloned(), builtin) {
             (Some(user), Some(builtin)) => Some(merge_tool_with_builtin(user, builtin)),
             (Some(user), None) => Some(user),
@@ -841,15 +842,13 @@ impl Config {
         }
     }
 
-    /// All configured harness names (explicit + built-in).
+    /// All configured harness names (explicit user tools + shipped adapters).
     pub fn tool_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self.tools.keys().cloned().collect();
-        // Add built-in claude if not overridden
-        if !names.contains(&"claude".to_string()) {
-            names.push("claude".to_string());
-        }
-        if !names.contains(&"pi".to_string()) {
-            names.push("pi".to_string());
+        for name in builtin_adapters().keys() {
+            if !names.contains(name) {
+                names.push(name.clone());
+            }
         }
         names.sort();
         names
@@ -1433,6 +1432,26 @@ prompt_mode = "string"
     }
 
     // -- Pi runtime tests --
+
+    #[test]
+    fn shipped_adapters_are_exactly_claude_and_pi() {
+        // The shipped (compile-time-embedded) adapter set is what `muxr` offers
+        // out of the box. Lock it to claude + pi: pre-3.1 hardcoded exactly
+        // these, and opencode.toml ships as a worked EXAMPLE, not a default.
+        let mut keys: Vec<&str> = builtin_adapters().keys().map(|s| s.as_str()).collect();
+        keys.sort();
+        assert_eq!(keys, vec!["claude", "pi"]);
+    }
+
+    #[test]
+    fn user_only_tool_resolves_without_a_builtin() {
+        // A runtime with no shipped adapter (e.g. opencode) still resolves from
+        // the user's [tools.*] block alone -- the (Some user, None builtin) arm.
+        let config: Config =
+            toml::from_str("[tools.opencode]\nbin = \"opencode\"").unwrap();
+        let t = config.tool_for("opencode").expect("user tool resolves");
+        assert_eq!(t.bin, "opencode");
+    }
 
     #[test]
     fn builtin_pi_harness() {

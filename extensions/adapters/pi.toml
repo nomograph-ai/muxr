@@ -1,7 +1,8 @@
 # Pi runtime adapter for muxr.
 #
-# Mirrors the compiled-in `Tool::builtin_pi()` default. Pi shows where the
-# adapter shape bends for a different CLI: empty launch args (Pi reads
+# As of muxr 3.1 this file IS the built-in Pi default (embedded via include_str!,
+# no compiled-in struct). Pi shows where the adapter shape bends for a different
+# CLI: empty launch args (Pi reads
 # `.pi/settings.json` from cwd), a "string" prompt mode, no --add-dir, and a
 # session file written by an external Pi extension rather than by Pi itself.
 
