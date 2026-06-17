@@ -110,37 +110,40 @@ pub fn has_harness_process(tmux: &Tmux, tmux_session: &str, bin: &str) -> bool {
         .any(|pid| pid_runs_bin(pid, bin))
 }
 
-/// True if process `pid`'s argv invokes `bin` -- either the bare name or a
-/// path ending in `/bin` (so node-wrapped harnesses like `node /…/claude`
-/// still match).
+/// True if process `pid` is running `bin` -- matched by the executable name
+/// or an argv token (the bare name or a path ending in `/bin`, so node-wrapped
+/// harnesses like `node /…/claude` still match).
 ///
-/// Reads argv via `ps`, NOT sysinfo: on macOS `sysinfo`'s `process.cmd()`
-/// is frequently empty for live processes (argv is not always introspectable
-/// through libproc), which made the previous sysinfo-based check report "no
-/// harness process" for every running session and silently broke
-/// `muxr upgrade` / `ls --active`. `ps -o args=` reads argv reliably. The PID
-/// tree itself still comes from sysinfo (`descendant_pids`), which only needs
-/// parent links and works fine.
+/// Reads process metadata via sysinfo (syscalls), NOT by shelling `ps` -- a
+/// sandbox can block the `/bin/ps` binary, which previously left every `save`
+/// with sessionId=null. We deliberately match BOTH signals:
+///   - `name()` (the executable basename): the reliable signal on macOS, where
+///     sysinfo's `cmd()` (argv via KERN_PROCARGS2) is restricted and comes back
+///     empty. Matching `cmd()` ALONE (as v3.0.0 did) reported "no harness
+///     process" for every session on macOS, breaking recycle's flush wait and
+///     `muxr upgrade`.
+///   - `cmd()` (argv tokens): works on Linux and catches wrapper-launched
+///     binaries whose `name()` is the interpreter (e.g. `node /…/claude`).
+///
+/// Either match counts. The PID tree (`descendant_pids`) already uses sysinfo,
+/// which only needs parent links and works on both platforms.
 pub fn pid_runs_bin(pid: u32, bin: &str) -> bool {
-    // Match the process command line via sysinfo (syscalls), NOT by shelling
-    // `ps`. A sandbox that blocks the `ps` BINARY (e.g. nono's
-    // dangerous_commands_macos) would make a ps-based check return false for
-    // every pid -> recycle can't find the harness -> the flush wait truncates.
-    // sysinfo reads proc info directly, so it works in that sandbox (the PID
-    // tree in `child_pids` already relies on it). Mirrors the old ps `-o args=`
-    // token match: any argv token equal to `bin` or ending in `/bin`.
     let suffix = format!("/{bin}");
     let mut sys = System::new();
     sys.refresh_processes(ProcessesToUpdate::Some(&[Pid::from_u32(pid)]), true);
-    sys.process(Pid::from_u32(pid))
-        .map(|p| {
-            p.cmd().iter().any(|tok| {
-                tok.to_str()
-                    .map(|t| t == bin || t.ends_with(&suffix))
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false)
+    let Some(p) = sys.process(Pid::from_u32(pid)) else {
+        return false;
+    };
+    // name() == bin: the macOS-reliable path (cmd() is empty there).
+    if p.name().to_str().map(|n| n == bin).unwrap_or(false) {
+        return true;
+    }
+    // cmd() argv token: Linux + wrapper-script (`node /…/claude`) coverage.
+    p.cmd().iter().any(|tok| {
+        tok.to_str()
+            .map(|t| t == bin || t.ends_with(&suffix))
+            .unwrap_or(false)
+    })
 }
 
 impl SavedState {
@@ -331,5 +334,27 @@ impl SavedState {
 
         eprintln!("Restored {count} sessions.");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pid_runs_bin_detects_by_name() {
+        // Regression guard for the macOS detection bug: sysinfo's cmd() (argv)
+        // is empty on macOS, so matching argv ALONE reports "no process" for
+        // every live harness (v3.0.0 did this -> broke recycle/upgrade). We
+        // must also match the executable name(). Spawn a known binary and
+        // confirm we detect it (by name() on macOS, name()-or-cmd() on Linux).
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let found = pid_runs_bin(child.id(), "sleep");
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(found, "pid_runs_bin must detect a running `sleep` by name");
     }
 }

@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.0.1] (2026-06-17)
+
+### Fixed
+- macOS harness detection regression: `pid_runs_bin` now matches the executable
+  `name()` in addition to the `cmd()` argv. The 3.0.0 `ps` -> `sysinfo` migration
+  matched argv ALONE, but `sysinfo`'s `cmd()` (argv via `KERN_PROCARGS2`) is
+  restricted and comes back empty on macOS -- so every live session reported "no
+  harness process," breaking recycle's flush wait and `muxr upgrade` (both
+  silently skipped every session). Matching `name()` is the reliable macOS signal;
+  `cmd()` still covers Linux and wrapper-launched binaries (e.g. `node /…/claude`).
+  Guarded by a regression test that spawns a known binary and asserts detection.
+
 ## [3.0.0] (2026-06-16)
 
 **muxr 3.0: a small runtime-agnostic core + one subprocess extension contract.**
