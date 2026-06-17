@@ -6,11 +6,12 @@
 //! configured for a point, muxr runs its built-in DEFAULT and behaves exactly
 //! as 2.1 did -- so bare muxr (no `[extensions]`) stays a usable launcher.
 //!
-//! Transport is a SUBPROCESS, deliberately NOT WASM. It mirrors muxr's two
-//! existing subprocess seams (`status_command` -> `muxr claude-status`, and
-//! the `pre_create` hook runner) and synthesist's `discover_policy_extension`.
-//! One transport for every shape keeps the social contract between tools thin:
-//! "JSON in, JSON out, default when absent" -- no shared library, no lockstep.
+//! Transport is a SUBPROCESS, deliberately NOT WASM. It mirrors muxr's
+//! existing `pre_create` hook runner (and the runtime's own statusline
+//! command, which muxr no longer ships) and synthesist's
+//! `discover_policy_extension`. One transport for every shape keeps the social
+//! contract between tools thin: "JSON in, JSON out, default when absent" --
+//! no shared library, no lockstep.
 //!
 //! The extension point name is exported as `MUXR_EXTENSION_POINT` so a single
 //! dispatcher script can serve several points and branch on it.

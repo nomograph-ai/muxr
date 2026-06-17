@@ -1,6 +1,5 @@
 #![deny(warnings, clippy::all)]
 
-mod claude_status;
 mod completions;
 mod config;
 mod extension;
@@ -71,9 +70,6 @@ enum Commands {
     /// Generate tmux status-left config from harnesses
     #[command(name = "tmux-status")]
     TmuxStatus,
-    /// Claude Code statusline (reads JSON from stdin, outputs ANSI)
-    #[command(name = "claude-status")]
-    ClaudeStatus,
     /// Rename the current session
     Rename {
         /// New name for the current session
@@ -255,7 +251,6 @@ fn main() -> Result<()> {
             state::SavedState::restore(&tmux, &config)
         }
         Some(Commands::TmuxStatus) => cmd_tmux_status(&tmux),
-        Some(Commands::ClaudeStatus) => claude_status::run(&tmux),
         Some(Commands::Upgrade {
             name,
             tool,
@@ -795,15 +790,9 @@ fn cmd_harness_dispatch(tmux: &Tmux, config: &Config, args: &[String]) -> Result
             let model = args.get(2).map(|s| s.as_str());
             tool::model_switch(tmux, config, harness_name, &harness, model)
         }
-        "compact" => {
-            let threshold =
-                find_flag_value(&args[2..], "--threshold").and_then(|v| v.parse::<u32>().ok());
-            tool::compact(tmux, config, harness_name, &harness, threshold)
-        }
-        "status" => tool::status(tmux, config, harness_name, &harness),
         other => {
             anyhow::bail!(
-                "Unknown {harness_name} subcommand: {other}\nAvailable: model, compact, upgrade, status"
+                "Unknown {harness_name} subcommand: {other}\nAvailable: model, upgrade"
             )
         }
     }

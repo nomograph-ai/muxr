@@ -1,4 +1,4 @@
-//! Harness operations: upgrade, status.
+//! Harness operations: upgrade, model-switch.
 //!
 //! Generic over Tool -- the same code handles claude, opencode, cursor.
 //! All process management is local only (remote sessions do not participate).
@@ -6,7 +6,6 @@
 use anyhow::{Context, Result};
 use std::process::{Command, Stdio};
 
-use crate::claude_status;
 use crate::config::{Config, Tool};
 use crate::state;
 use crate::tmux::Tmux;
@@ -138,41 +137,6 @@ pub fn upgrade(
 }
 
 /// Show harness status across all sessions.
-pub fn status(tmux: &Tmux, config: &Config, harness_name: &str, _tool_def: &Tool) -> Result<()> {
-    let sessions = tmux.list_sessions()?;
-
-    eprintln!("{harness_name} sessions:\n");
-    eprintln!("  {:30} {:6} {:10}", "SESSION", "CTX %", "COST");
-    eprintln!("  {}", "-".repeat(50));
-
-    let mut count = 0;
-    for (name, _path) in &sessions {
-        if name == "muxr" {
-            continue;
-        }
-        let harness = name.split('/').next().unwrap_or(name);
-        let tool = config.resolve_tool(harness, None);
-        if tool != harness_name {
-            continue;
-        }
-
-        let health = claude_status::read_health(name);
-        let (ctx, cost) = match health {
-            Some(h) => (format!("{}%", h.context_pct), format!("${:.2}", h.cost_usd)),
-            None => ("--".to_string(), "--".to_string()),
-        };
-
-        eprintln!("  {:30} {:>6} {:>10}", name, ctx, cost);
-        count += 1;
-    }
-
-    if count == 0 {
-        eprintln!("  (no active {harness_name} sessions)");
-    }
-
-    Ok(())
-}
-
 /// Switch model on all sessions by sending /model command (no restart).
 pub fn model_switch(
     tmux: &Tmux,
@@ -210,52 +174,6 @@ pub fn model_switch(
     }
 
     eprintln!("\nSwitched {switched} session(s) to {model}.");
-    Ok(())
-}
-
-/// Compact context on sessions over a threshold.
-pub fn compact(
-    tmux: &Tmux,
-    config: &Config,
-    harness_name: &str,
-    tool_def: &Tool,
-    threshold: Option<u32>,
-) -> Result<()> {
-    let threshold = threshold.unwrap_or(80);
-    let cmd = tool_def
-        .compact_command
-        .as_ref()
-        .context("Harness does not support compact")?;
-
-    let sessions = tmux.list_sessions()?;
-    let mut compacted = 0;
-
-    for (name, _) in &sessions {
-        if name == "muxr" {
-            continue;
-        }
-        let harness = name.split('/').next().unwrap_or(name);
-        let tool = config.resolve_tool(harness, None);
-        if tool != harness_name {
-            continue;
-        }
-
-        let health = crate::claude_status::read_health(name);
-        let pct = health.as_ref().map(|h| h.context_pct).unwrap_or(0);
-
-        if pct >= threshold {
-            let target = Tmux::target(name);
-            let _ = Command::new("tmux")
-                .args(["send-keys", "-t", &target, cmd, "Enter"])
-                .status();
-            eprintln!("  {name}: {pct}% -> compacting");
-            compacted += 1;
-        } else {
-            eprintln!("  {name}: {pct}% (under threshold)");
-        }
-    }
-
-    eprintln!("\nCompacted {compacted} session(s) (threshold: {threshold}%).");
     Ok(())
 }
 

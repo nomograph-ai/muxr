@@ -10,7 +10,6 @@ use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState};
 use std::collections::{HashMap, HashSet};
 use std::io;
 
-use crate::claude_status::{self, SessionHealth};
 use crate::config::Config;
 use crate::primitives;
 use crate::tmux::Tmux;
@@ -45,7 +44,6 @@ struct Entry {
     name: String,
     color: Color,
     activity: u64,
-    health: Option<SessionHealth>,
     kind: Kind,
     /// True if this campaign was sharded from a hub in the same repo; rendered
     /// indented under its hub.
@@ -62,7 +60,6 @@ impl Entry {
             name: String::new(),
             color,
             activity: 0,
-            health: None,
             kind: Kind::Header,
             is_shard: false,
         }
@@ -107,7 +104,6 @@ struct Cand {
     info: primitives::CampaignInfo,
     running: bool,
     activity: u64,
-    health: Option<SessionHealth>,
 }
 
 /// Build the merged chooser list: control plane (pinned), then one group per
@@ -128,7 +124,6 @@ fn build_entries(config: &Config, tmux: &Tmux) -> Result<Vec<Entry>> {
                 name: "muxr".to_string(),
                 color: Color::Cyan,
                 activity: s.activity,
-                health: None,
                 kind: Kind::Control,
                 is_shard: false,
             });
@@ -148,7 +143,7 @@ fn build_entries(config: &Config, tmux: &Tmux) -> Result<Vec<Entry>> {
         };
         let campaigns = primitives::list_campaigns(&config.layout, &dir).unwrap_or_default();
 
-        // Resolve run-state + health for each campaign.
+        // Resolve run-state for each campaign.
         let present: HashSet<String> = campaigns.iter().map(|c| c.name.clone()).collect();
         let mut cands: Vec<Cand> = campaigns
             .into_iter()
@@ -156,17 +151,11 @@ fn build_entries(config: &Config, tmux: &Tmux) -> Result<Vec<Entry>> {
                 let name = format!("{repo}/{}", info.name);
                 let running_now = running.contains_key(&name);
                 let activity = running.get(&name).copied().unwrap_or(0);
-                let health = if running_now {
-                    claude_status::read_health(&name)
-                } else {
-                    None
-                };
                 covered.insert(name);
                 Cand {
                     info,
                     running: running_now,
                     activity,
-                    health,
                 }
             })
             .collect();
@@ -210,7 +199,6 @@ fn build_entries(config: &Config, tmux: &Tmux) -> Result<Vec<Entry>> {
             name: String::new(),
             color,
             activity: 0,
-            health: None,
             kind: Kind::NewStub,
             is_shard: false,
         });
@@ -231,14 +219,12 @@ fn build_entries(config: &Config, tmux: &Tmux) -> Result<Vec<Entry>> {
             None => (name.clone(), String::new()),
         };
         let color = parse_hex_color(config.color_for(&repo));
-        let health = claude_status::read_health(name);
         groups.entry(repo.clone()).or_default().push(Entry {
             repo,
             campaign,
             name: name.clone(),
             color,
             activity,
-            health,
             kind: Kind::Running,
             is_shard: false,
         });
@@ -285,7 +271,6 @@ fn cand_entry(repo: &str, color: Color, cand: &Cand, is_shard: bool) -> Entry {
         name,
         color,
         activity: cand.activity,
-        health: cand.health.clone(),
         kind: if cand.running {
             Kind::Running
         } else {
@@ -719,36 +704,6 @@ fn select_nearest_real(
     state.select(Some(0));
 }
 
-/// Build a context bar as ratatui Spans (8 chars wide).
-fn health_bar(pct: u32) -> Vec<Span<'static>> {
-    let width = 8usize;
-    let filled = (pct as usize * width / 100).min(width);
-    let empty = width - filled;
-
-    let bar_color = if pct >= 80 {
-        Color::Red
-    } else if pct >= 50 {
-        Color::Yellow
-    } else {
-        Color::Green
-    };
-
-    let mut spans = Vec::with_capacity(2);
-    if filled > 0 {
-        spans.push(Span::styled(
-            "\u{2588}".repeat(filled),
-            Style::default().fg(bar_color),
-        ));
-    }
-    if empty > 0 {
-        spans.push(Span::styled(
-            "\u{2592}".repeat(empty),
-            Style::default().fg(Color::Rgb(60, 60, 65)),
-        ));
-    }
-    spans
-}
-
 #[allow(clippy::too_many_arguments)]
 fn draw_table(
     f: &mut ratatui::Frame,
@@ -765,10 +720,7 @@ fn draw_table(
     let header = Row::new(vec![
         Cell::from("  Repo").style(dim),
         Cell::from("Campaign").style(dim),
-        Cell::from("        ").style(dim),
-        Cell::from("     ").style(dim),
-        Cell::from("Cache").style(dim),
-        Cell::from("  Cost").style(dim),
+        Cell::from("       ").style(dim),
         Cell::from("  Age").style(dim),
     ])
     .height(1);
@@ -803,9 +755,6 @@ fn draw_table(
                     cell(detail),
                     cell(fill.clone()),
                     cell(fill.clone()),
-                    cell(fill.clone()),
-                    cell(fill.clone()),
-                    cell(fill.clone()),
                 ])
                 .height(2);
             }
@@ -815,9 +764,6 @@ fn draw_table(
                 return Row::new(vec![
                     Cell::from(Span::styled("  ＋", style)),
                     Cell::from(Span::styled("new campaign…", style)),
-                    Cell::from(""),
-                    Cell::from(""),
-                    Cell::from(""),
                     Cell::from(""),
                     Cell::from(""),
                 ])
@@ -867,56 +813,15 @@ fn draw_table(
                 Style::default().fg(Color::Rgb(90, 90, 100))
             };
 
-            let (bar_cell, pct_cell, cache_cell, cost_cell) = if is_kill_target {
-                (
-                    Cell::from(Span::styled("kill?   ", kill_style)),
-                    Cell::from(Span::styled("y/n  ", kill_style)),
-                    Cell::from(Span::styled("         ", kill_style)),
-                    Cell::from(Span::styled("       ", kill_style)),
-                )
-            } else if let Some(ref h) = e.health {
-                let bar_spans = health_bar(h.context_pct);
-                let pct_text = if h.exceeds_200k {
-                    format!("{:>3}% 1M", h.context_pct)
-                } else {
-                    format!("{:>3}%   ", h.context_pct)
-                };
-                let pct_color = if h.context_pct >= 80 {
-                    Color::Red
-                } else if h.context_pct >= 50 {
-                    Color::Yellow
-                } else {
-                    Color::White
-                };
-                let cache_text = match h.cache_pct {
-                    Some(c) => format!("  {:>3}%   ", c),
-                    None => "   --    ".to_string(),
-                };
-                let cost_text = if h.cost_usd > 0.0 {
-                    format!(" ${:.2}", h.cost_usd)
-                } else {
-                    " $0.00".to_string()
-                };
-                (
-                    Cell::from(Line::from(bar_spans)),
-                    Cell::from(Span::styled(pct_text, Style::default().fg(pct_color))),
-                    Cell::from(Span::styled(cache_text, info_style)),
-                    Cell::from(Span::styled(cost_text, info_style)),
-                )
+            // Single status cell. Health columns (context/cache/cost) were
+            // dropped with the CC-specific statusline; what remains is the
+            // run-state affordance the chooser actually acts on.
+            let status_cell = if is_kill_target {
+                Cell::from(Span::styled("kill? y/n", kill_style))
             } else if is_dormant {
-                (
-                    Cell::from(Span::styled("        ", info_style)),
-                    Cell::from(Span::styled("       ", info_style)),
-                    Cell::from(Span::styled("         ", info_style)),
-                    Cell::from(Span::styled("  open", Style::default().fg(Color::Rgb(90, 110, 90)))),
-                )
+                Cell::from(Span::styled("  open", Style::default().fg(Color::Rgb(90, 110, 90))))
             } else {
-                (
-                    Cell::from(Span::styled("        ", info_style)),
-                    Cell::from(Span::styled("       ", info_style)),
-                    Cell::from(Span::styled("   --    ", info_style)),
-                    Cell::from(Span::styled("  idle", info_style)),
-                )
+                Cell::from(Span::styled("  live", info_style))
             };
 
             let age_text = format!("  {}", format_age(e.activity));
@@ -934,10 +839,7 @@ fn draw_table(
                     Span::styled(e.repo.clone(), vs),
                 ])),
                 Cell::from(Span::styled(campaign_label, cs)),
-                bar_cell,
-                pct_cell,
-                cache_cell,
-                cost_cell,
+                status_cell,
                 Cell::from(Span::styled(age_text, info_style)),
             ])
         })
@@ -946,10 +848,7 @@ fn draw_table(
     let widths = [
         Constraint::Length(16),
         Constraint::Min(14),
-        Constraint::Length(8),
-        Constraint::Length(7),
         Constraint::Length(9),
-        Constraint::Length(7),
         Constraint::Length(6),
     ];
 
@@ -1154,7 +1053,6 @@ mod tests {
             },
             color: Color::Gray,
             activity: 0,
-            health: None,
             kind,
             is_shard: false,
         }

@@ -34,7 +34,7 @@ pub struct Config {
     #[serde(default)]
     pub session_env: std::collections::HashMap<String, String>,
     /// Interactive chooser. Absent -> muxr's built-in campaign-aware TUI (the
-    /// default; knows about dormant campaigns, health, recycle/archive). Set
+    /// default; knows about dormant campaigns, recycle/archive/rename). Set
     /// `command` to delegate selection to an external session picker (e.g.
     /// `sesh connect $(sesh list)`); that picker owns attach, and muxr's
     /// campaign lifecycle stays available via subcommands.
@@ -43,9 +43,9 @@ pub struct Config {
 }
 
 /// External chooser delegation. The built-in TUI does far more than a generic
-/// tmux picker (opens dormant campaigns, shows context/cost health, recycle/
-/// archive/rename); `command` is a thin opt-out for users who prefer their own
-/// picker for plain attach, NOT a full replacement.
+/// tmux picker (opens dormant campaigns, recycle/archive/rename); `command` is
+/// a thin opt-out for users who prefer their own picker for plain attach, NOT
+/// a full replacement.
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
 pub struct Chooser {
     /// Shell command run (with an inherited terminal) instead of the built-in
@@ -230,9 +230,6 @@ pub struct Tool {
     /// How to discover session IDs.
     #[serde(default = "default_discovery_none")]
     pub session_discovery: SessionDiscovery,
-    /// External command for status display.
-    #[serde(default)]
-    pub status_command: Option<String>,
     /// Optional command prefix prepended to the launch command.
     /// Example: `"nono run --profile ~/.config/nono/profiles/pi --"`.
     /// The wrapper is inserted ahead of `bin` so the resulting command
@@ -324,7 +321,6 @@ fn merge_tool_with_builtin(user: Tool, builtin: Tool) -> Tool {
             SessionDiscovery::None => builtin.session_discovery,
             other => other,
         },
-        status_command: user.status_command.or(builtin.status_command),
         wrapper: user.wrapper.or(builtin.wrapper),
         // prompt_mode is the single most common override and PromptMode::File is
         // also the type-default. Users who set `prompt_mode = "file"` explicitly
@@ -357,7 +353,6 @@ const RESERVED_NAMES: &[&str] = &[
     "archive",
     "migrate-layout",
     "tmux-status",
-    "claude-status",
     "completions",
 ];
 
@@ -379,7 +374,6 @@ impl Tool {
                 pattern: "~/.claude/sessions/{pid}.json".to_string(),
                 id_key: "sessionId".to_string(),
             },
-            status_command: Some("muxr claude-status".to_string()),
             wrapper: None,
             prompt_mode: PromptMode::File,
             supports_add_dirs: Some(true),
@@ -410,7 +404,6 @@ impl Tool {
                 pattern: "~/.pi/sessions/{pid}.json".to_string(),
                 id_key: "sessionId".to_string(),
             },
-            status_command: None,
             wrapper: None,
             prompt_mode: PromptMode::String,
             supports_add_dirs: Some(false),
@@ -1502,7 +1495,6 @@ session_discovery = { type = "none" }
             continue_args: vec!["--continue".to_string()],
             fork_args: vec!["--fork".to_string(), "{session_id}".to_string()],
             session_discovery: SessionDiscovery::None,
-            status_command: None,
             wrapper: Some("nono run --profile X --".to_string()),
             prompt_mode: PromptMode::String,
             supports_add_dirs: Some(false),
