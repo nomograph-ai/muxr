@@ -2,6 +2,37 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.1.1] (2026-06-17)
+
+Fixes from an adversarial review of the 3.0.1/3.1.0 cluster (the prior tags
+shipped on green CI without review).
+
+### Fixed
+- **Harness detection robustness** (`pid_runs_bin`): added `exe()` file-stem as a
+  third match signal (a path-exec'd binary, populated on macOS even when `cmd()`
+  is empty) alongside `name()` and the `cmd()` argv tokens. The doc comment no
+  longer overstates coverage: it now documents the real macOS limitation -- a
+  harness launched as a separate INTERPRETER process whose name appears only in
+  argv (`node /…/claude.js`) is undetectable on macOS (sysinfo `cmd()` is empty
+  there), which is acceptable because claude 2.x ships as a native binary caught
+  by `name()`. Tests strengthened: the by-name test is now explicitly scoped to
+  the native-binary signal, plus a no-false-match guard and a dead-pid guard.
+- **opencode resolver example** used a non-existent flag (`opencode session list
+  --json`); corrected to `--format json`. As written it silently no-op'd and
+  never resumed.
+- Stale doc comment claiming add-dirs are skipped "when `bin == "pi"`" corrected
+  to the capability-based reality (`supports_add_dirs` / `emits_add_dirs()`); no
+  per-bin branching exists.
+
+### Packaging
+- `Cargo.toml` switched from an `exclude` blocklist to an explicit `include`
+  ALLOWLIST. Two files are embedded via `include_str!` (the shipped adapter
+  TOMLs + `resources/skill.md`); an allowlist guarantees they're in the
+  published tarball so an accidental exclude can never silently publish a crate
+  that fails to compile downstream. Also drops the `extensions/examples/*.sh`
+  templates from the crates.io tarball (they belong in your estate repo, not the
+  Rust crate).
+
 ## [3.1.0] (2026-06-17)
 
 **Core carries zero runtime knowledge.** The built-in Claude + Pi adapters are no
