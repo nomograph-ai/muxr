@@ -1,6 +1,6 @@
 [package]
 name = "nomograph-muxr"
-version = "3.1.0"
+version = "3.1.1"
 edition = "2024"
 description = "Tmux session manager for AI coding workflows"
 authors = ["Andrew Dunn <andunn@gitlab.com>"]
@@ -9,20 +9,22 @@ homepage = "https://gitlab.com/nomograph/muxr"
 keywords = ["tmux", "terminal", "multiplexer", "session-manager"]
 categories = ["command-line-utilities"]
 readme = "README.md"
-exclude = [
-    "*.png",
-    "*.svg",
-    "hero.*",
-    "avatar.*",
-    # Dev-only files / README assets / internal design notes;
-    # downstream Rust consumers don't need them.
-    "demo.gif",
-    "demo.tape",
-    "specs/*",
-    "scripts/*",
-    # agent-shape rubric + reports are local/CI artifacts.
-    "agent-shape.toml",
-    "agent-shape-reports/",
+# Explicit ALLOWLIST (not a blocklist): the package contains ONLY what's listed
+# here (plus Cargo.toml/Cargo.lock/README/LICENSE that cargo always adds). This
+# is deliberate -- two source files are embedded via `include_str!`
+# (extensions/adapters/{claude,pi}.toml in src/config.rs and resources/skill.md
+# in src/main.rs); an allowlist guarantees they're in the published tarball, so
+# an accidental new exclude/.gitignore rule can never silently ship a crate that
+# fails to compile downstream. Keep this in sync if a new `include_str!` lands.
+include = [
+    "src/**/*.rs",
+    "resources/skill.md",
+    "extensions/adapters/*.toml",
+    "extensions/README.md",
+    "README.md",
+    "CHANGELOG.md",
+    "ARCHITECTURE.md",
+    "LICENSE",
 ]
 license = "MIT"
 

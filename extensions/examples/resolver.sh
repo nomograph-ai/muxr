@@ -31,7 +31,7 @@ resume_id="$(jq -r '.resume_id // ""' <<<"$intent")"
 # opencode-only: map this tmux session to its opencode session id. (Illustrative
 # -- adjust the `opencode session` parsing to your version's output.)
 if [[ "$runtime" == "opencode" ]]; then
-  resume_id="$(opencode session list --json 2>/dev/null \
+  resume_id="$(opencode session list --format json 2>/dev/null \
     | jq -r --arg s "$session" '.[] | select(.title == $s) | .id' \
     | head -n1 || true)"
 fi

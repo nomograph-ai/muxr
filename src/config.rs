@@ -471,8 +471,9 @@ impl Tool {
     /// File (default) passes `--append-system-prompt-file <path>` (Claude),
     /// String reads the file contents and inlines them into
     /// `--append-system-prompt <content>` (Pi, which lacks a file variant).
-    /// Pi additionally has no `--add-dir` flag, so `add_dirs` are skipped
-    /// when `bin == "pi"`.
+    /// A runtime that has no `--add-dir` flag opts out via `supports_add_dirs =
+    /// false` (e.g. Pi); `add_dirs` are then skipped. This is capability-driven
+    /// (`emits_add_dirs()`), NOT a per-bin branch.
     pub fn launch_command_with_settings(
         &self,
         session_name: Option<&str>,

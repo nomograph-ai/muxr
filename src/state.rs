@@ -110,23 +110,30 @@ pub fn has_harness_process(tmux: &Tmux, tmux_session: &str, bin: &str) -> bool {
         .any(|pid| pid_runs_bin(pid, bin))
 }
 
-/// True if process `pid` is running `bin` -- matched by the executable name
-/// or an argv token (the bare name or a path ending in `/bin`, so node-wrapped
-/// harnesses like `node /…/claude` still match).
+/// True if process `pid` is running `bin`, matched across three sysinfo signals.
+/// Reads metadata via sysinfo (syscalls), NOT by shelling `ps` -- a sandbox can
+/// block `/bin/ps`, which previously left every `save` with sessionId=null.
 ///
-/// Reads process metadata via sysinfo (syscalls), NOT by shelling `ps` -- a
-/// sandbox can block the `/bin/ps` binary, which previously left every `save`
-/// with sessionId=null. We deliberately match BOTH signals:
-///   - `name()` (the executable basename): the reliable signal on macOS, where
-///     sysinfo's `cmd()` (argv via KERN_PROCARGS2) is restricted and comes back
-///     empty. Matching `cmd()` ALONE (as v3.0.0 did) reported "no harness
-///     process" for every session on macOS, breaking recycle's flush wait and
-///     `muxr upgrade`.
-///   - `cmd()` (argv tokens): works on Linux and catches wrapper-launched
-///     binaries whose `name()` is the interpreter (e.g. `node /…/claude`).
+/// The signals, and exactly what each covers:
+///   1. `name()` (executable basename) `== bin`: carries any process whose
+///      reported name IS the bin. claude 2.x ships as a native (Mach-O/Bun)
+///      binary, so its `name()` is literally `claude` -- this is the signal
+///      that works on macOS, where sysinfo's `cmd()` is empty (see below).
+///   2. `exe()` file-stem `== bin`: the resolved executable PATH's basename.
+///      Populated on macOS via libproc `proc_pidpath` even when `cmd()` is
+///      empty, so it catches a binary exec'd directly by path whose `name()`
+///      differs or was truncated (the kernel name field is length-capped).
+///   3. `cmd()` argv token (`== bin` or ending in `/bin`): argv coverage on
+///      Linux, where `cmd()` is populated.
 ///
-/// Either match counts. The PID tree (`descendant_pids`) already uses sysinfo,
-/// which only needs parent links and works on both platforms.
+/// KNOWN LIMITATION (documented, not a bug): on macOS sysinfo's `cmd()` (argv
+/// via KERN_PROCARGS2) is restricted and comes back EMPTY. So a harness launched
+/// as a SEPARATE INTERPRETER process whose only "claude" reference is an argv
+/// token (e.g. `node /…/claude.js`, where `name()`/`exe()` are both `node`) is
+/// NOT detectable on macOS -- neither name/exe nor the empty argv carry it.
+/// This is acceptable because current harnesses (claude 2.x) ship as native
+/// binaries caught by signal 1; it is the reason v3.0.0's argv-only match broke
+/// macOS detection entirely (recycle flush-wait + `muxr upgrade`).
 pub fn pid_runs_bin(pid: u32, bin: &str) -> bool {
     let suffix = format!("/{bin}");
     let mut sys = System::new();
@@ -134,11 +141,21 @@ pub fn pid_runs_bin(pid: u32, bin: &str) -> bool {
     let Some(p) = sys.process(Pid::from_u32(pid)) else {
         return false;
     };
-    // name() == bin: the macOS-reliable path (cmd() is empty there).
-    if p.name().to_str().map(|n| n == bin).unwrap_or(false) {
+    // 1. name() == bin -- the macOS-reliable signal for a native binary.
+    if p.name().to_str() == Some(bin) {
         return true;
     }
-    // cmd() argv token: Linux + wrapper-script (`node /…/claude`) coverage.
+    // 2. exe() file-stem == bin -- a path-exec'd binary; populated on macOS even
+    //    when cmd() is empty.
+    if p
+        .exe()
+        .and_then(|e| e.file_name())
+        .and_then(|n| n.to_str())
+        == Some(bin)
+    {
+        return true;
+    }
+    // 3. cmd() argv token -- Linux argv coverage (empty on macOS).
     p.cmd().iter().any(|tok| {
         tok.to_str()
             .map(|t| t == bin || t.ends_with(&suffix))
@@ -342,12 +359,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pid_runs_bin_detects_by_name() {
-        // Regression guard for the macOS detection bug: sysinfo's cmd() (argv)
-        // is empty on macOS, so matching argv ALONE reports "no process" for
-        // every live harness (v3.0.0 did this -> broke recycle/upgrade). We
-        // must also match the executable name(). Spawn a known binary and
-        // confirm we detect it (by name() on macOS, name()-or-cmd() on Linux).
+    fn pid_runs_bin_detects_native_binary_by_name() {
+        // Signal 1 (name()): the macOS-load-bearing path. sysinfo's cmd() is
+        // EMPTY on macOS, so v3.0.0's argv-only match reported "no process" for
+        // every live harness -> broke recycle/upgrade. `sleep` is a native
+        // binary (like claude 2.x), so its name() is "sleep" and this exercises
+        // exactly the signal that carries detection on macOS. NOTE: this does
+        // NOT exercise the macOS interpreter+argv gap documented on
+        // `pid_runs_bin` -- that case is undetectable by design, not tested.
         let mut child = std::process::Command::new("sleep")
             .arg("30")
             .spawn()
@@ -355,6 +374,27 @@ mod tests {
         let found = pid_runs_bin(child.id(), "sleep");
         let _ = child.kill();
         let _ = child.wait();
-        assert!(found, "pid_runs_bin must detect a running `sleep` by name");
+        assert!(found, "pid_runs_bin must detect a running native `sleep`");
+    }
+
+    #[test]
+    fn pid_runs_bin_no_false_match_on_unrelated_bin() {
+        // The match must be specific: a live process must NOT report as running
+        // some other bin. Guards the false-positive direction (a wrong match
+        // feeds recycle's wait_for_exit, which SIGKILLs the matched pid).
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let matched = pid_runs_bin(child.id(), "muxr-no-such-harness");
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(!matched, "pid_runs_bin must not match an unrelated bin name");
+    }
+
+    #[test]
+    fn pid_runs_bin_false_for_dead_pid() {
+        // A pid sysinfo can't see resolves to "not running", never a panic.
+        assert!(!pid_runs_bin(u32::MAX, "claude"));
     }
 }
