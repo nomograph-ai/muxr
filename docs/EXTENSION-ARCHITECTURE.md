@@ -12,13 +12,28 @@ behavior-compatible (no `[extensions]`/`[session_env]`/`[chooser]` => 2.1).
 - **P1** RESOLVER (`[extensions].resolver`) at `resolve_layout` in session.rs;
   default = the 2.1 `[layout]`; override dir relocates campaign/log defaults.
 - **P2** runtime-adapter: `supports_add_dirs` capability replaces the one
-  hardcoded `bin != "pi"` branch. statusline stays a contract instance
-  (runtime-invoked via its own hook -- transport intentionally not muxr's).
+  hardcoded `bin != "pi"` branch.
 - **P3** MAKE-DURABLE event (`[extensions].make_durable`) at the recycle flush;
   generic `[session_env]` (templated, `new-session -e`) which generalizes +
   closes muxr!4; folded in muxr!3 transition UX (`ui::step_start`).
 - **P4** `[chooser].command` -- config-gated external picker; built-in TUI stays
-  default (full shed to sesh would lose campaign/health/lifecycle).
+  default (full shed to sesh would lose campaign/lifecycle).
+
+## Shed in 3.0.0-rc.2 (2026-06-16) -- statusline leaves core
+The statusline was Claude-Code-specific chrome (it parsed CC's statusLine JSON)
+that had leaked into core, and it doubled as the writer of the session-health
+cache the chooser displayed. Both removed (~530 lines, src/claude_status.rs):
+- Deleted the `claude-status` renderer + the health cache + `SessionHealth` +
+  the `status_command` Tool field. muxr now has ZERO Claude-Code knowledge.
+- The statusline is now a fully EXTERNAL extension: the runtime's own statusline
+  config points at a user-owned renderer script (Andrew's lives in
+  `dunn.dev/pi/configs/scripts/muxr-statusline.py`; per-repo brand-mark glyphs
+  built by `dunn.dev/reference`'s `make glyph` recipe). Not a muxr extension
+  point at all -- muxr neither renders nor invokes it.
+- Chooser dropped its 4 health columns (context/cache/cost/bar) -> one status
+  cell (live/open/kill?). Retired the health-only `muxr <tool> compact
+  [threshold]` and `status` actions (feature sprawl; unused). `upgrade` +
+  `model` remain.
 
 RC intent: validate the contract through real daily use, THEN tag 3.0.0 (and
 lock the contract). The plan/discipline below is the original design rationale.
@@ -56,8 +71,9 @@ DEFAULT if none configured. Transport = **SUBPROCESS** (mirrors muxr's existing
 ## Extension points (fiddly bits -> extensions)
 1. **RESOLVER** `resolve(intent) -> {dir, add_dirs, prompt, runtime, resume_id}`.
    Default = the 2.1 config-drive layout. Subsumes the migrate-layout saga.
-2. **STATUSLINE** `render(session) -> string`. Default generic; ext = runtime-aware
-   (CC context/cost/cache, Pi, opencode). Already pluggable via `status_command`.
+2. ~~**STATUSLINE**~~ -- SHED in rc.2. Statusline is fully external chrome: the
+   runtime's own statusline config points at a user-owned renderer. muxr does
+   not render, invoke, or know about it (see "Shed in 3.0.0-rc.2" above).
 3. **RUNTIME-ADAPTER** launch + resume per runtime (cc/pi/opencode). Mostly the
    existing `Tool` abstraction -- formalize so adding a runtime = an adapter.
 4. **MAKE-DURABLE** a core lifecycle EVENT fired pre-recycle/close; ext supplies

@@ -2,6 +2,37 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.0.0-rc.2] (2026-06-16)
+
+**The statusline leaves core -- muxr is now runtime-agnostic.** The bundled
+`muxr claude-status` renderer was Claude-Code-specific chrome (it parsed Claude
+Code's statusLine JSON) that had leaked into core, and it doubled as the writer
+of the session-health cache the chooser displayed. Health was only ever
+populated by Claude Code -- Pi and opencode never wrote it. All of it is gone
+(~530 lines): muxr now has zero Claude-Code knowledge. The statusline is a
+fully external concern -- the runtime's own statusline config points at a
+user-owned renderer script. Non-breaking for launch/resume/recycle; only the
+statusline rendering moves out (point your runtime's statusline at your own
+command).
+
+### Removed
+- **`muxr claude-status`** subcommand + `src/claude_status.rs` (the renderer).
+- **Session-health cache** (`SessionHealth`, read/write) and the chooser's four
+  health columns (context bar / context% / cache% / cost) -> collapsed to one
+  status cell (live / open / kill?).
+- **`status_command`** field on `[tools.<name>]` (vestigial -- only ever pointed
+  at the now-removed renderer; unknown keys are ignored, so existing configs
+  keep parsing).
+- **`muxr <tool> compact [threshold]`** and **`muxr <tool> status`** -- both were
+  health-only (bulk-compact by context %, ctx/cost listing); retired as feature
+  sprawl. `muxr <tool> upgrade` and `model` remain.
+
+### Migration
+Set your runtime's statusline to your own renderer. For Claude Code, in
+`~/.claude/settings.json`: `"statusLine": { "type": "command", "command":
+"<your-renderer>" }`. A drop-in port of the old look (plus per-repo brand-mark
+glyphs) lives at `dunn.dev/pi/configs/scripts/muxr-statusline.py`.
+
 ## [3.0.0-rc.1] (2026-06-16)
 
 **One small stable core plus one subprocess extension contract for every

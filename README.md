@@ -97,7 +97,7 @@ command (`sh -c <cmd>`) with structured JSON on stdin and reads structured
 JSON from stdout; the point name is in `MUXR_EXTENSION_POINT`. With nothing
 configured, muxr runs its built-in default and behaves exactly as before --
 so bare muxr is a fully usable launcher. The transport is a subprocess (it
-mirrors `status_command` and the `pre_create` hooks), not a plugin ABI.
+mirrors the `pre_create` hooks), not a plugin ABI.
 
 ```toml
 [extensions]
