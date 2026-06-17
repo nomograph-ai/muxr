@@ -1,0 +1,37 @@
+# Pi runtime adapter for muxr.
+#
+# Mirrors the compiled-in `Tool::builtin_pi()` default. Pi shows where the
+# adapter shape bends for a different CLI: empty launch args (Pi reads
+# `.pi/settings.json` from cwd), a "string" prompt mode, no --add-dir, and a
+# session file written by an external Pi extension rather than by Pi itself.
+
+[tools.pi]
+bin = "pi"
+
+# Pi takes no launch flags -- it reads .pi/settings.json from the working dir.
+args = []
+
+resume_args   = ["--resume", "{session_id}"]
+continue_args = ["--continue"]
+fork_args     = ["--fork", "{session_id}"]
+model_args    = ["--model", "{model}"]
+
+rename_command       = "/name {name}"
+model_switch_command = "/model {model}"
+exit_command         = "/quit"
+
+# Pi consumes the system prompt as a string argument, not a file path.
+prompt_mode = "string"
+
+# Pi sandboxes externally (no --add-dir); extra roots are the wrapper's job.
+supports_add_dirs = false
+
+# Optional: wrap the launch in a sandboxing tool. The wrapper is prepended,
+# so the command becomes `<wrapper> pi <args...>`. Left unset by default.
+# wrapper = "nono run --profile ~/.config/nono/profiles/pi --"
+
+# The per-pid session file is written by a Pi extension (not Pi core).
+[tools.pi.session_discovery]
+type = "file"
+pattern = "~/.pi/sessions/{pid}.json"
+id_key = "sessionId"
