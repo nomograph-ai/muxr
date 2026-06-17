@@ -126,6 +126,9 @@ A runtime that does not accept `--add-dir` (e.g. Pi) sets
 `supports_add_dirs = false` in its `[tools.<name>]` block; adding a runtime is
 otherwise pure config.
 
+The full design -- the core, the contract, and what's deliberately *not* in
+core -- is in [`ARCHITECTURE.md`](ARCHITECTURE.md).
+
 ## How sessions work
 
 muxr is a thin layer over tmux. Each session gets a named tmux session,
