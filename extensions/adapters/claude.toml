@@ -4,10 +4,11 @@
 # (launch, resume, fork, switch model, exit, find the session id). muxr core
 # has no per-runtime code -- adding a runtime is writing one of these blocks.
 #
-# This file mirrors the compiled-in `Tool::builtin_claude()` default. It is
-# shipped so Claude becomes "just an adapter that happens to be in the box,"
-# not a special case in the engine. Paste this block into your muxr config, or
-# `include` this file (see extensions/README.md).
+# As of muxr 3.1 this file IS the built-in Claude default: the binary embeds it
+# (`include_str!`) and parses it into the adapter table at load. There is no
+# compiled-in Claude struct -- Claude is "just an adapter that happens to be in
+# the box." Paste this block into your muxr config to customize, or `include`
+# this file (see extensions/README.md).
 
 [tools.claude]
 bin = "claude"
