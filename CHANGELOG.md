@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.0.0] (2026-06-16)
+
+**muxr 3.0: a small runtime-agnostic core + one subprocess extension contract.**
+The 3.0 line re-architects muxr around a single extension mechanism (JSON in ->
+JSON out, run a built-in default when absent) and sheds the Claude-Code-specific
+statusline + session-health out of core. A config with no `[extensions]` /
+`[session_env]` / `[chooser]` reproduces 2.1 launch/resume behavior byte-for-byte
+(independently verified against the 2.1 tag). Feature breakdown in the rc entries
+below:
+- **rc.1** -- the `[extensions]` subprocess contract + RESOLVER (default = the 2.1
+  `[layout]`), generic `[session_env]` passthrough, the make-durable event,
+  `[chooser]` delegation, and the `supports_add_dirs` runtime capability.
+- **rc.2** -- the statusline + health cache removed from core (runtime-agnostic);
+  the statusline is now the runtime's own concern, pointed at a user-owned renderer.
+
+### Fixed (rc.2 -> 3.0.0 hardening)
+- `muxr init` now writes a config that parses: `repos` is `#[serde(default)]`, so
+  a fresh config (no repos yet) loads instead of failing with "missing field repos".
+- recycle is robust to a `make_durable` extension whose message omits an exit
+  instruction: muxr always appends its own exit directive, so recycle can no longer
+  hang until the SIGKILL timeout.
+- recycle locates the harness process via `sysinfo` instead of shelling `ps`, so the
+  agent-paced flush wait still works under a sandbox that blocks the `ps` binary
+  (previously the wait silently truncated to 5s and killed the flush).
+- `wait_for_exit` / `wait_for_prompt` use `saturating_mul` (no overflow on a
+  pathological `--wait`).
+- Removed dangling references to retired commands (`claude-status`, `<tool> compact`,
+  `<tool> status`) from shell completions and the emitted skill.
+
+### Changed
+- Dropped the orphaned `compact_command` `Tool` field (its only reader, the retired
+  bulk-compact action, is gone).
+
 ## [3.0.0-rc.2] (2026-06-16)
 
 **The statusline leaves core -- muxr is now runtime-agnostic.** The bundled

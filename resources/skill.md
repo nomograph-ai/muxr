@@ -177,8 +177,9 @@ degrading summary for a clean read of the authoritative state. Default
 | `muxr skill` | Emit this skill file |
 
 Notes:
-- There is no `muxr list` (use `ls`), no `muxr show`, no bare `muxr status`
-  (the two status commands are scoped: `tmux-status`, `claude-status`).
+- There is no `muxr list` (use `ls`), no `muxr show`, no `muxr status`.
+  `tmux-status` emits the tmux status-left config; the in-pane statusline is the
+  runtime's own concern (point its statusline command at your renderer).
 - `retire` vs `kill`: retire when work is **done** (drops it from restore);
   kill when you want the pane gone but intend to bring it back. `upgrade`
   relaunches live work onto a new binary -- it is not kill+open.

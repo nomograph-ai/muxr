@@ -122,16 +122,23 @@ pub fn has_harness_process(tmux: &Tmux, tmux_session: &str, bin: &str) -> bool {
 /// tree itself still comes from sysinfo (`descendant_pids`), which only needs
 /// parent links and works fine.
 pub fn pid_runs_bin(pid: u32, bin: &str) -> bool {
-    use std::process::{Command, Stdio};
+    // Match the process command line via sysinfo (syscalls), NOT by shelling
+    // `ps`. A sandbox that blocks the `ps` BINARY (e.g. nono's
+    // dangerous_commands_macos) would make a ps-based check return false for
+    // every pid -> recycle can't find the harness -> the flush wait truncates.
+    // sysinfo reads proc info directly, so it works in that sandbox (the PID
+    // tree in `child_pids` already relies on it). Mirrors the old ps `-o args=`
+    // token match: any argv token equal to `bin` or ending in `/bin`.
     let suffix = format!("/{bin}");
-    Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "args="])
-        .stderr(Stdio::null())
-        .output()
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .split_whitespace()
-                .any(|tok| tok == bin || tok.ends_with(&suffix))
+    let mut sys = System::new();
+    sys.refresh_processes(ProcessesToUpdate::Some(&[Pid::from_u32(pid)]), true);
+    sys.process(Pid::from_u32(pid))
+        .map(|p| {
+            p.cmd().iter().any(|tok| {
+                tok.to_str()
+                    .map(|t| t == bin || t.ends_with(&suffix))
+                    .unwrap_or(false)
+            })
         })
         .unwrap_or(false)
 }

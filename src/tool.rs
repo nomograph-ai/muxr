@@ -179,7 +179,7 @@ pub fn model_switch(
 
 /// Wait for a process to exit, escalating to SIGKILL after timeout.
 pub(crate) fn wait_for_exit(pid: u32, timeout_secs: u32) {
-    for _ in 0..timeout_secs * 10 {
+    for _ in 0..timeout_secs.saturating_mul(10) {
         // Check if still alive. Suppress stderr -- when pid is gone,
         // `kill -0` prints "No such process" which is not an error condition
         // for this polling check.
@@ -204,7 +204,7 @@ pub(crate) fn wait_for_exit(pid: u32, timeout_secs: u32) {
 /// Wait for a shell prompt to appear in the pane.
 fn wait_for_prompt(_tmux: &Tmux, session: &str, timeout_secs: u32) {
     let target = Tmux::target(session);
-    for _ in 0..timeout_secs * 10 {
+    for _ in 0..timeout_secs.saturating_mul(10) {
         if let Ok(output) = std::process::Command::new("tmux")
             .args(["capture-pane", "-p", "-t", &target])
             .output()

@@ -121,7 +121,7 @@ _muxr() {{
 
     # If first arg is a tool, complete with tool subcommands
     if (( ${{+tools[(r)$words[2]]}} )); then
-        compadd upgrade status compact model
+        compadd upgrade model
         return
     fi
 
@@ -188,7 +188,7 @@ fn generate_bash() -> Result<()> {
     # If first arg is a tool, offer tool subcommands
     case " $tools " in
         *" ${{COMP_WORDS[1]}} "*)
-            COMPREPLY=($(compgen -W "upgrade status compact model" -- "$cur"))
+            COMPREPLY=($(compgen -W "upgrade model" -- "$cur"))
             return
             ;;
     esac
