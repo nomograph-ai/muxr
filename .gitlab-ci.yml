@@ -32,7 +32,7 @@ stages: [lint, test, build, sign, publish, release, notify, verdict, gate]
 
 check-symlinks:
   stage: lint
-  image: alpine:3.19
+  image: alpine:3.24
   before_script:
     - apk add --no-cache bash git
   script:
