@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::time::SystemTime;
 use sysinfo::{Pid, ProcessesToUpdate, System};
 
-use crate::config::{Config, SessionDiscovery, Tool};
+use crate::config::{Config, ReadinessProbe, SessionDiscovery, Tool};
 use crate::remote;
 use crate::tmux::Tmux;
 
@@ -99,6 +100,162 @@ pub fn discover_session_id(
     None
 }
 
+/// Readiness verdict for a session before an upgrade gate.
+#[derive(Debug, PartialEq)]
+pub enum Readiness {
+    /// Safe to upgrade right now.
+    Safe,
+    /// Not safe; human-readable reason is the payload.
+    Busy(String),
+    /// Could not determine; treat as not-safe unless --force.
+    Unknown(String),
+}
+
+/// Pure helper that classifies a state file without any tmux or process deps.
+/// Path is tilde-expanded; `{session_id}` in `path` must already be
+/// interpolated by the caller. Returns `Unknown` on any file/parse error.
+pub fn classify_state_file(
+    path: &str,
+    state_key: &str,
+    idle_value: &str,
+    since_key: Option<&str>,
+    now: u64,
+    min_idle: u64,
+) -> Readiness {
+    let expanded = shellexpand::tilde(path).to_string();
+    let content = match std::fs::read_to_string(&expanded) {
+        Ok(c) => c,
+        Err(e) => return Readiness::Unknown(format!("cannot read {expanded}: {e}")),
+    };
+    let v: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => return Readiness::Unknown(format!("parse error in {expanded}: {e}")),
+    };
+    let state = match v.get(state_key).and_then(|s| s.as_str()) {
+        Some(s) => s.to_string(),
+        None => {
+            return Readiness::Unknown(format!(
+                "key {state_key:?} missing or not a string in {expanded}"
+            ));
+        }
+    };
+    if state != idle_value {
+        return Readiness::Busy("turn in flight".to_string());
+    }
+    // state == idle_value: check the quiet period if since_key is present.
+    // If since_key is declared but absent/not-a-number, treat as Safe:
+    // don't block indefinitely when the runtime hasn't written a timestamp yet.
+    if let Some(sk) = since_key
+        && let Some(since) = v.get(sk).and_then(|s| s.as_u64())
+        && now.saturating_sub(since) < min_idle
+    {
+        return Readiness::Busy("settling".to_string());
+    }
+    Readiness::Safe
+}
+
+/// Epoch seconds from SystemTime::now(). Returns 0 on platform error (shouldn't happen).
+fn now_epoch() -> u64 {
+    SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Determine whether a session is safe to upgrade right now.
+///
+/// Evaluation order:
+/// 1. If `tool.readiness` is `File` or `Command`, evaluate the probe.
+///    - `File`: interpolate `{session_id}` (and `{pid}` if resolvable), call
+///      `classify_state_file`. If `Unknown`, fall through to floor.
+///    - `Command`: interpolate, run; exit 0 → `Safe`, non-zero → `Busy`,
+///      spawn error → fall through to floor.
+/// 2. **Floor** (probe is `None` or returned `Unknown`): compare tmux
+///    `session_activity` against `now - min_idle`. Quiet → `Safe`, else
+///    `Busy("recent pane activity")`.
+pub fn session_readiness(
+    tmux: &Tmux,
+    name: &str,
+    tool: &Tool,
+    session_id: &str,
+    min_idle: u64,
+) -> Readiness {
+    let now = now_epoch();
+
+    // Resolve pane PID once (best-effort; used for {pid} interpolation).
+    let pane_pid: Option<u32> = tmux.pane_pid(name).ok().flatten();
+
+    match &tool.readiness {
+        ReadinessProbe::File {
+            pattern,
+            state_key,
+            idle_value,
+            since_key,
+        } => {
+            // Interpolate {session_id} and {pid} into the path pattern.
+            let mut path = pattern.replace("{session_id}", session_id);
+            if let Some(pid) = pane_pid {
+                path = path.replace("{pid}", &pid.to_string());
+            }
+            let result = classify_state_file(
+                &path,
+                state_key,
+                idle_value,
+                since_key.as_deref(),
+                now,
+                min_idle,
+            );
+            if matches!(result, Readiness::Unknown(_)) {
+                // Fall through to the floor
+                activity_floor(tmux, name, now, min_idle)
+            } else {
+                result
+            }
+        }
+        ReadinessProbe::Command { argv } => {
+            if argv.is_empty() {
+                return activity_floor(tmux, name, now, min_idle);
+            }
+            // Interpolate {session_id} and {pid}.
+            let interpolated: Vec<String> = argv
+                .iter()
+                .map(|a| {
+                    let mut s = a.replace("{session_id}", session_id);
+                    if let Some(pid) = pane_pid {
+                        s = s.replace("{pid}", &pid.to_string());
+                    }
+                    s
+                })
+                .collect();
+            match std::process::Command::new(&interpolated[0])
+                .args(&interpolated[1..])
+                .status()
+            {
+                Ok(s) if s.success() => Readiness::Safe,
+                Ok(_) => Readiness::Busy("probe reports busy".to_string()),
+                Err(_) => activity_floor(tmux, name, now, min_idle),
+            }
+        }
+        ReadinessProbe::None => activity_floor(tmux, name, now, min_idle),
+    }
+}
+
+/// Universal floor: compare tmux session_activity against min_idle.
+fn activity_floor(tmux: &Tmux, name: &str, now: u64, min_idle: u64) -> Readiness {
+    let activity = tmux
+        .list_sessions_detailed()
+        .ok()
+        .and_then(|sessions| sessions.into_iter().find(|s| s.name == name))
+        .map(|s| s.activity)
+        .unwrap_or(0);
+
+    if activity == 0 || now.saturating_sub(activity) >= min_idle {
+        Readiness::Safe
+    } else {
+        Readiness::Busy("recent pane activity".to_string())
+    }
+}
+
 /// Check if a harness process is running in a tmux session.
 #[allow(dead_code)] // used by harness.rs and switcher.rs
 pub fn has_harness_process(tmux: &Tmux, tmux_session: &str, bin: &str) -> bool {
@@ -147,12 +304,7 @@ pub fn pid_runs_bin(pid: u32, bin: &str) -> bool {
     }
     // 2. exe() file-stem == bin -- a path-exec'd binary; populated on macOS even
     //    when cmd() is empty.
-    if p
-        .exe()
-        .and_then(|e| e.file_name())
-        .and_then(|n| n.to_str())
-        == Some(bin)
-    {
+    if p.exe().and_then(|e| e.file_name()).and_then(|n| n.to_str()) == Some(bin) {
         return true;
     }
     // 3. cmd() argv token -- Linux argv coverage (empty on macOS).
@@ -358,6 +510,72 @@ impl SavedState {
 mod tests {
     use super::*;
 
+    // -- Readiness tests --
+
+    #[test]
+    fn classify_state_file_idle_old_since_is_safe() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        // since = 100 seconds ago, min_idle = 20 → Safe
+        let now: u64 = 1_750_000_100;
+        let since: u64 = 1_750_000_000;
+        std::fs::write(&path, format!(r#"{{"state":"idle","since":{since}}}"#)).unwrap();
+        let result = super::classify_state_file(
+            path.to_str().unwrap(),
+            "state",
+            "idle",
+            Some("since"),
+            now,
+            20,
+        );
+        assert!(matches!(result, super::Readiness::Safe), "{result:?}");
+    }
+
+    #[test]
+    fn classify_state_file_idle_recent_since_is_busy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        // since = 5 seconds ago, min_idle = 20 → Busy("settling")
+        let now: u64 = 1_750_000_100;
+        let since: u64 = 1_750_000_095;
+        std::fs::write(&path, format!(r#"{{"state":"idle","since":{since}}}"#)).unwrap();
+        let result = super::classify_state_file(
+            path.to_str().unwrap(),
+            "state",
+            "idle",
+            Some("since"),
+            now,
+            20,
+        );
+        assert!(
+            matches!(result, super::Readiness::Busy(ref r) if r == "settling"),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn classify_state_file_busy_state_is_busy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(&path, r#"{"state":"busy"}"#).unwrap();
+        let result =
+            super::classify_state_file(path.to_str().unwrap(), "state", "idle", None, 0, 20);
+        assert!(matches!(result, super::Readiness::Busy(_)), "{result:?}");
+    }
+
+    #[test]
+    fn classify_state_file_missing_file_is_unknown() {
+        let result = super::classify_state_file(
+            "/tmp/muxr-test-nonexistent-readiness-xyz.json",
+            "state",
+            "idle",
+            None,
+            0,
+            20,
+        );
+        assert!(matches!(result, super::Readiness::Unknown(_)), "{result:?}");
+    }
+
     #[test]
     fn pid_runs_bin_detects_native_binary_by_name() {
         // Signal 1 (name()): the macOS-load-bearing path. sysinfo's cmd() is
@@ -389,7 +607,10 @@ mod tests {
         let matched = pid_runs_bin(child.id(), "muxr-no-such-harness");
         let _ = child.kill();
         let _ = child.wait();
-        assert!(!matched, "pid_runs_bin must not match an unrelated bin name");
+        assert!(
+            !matched,
+            "pid_runs_bin must not match an unrelated bin name"
+        );
     }
 
     #[test]

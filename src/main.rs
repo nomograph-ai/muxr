@@ -7,10 +7,10 @@ mod init;
 mod migrate;
 mod primitives;
 mod remote;
+mod session;
 mod state;
 mod switcher;
 mod tmux;
-mod session;
 mod tool;
 mod ui;
 
@@ -110,7 +110,21 @@ enum Commands {
         /// Print what would be upgraded without touching any session.
         #[arg(long)]
         dry_run: bool,
+        /// Bypass readiness gate and upgrade unconditionally (today's behavior).
+        #[arg(long)]
+        force: bool,
+        /// Poll readiness for up to this many seconds before skipping.
+        #[arg(long)]
+        wait: Option<u64>,
+        /// Minimum seconds of tmux inactivity to consider a session safe.
+        #[arg(long, default_value_t = 20)]
+        min_idle: u64,
     },
+    /// Show readiness status for all sessions.
+    ///
+    /// For every tmux session (except `muxr`), resolves the tool, discovers
+    /// the session id, runs the readiness classifier, and prints a summary table.
+    Status,
     /// Interactive session switcher (TUI)
     Switch,
     /// Broadcast a slash command to every harness session.
@@ -256,6 +270,9 @@ fn main() -> Result<()> {
             tool,
             model,
             dry_run,
+            force,
+            wait,
+            min_idle,
         }) => {
             let config = Config::load()?;
             let harness = config
@@ -266,11 +283,17 @@ fn main() -> Result<()> {
                 &config,
                 &tool,
                 &harness,
-                model.as_deref(),
-                name.as_deref(),
-                dry_run,
+                tool::UpgradeOpts {
+                    model: model.as_deref(),
+                    name_filter: name.as_deref(),
+                    dry_run,
+                    force,
+                    wait,
+                    min_idle,
+                },
             )
         }
+        Some(Commands::Status) => cmd_status(&tmux),
         Some(Commands::Switch) => cmd_switch(&tmux),
         Some(Commands::Broadcast {
             cmd,
@@ -776,14 +799,24 @@ fn cmd_harness_dispatch(tmux: &Tmux, config: &Config, args: &[String]) -> Result
         "upgrade" => {
             let model = find_flag_value(&args[2..], "--model");
             let dry_run = args[2..].iter().any(|a| a == "--dry-run");
+            let force = args[2..].iter().any(|a| a == "--force");
+            let wait = find_flag_value(&args[2..], "--wait").and_then(|v| v.parse().ok());
+            let min_idle = find_flag_value(&args[2..], "--min-idle")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(20u64);
             tool::upgrade(
                 tmux,
                 config,
                 harness_name,
                 &harness,
-                model.as_deref(),
-                None,
-                dry_run,
+                tool::UpgradeOpts {
+                    model: model.as_deref(),
+                    name_filter: None,
+                    dry_run,
+                    force,
+                    wait,
+                    min_idle,
+                },
             )
         }
         "model" => {
@@ -791,9 +824,7 @@ fn cmd_harness_dispatch(tmux: &Tmux, config: &Config, args: &[String]) -> Result
             tool::model_switch(tmux, config, harness_name, &harness, model)
         }
         other => {
-            anyhow::bail!(
-                "Unknown {harness_name} subcommand: {other}\nAvailable: model, upgrade"
-            )
+            anyhow::bail!("Unknown {harness_name} subcommand: {other}\nAvailable: model, upgrade")
         }
     }
 }
@@ -804,6 +835,44 @@ fn find_flag_value(args: &[String], flag: &str) -> Option<String> {
         .position(|a| a == flag)
         .and_then(|i| args.get(i + 1))
         .cloned()
+}
+
+/// Print readiness status for every session.
+fn cmd_status(tmux: &Tmux) -> Result<()> {
+    let config = Config::load()?;
+    let sessions = tmux.list_sessions()?;
+
+    let mut any = false;
+    for (name, _) in &sessions {
+        if name == "muxr" {
+            continue;
+        }
+        any = true;
+        let harness = name.split('/').next().unwrap_or(name);
+        let tool_name = config.resolve_tool(harness, None);
+        let tool = config.tool_for(&tool_name);
+
+        let session_id = state::discover_session_id(tmux, name, tool.as_ref())
+            .unwrap_or_else(|| "-".to_string());
+
+        let readiness_str = if let Some(ref t) = tool {
+            let r = state::session_readiness(tmux, name, t, &session_id, 20);
+            match r {
+                state::Readiness::Safe => "SAFE".to_string(),
+                state::Readiness::Busy(reason) => format!("BUSY({reason})"),
+                state::Readiness::Unknown(reason) => format!("UNKNOWN({reason})"),
+            }
+        } else {
+            "UNKNOWN(no tool configured)".to_string()
+        };
+
+        println!("{name}  {tool_name}  {readiness_str}");
+    }
+
+    if !any {
+        eprintln!("No active sessions.");
+    }
+    Ok(())
 }
 
 /// Generate tmux status-left format string from config harnesses.
@@ -1073,7 +1142,10 @@ mod tests {
             "CAMPAIGN_BODY_MARKER",
             "ENTRYPOINT_MARKER",
         ] {
-            assert!(composed.contains(marker), "composed prompt missing {marker}:\n{composed}");
+            assert!(
+                composed.contains(marker),
+                "composed prompt missing {marker}:\n{composed}"
+            );
         }
         assert!(
             !composed.contains("LOG_BODY_MARKER"),

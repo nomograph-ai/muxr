@@ -249,6 +249,9 @@ pub struct Tool {
     /// bin name, so adding a runtime stays pure config.
     #[serde(default)]
     pub supports_add_dirs: Option<bool>,
+    /// How to probe session readiness before upgrade.
+    #[serde(default = "default_readiness_none")]
+    pub readiness: ReadinessProbe,
 }
 
 impl Tool {
@@ -272,6 +275,35 @@ pub enum PromptMode {
 
 fn default_discovery_none() -> SessionDiscovery {
     SessionDiscovery::None
+}
+
+/// How to probe a session for upgrade readiness.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum ReadinessProbe {
+    /// Read a normalized state file the runtime's hooks maintain.
+    File {
+        /// Path pattern with `{session_id}` (preferred) or `{pid}` placeholder.
+        pattern: String,
+        /// JSON key containing the state string.
+        state_key: String,
+        /// Value meaning "safe to upgrade", e.g. `"idle"`.
+        idle_value: String,
+        /// Optional epoch-seconds key for quiet-period enforcement.
+        #[serde(default)]
+        since_key: Option<String>,
+    },
+    /// Escape hatch: a runtime that exposes readiness via a CLI. Exit 0 = safe.
+    Command {
+        /// Command + args; `{session_id}` and `{pid}` are interpolated.
+        argv: Vec<String>,
+    },
+    /// No runtime probe — core uses the universal tmux-activity floor only.
+    None,
+}
+
+fn default_readiness_none() -> ReadinessProbe {
+    ReadinessProbe::None
 }
 
 /// Overlay user-supplied fields on top of a built-in tool definition.
@@ -320,6 +352,10 @@ fn merge_tool_with_builtin(user: Tool, builtin: Tool) -> Tool {
         },
         session_discovery: match user.session_discovery {
             SessionDiscovery::None => builtin.session_discovery,
+            other => other,
+        },
+        readiness: match user.readiness {
+            ReadinessProbe::None => builtin.readiness,
             other => other,
         },
         wrapper: user.wrapper.or(builtin.wrapper),
@@ -385,8 +421,7 @@ fn builtin_adapters() -> &'static HashMap<String, Tool> {
             include_str!("../extensions/adapters/claude.toml"),
             include_str!("../extensions/adapters/pi.toml"),
         ] {
-            let parsed: AdapterFile =
-                toml::from_str(src).expect("shipped adapter TOML must parse");
+            let parsed: AdapterFile = toml::from_str(src).expect("shipped adapter TOML must parse");
             m.extend(parsed.tools);
         }
         m
@@ -792,9 +827,7 @@ impl Config {
         if self.session_env.is_empty() {
             return Vec::new();
         }
-        let (repo, campaign) = session_name
-            .split_once('/')
-            .unwrap_or((session_name, ""));
+        let (repo, campaign) = session_name.split_once('/').unwrap_or((session_name, ""));
         let slug: String = session_name
             .chars()
             .map(|c| {
@@ -1346,11 +1379,7 @@ prompt_mode = "string"
     #[test]
     fn launch_command_with_resume_and_model() {
         let h = Tool::builtin_claude();
-        let cmd = h.launch_command(
-            Some("work/opus"),
-            Some("abc-123"),
-            Some("claude-opus-4-7"),
-        );
+        let cmd = h.launch_command(Some("work/opus"), Some("abc-123"), Some("claude-opus-4-7"));
         assert_eq!(
             cmd,
             "claude --name 'work/opus' --resume 'abc-123' --model 'claude-opus-4-7'"
@@ -1448,8 +1477,7 @@ prompt_mode = "string"
     fn user_only_tool_resolves_without_a_builtin() {
         // A runtime with no shipped adapter (e.g. opencode) still resolves from
         // the user's [tools.*] block alone -- the (Some user, None builtin) arm.
-        let config: Config =
-            toml::from_str("[tools.opencode]\nbin = \"opencode\"").unwrap();
+        let config: Config = toml::from_str("[tools.opencode]\nbin = \"opencode\"").unwrap();
         let t = config.tool_for("opencode").expect("user tool resolves");
         assert_eq!(t.bin, "opencode");
     }
@@ -1530,6 +1558,7 @@ session_discovery = { type = "none" }
             wrapper: Some("nono run --profile X --".to_string()),
             prompt_mode: PromptMode::String,
             supports_add_dirs: Some(false),
+            readiness: ReadinessProbe::None,
         };
 
         let settings = LaunchSettings {
@@ -1732,6 +1761,48 @@ append_system_prompt_files = ["base.md", "overlay.md"]
         let tmp = std::env::temp_dir().join("muxr-composed-system-prompt.md");
         let written = std::fs::read_to_string(&tmp).unwrap();
         assert_eq!(written, "base\n\noverlay");
+    }
+
+    #[test]
+    fn readiness_probe_inherits_from_builtin_when_user_omits_it() {
+        // A partial [tools.claude] block without [readiness] must inherit the
+        // builtin Claude probe (File), not collapse to None.
+        let toml_str = r##"
+[repos]
+
+[tools.claude]
+bin = "claude"
+args = ["--name", "{name}", "--verbose"]
+"##;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let h = config.tool_for("claude").unwrap();
+        assert!(
+            matches!(h.readiness, ReadinessProbe::File { .. }),
+            "readiness should fall back to builtin File probe; got {:?}",
+            h.readiness
+        );
+    }
+
+    #[test]
+    fn readiness_probe_user_override_wins() {
+        // A [tools.claude] block with an explicit [readiness] overrides the builtin.
+        let toml_str = r##"
+[repos]
+
+[tools.claude]
+bin = "claude"
+
+[tools.claude.readiness]
+type = "command"
+argv = ["my-probe", "--session", "{session_id}"]
+"##;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let h = config.tool_for("claude").unwrap();
+        assert!(
+            matches!(h.readiness, ReadinessProbe::Command { .. }),
+            "user readiness override should win; got {:?}",
+            h.readiness
+        );
     }
 
     #[test]
