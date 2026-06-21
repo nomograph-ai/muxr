@@ -2,6 +2,35 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.3.0] (2026-06-21)
+
+Hardening pass on the readiness gate (3.2.0), from an adversarial review.
+
+### Fixed
+- **`activity_floor` false-SAFE on lookup failure.** A failed tmux activity
+  lookup returned `Safe` (via `unwrap_or(0)`); it now returns `Unknown` so the
+  gate is conservative on missing data.
+- **Stale `busy` files block upgrades forever.** A session killed mid-turn (no
+  `Stop`) left a permanent `busy` file. A `busy` file older than
+  `STALE_BUSY_SECS` (1h) now classifies `Unknown` → falls through to the floor.
+- **Idle with a missing `since`** no longer reads `Safe` with zero cooldown
+  (now `Unknown` → floor).
+- **`--dry-run --wait N` no longer sleeps** for N seconds; dry-run reports the
+  live verdict and never polls, and labels each row would-upgrade vs would-skip.
+- **`upgrade` hardcoded `/exit`** — now uses `tool_def.exit_command` (Pi
+  `/quit`), so non-Claude runtimes exit cleanly.
+
+### Added
+- **Default cooldown raised to 180s** (`DEFAULT_MIN_IDLE_SECS`, was 20s), shared
+  by `upgrade` and `status`, so a between-turns gap no longer reads `Safe`.
+- **`muxr status --min-idle`** and a `quiet <age>` column (time since last tmux
+  activity), with a single activity fetch per run.
+- **Self-upgrade guard** — `upgrade` skips the session it is invoked from.
+- **`ReadinessProbe::Disabled`** — explicit per-tool opt-out (does not inherit
+  the builtin probe).
+- **`Command` probe timeout** (`PROBE_TIMEOUT_SECS`, 10s) so a hung probe cannot
+  block muxr.
+
 ## [3.2.0] (2026-06-20)
 
 ### Added
