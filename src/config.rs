@@ -1814,6 +1814,28 @@ argv = ["my-probe", "--session", "{session_id}"]
     }
 
     #[test]
+    fn readiness_probe_disabled_opts_out_without_inheriting() {
+        // `type = "disabled"` is an explicit opt-out: it resolves to None
+        // (floor only) and must NOT inherit the builtin File probe.
+        let toml_str = r##"
+[repos]
+
+[tools.claude]
+bin = "claude"
+
+[tools.claude.readiness]
+type = "disabled"
+"##;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let h = config.tool_for("claude").unwrap();
+        assert!(
+            matches!(h.readiness, ReadinessProbe::None),
+            "disabled must resolve to None (no builtin inherit); got {:?}",
+            h.readiness
+        );
+    }
+
+    #[test]
     fn array_takes_precedence_over_singular() {
         // When both fields are set, the array wins and the singular is ignored.
         let dir = tempfile::tempdir().unwrap();

@@ -25,6 +25,25 @@ impl Tmux {
         cmd
     }
 
+    /// Send keys (followed by Enter) to a session target. Honors `-L` so it
+    /// works on an isolated tmux server; a bare `tmux` would hit the wrong one.
+    pub fn send_keys(&self, target: &str, keys: &str) {
+        let _ = self
+            .command()
+            .args(["send-keys", "-t", target, keys, "Enter"])
+            .status();
+    }
+
+    /// Capture the visible pane content for a session target (honors `-L`).
+    pub fn capture_pane(&self, target: &str) -> Option<String> {
+        let output = self
+            .command()
+            .args(["capture-pane", "-p", "-t", target])
+            .output()
+            .ok()?;
+        Some(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
     /// Format a session name as a tmux target.
     /// Session names with `/` conflict with tmux's session/window target
     /// syntax. The trailing `:` tells tmux to treat the entire string as

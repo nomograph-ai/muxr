@@ -194,9 +194,7 @@ pub fn upgrade(
         // Send the harness's graceful-exit command (runtime-specific: Pi = /quit).
         let exit_cmd = tool_def.exit_command.as_deref().unwrap_or("/exit");
         let target = Tmux::target(name);
-        let _ = Command::new("tmux")
-            .args(["send-keys", "-t", &target, exit_cmd, "Enter"])
-            .status();
+        tmux.send_keys(&target, exit_cmd);
 
         // Wait for exit (up to 10s, then SIGKILL)
         if let Some(pid) = harness_pid {
@@ -206,9 +204,7 @@ pub fn upgrade(
         // Wait for shell prompt (up to 5s)
         wait_for_prompt(tmux, name, 5);
 
-        let _ = Command::new("tmux")
-            .args(["send-keys", "-t", &target, &cmd, "Enter"])
-            .status();
+        tmux.send_keys(&target, &cmd);
 
         upgraded += 1;
     }
@@ -255,9 +251,7 @@ pub fn model_switch(
         }
 
         let target = Tmux::target(name);
-        let _ = Command::new("tmux")
-            .args(["send-keys", "-t", &target, &cmd, "Enter"])
-            .status();
+        tmux.send_keys(&target, &cmd);
         eprintln!("  {name}: sent {cmd}");
         switched += 1;
     }
@@ -291,14 +285,10 @@ pub(crate) fn wait_for_exit(pid: u32, timeout_secs: u32) {
 }
 
 /// Wait for a shell prompt to appear in the pane.
-fn wait_for_prompt(_tmux: &Tmux, session: &str, timeout_secs: u32) {
+fn wait_for_prompt(tmux: &Tmux, session: &str, timeout_secs: u32) {
     let target = Tmux::target(session);
     for _ in 0..timeout_secs.saturating_mul(10) {
-        if let Ok(output) = std::process::Command::new("tmux")
-            .args(["capture-pane", "-p", "-t", &target])
-            .output()
-        {
-            let content = String::from_utf8_lossy(&output.stdout);
+        if let Some(content) = tmux.capture_pane(&target) {
             let last_line = content.lines().rev().find(|l| !l.is_empty()).unwrap_or("");
             // Common shell prompt endings
             if last_line.ends_with('$')

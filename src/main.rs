@@ -802,12 +802,13 @@ fn cmd_harness_dispatch(tmux: &Tmux, config: &Config, args: &[String]) -> Result
     match sub {
         "upgrade" => {
             let model = find_flag_value(&args[2..], "--model");
+            let name = find_flag_value(&args[2..], "--name");
             let dry_run = args[2..].iter().any(|a| a == "--dry-run");
             let force = args[2..].iter().any(|a| a == "--force");
             let wait = find_flag_value(&args[2..], "--wait").and_then(|v| v.parse().ok());
             let min_idle = find_flag_value(&args[2..], "--min-idle")
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(20u64);
+                .unwrap_or(state::DEFAULT_MIN_IDLE_SECS);
             tool::upgrade(
                 tmux,
                 config,
@@ -815,7 +816,7 @@ fn cmd_harness_dispatch(tmux: &Tmux, config: &Config, args: &[String]) -> Result
                 &harness,
                 tool::UpgradeOpts {
                     model: model.as_deref(),
-                    name_filter: None,
+                    name_filter: name.as_deref(),
                     dry_run,
                     force,
                     wait,
