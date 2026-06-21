@@ -14,6 +14,12 @@ Closes the loose ends left open by the 3.3.0 hardening review.
 - **`muxr <tool> upgrade --name X`** now honors the filter (was ignored —
   upgraded every session); the dispatch path also picks up
   `DEFAULT_MIN_IDLE_SECS` instead of a stray hardcoded `20`.
+- **Narrowed the readiness→exit TOCTOU window.** On a confirmed-Safe verdict,
+  `upgrade` now sends the exit command BEFORE composing the relaunch (compose
+  happens while the session exits), instead of composing in between.
+- **`muxr status` / multi-session `upgrade` no longer re-query tmux per
+  session** — activity is fetched once per sweep (the `--wait` poll still reads
+  the single session live). `session_readiness` takes the activity in.
 
 ### Added
 - Test for `ReadinessProbe::Disabled` (explicit opt-out resolves to `None`).

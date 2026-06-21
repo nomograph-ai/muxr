@@ -54,6 +54,16 @@ pub fn upgrade(
     let mut upgraded = 0;
     let mut skipped = 0;
 
+    // Fetch tmux activity ONCE for the whole sweep (the gate's floor uses it);
+    // the --wait poll re-reads a single session live. Avoids an O(n^2) of
+    // list-sessions calls across the loop.
+    let activity_map: std::collections::HashMap<String, u64> = tmux
+        .list_sessions_detailed()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| (s.name, s.activity))
+        .collect();
+
     for (name, _path) in &sessions {
         // Skip the muxr control plane
         if name == "muxr" {
@@ -98,7 +108,8 @@ pub fn upgrade(
             continue;
         }
 
-        // Compute readiness ONCE (--force skips the probe entirely).
+        // Compute readiness ONCE (--force skips the probe entirely). The floor
+        // uses the pre-fetched activity (no per-session list-sessions call).
         let readiness = if force {
             None
         } else {
@@ -108,6 +119,7 @@ pub fn upgrade(
                 tool_def,
                 &session_id,
                 min_idle,
+                activity_map.get(name).copied(),
             ))
         };
         let verdict = match &readiness {
@@ -118,12 +130,12 @@ pub fn upgrade(
         };
         let is_safe = matches!(readiness, None | Some(state::Readiness::Safe));
 
-        // Compose the FULL relaunch up front (system prompt + campaign add-dirs
-        // + resume) so the resumed session keeps its harness rules and working
-        // dirs on the freshly resolved binary, and so a dry run surfaces compose
-        // errors before any session is touched. Fall back to a bare name+resume
-        // relaunch if the campaign/session files can't be composed.
-        let cmd = match crate::session::compose_launch_command(
+        // Compose the FULL relaunch (system prompt + campaign add-dirs + resume),
+        // falling back to a bare name+resume if the campaign/session files can't
+        // be composed. Deferred behind a closure: in a live run we compose AFTER
+        // sending the exit (off the readiness->exit TOCTOU path), and we skip
+        // composing entirely for a dry-run that would skip.
+        let compose = || match crate::session::compose_launch_command(
             config,
             name,
             Some(&session_id),
@@ -141,27 +153,41 @@ pub fn upgrade(
             // Never poll/sleep in a dry run; report the live verdict + decision.
             if is_safe {
                 eprintln!("  {name}: would upgrade (session {session_id}) [{verdict}]");
+                eprintln!("    -> {}", compose());
                 upgraded += 1;
             } else {
                 eprintln!("  {name}: would skip [{verdict}]");
                 skipped += 1;
             }
-            eprintln!("    -> {cmd}");
             continue;
         }
 
         // Live readiness gate: wait or skip unless already safe (or forced).
+        // The --wait poll re-reads this session's activity live each tick.
         if !is_safe {
             if let Some(wait_secs) = wait {
                 let deadline =
                     std::time::Instant::now() + std::time::Duration::from_secs(wait_secs);
-                let mut current =
-                    state::session_readiness(tmux, name, tool_def, &session_id, min_idle);
+                let mut current = state::session_readiness(
+                    tmux,
+                    name,
+                    tool_def,
+                    &session_id,
+                    min_idle,
+                    tmux.session_activity(name),
+                );
                 while !matches!(current, state::Readiness::Safe)
                     && std::time::Instant::now() < deadline
                 {
                     std::thread::sleep(std::time::Duration::from_secs(1));
-                    current = state::session_readiness(tmux, name, tool_def, &session_id, min_idle);
+                    current = state::session_readiness(
+                        tmux,
+                        name,
+                        tool_def,
+                        &session_id,
+                        min_idle,
+                        tmux.session_activity(name),
+                    );
                 }
                 if !matches!(current, state::Readiness::Safe) {
                     eprintln!("  {name}: skipping — timed out waiting for readiness [{verdict}]");
@@ -175,9 +201,10 @@ pub fn upgrade(
             }
         }
 
+        // CONFIRMED SAFE. Find the harness pid, then send the exit IMMEDIATELY --
+        // before the slower compose -- to shrink the window between the readiness
+        // check and the relaunch trigger (TOCTOU).
         eprintln!("  {name}: upgrading (session {session_id})");
-
-        // Find the harness PID so we can wait for a clean exit.
         let shell_pid = tmux.pane_pid(name).ok().flatten();
         let harness_pid = shell_pid.and_then(|sp| {
             state::descendant_pids(sp)
@@ -191,17 +218,18 @@ pub fn upgrade(
             );
         }
 
-        // Send the harness's graceful-exit command (runtime-specific: Pi = /quit).
+        // Graceful-exit command (runtime-specific: Pi = /quit), sent at once.
         let exit_cmd = tool_def.exit_command.as_deref().unwrap_or("/exit");
         let target = Tmux::target(name);
         tmux.send_keys(&target, exit_cmd);
 
-        // Wait for exit (up to 10s, then SIGKILL)
+        // Compose the relaunch WHILE the session is exiting (off the TOCTOU path).
+        let cmd = compose();
+
+        // Wait for exit (up to 10s, then SIGKILL), then the shell prompt.
         if let Some(pid) = harness_pid {
             wait_for_exit(pid, 10);
         }
-
-        // Wait for shell prompt (up to 5s)
         wait_for_prompt(tmux, name, 5);
 
         tmux.send_keys(&target, &cmd);

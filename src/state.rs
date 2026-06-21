@@ -203,6 +203,7 @@ pub fn session_readiness(
     tool: &Tool,
     session_id: &str,
     min_idle: u64,
+    activity: Option<u64>,
 ) -> Readiness {
     let now = now_epoch();
 
@@ -236,14 +237,14 @@ pub fn session_readiness(
             );
             if matches!(result, Readiness::Unknown(_)) {
                 // Fall through to the floor
-                activity_floor(tmux, name, now, min_idle)
+                activity_floor(activity, now, min_idle)
             } else {
                 result
             }
         }
         ReadinessProbe::Command { argv } => {
             if argv.is_empty() {
-                return activity_floor(tmux, name, now, min_idle);
+                return activity_floor(activity, now, min_idle);
             }
             // Interpolate {session_id} and {pid}.
             let interpolated: Vec<String> = argv
@@ -272,32 +273,27 @@ pub fn session_readiness(
                             Ok(None) if Instant::now() >= deadline => {
                                 let _ = child.kill();
                                 let _ = child.wait();
-                                return activity_floor(tmux, name, now, min_idle);
+                                return activity_floor(activity, now, min_idle);
                             }
                             Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-                            Err(_) => return activity_floor(tmux, name, now, min_idle),
+                            Err(_) => return activity_floor(activity, now, min_idle),
                         }
                     }
                 }
-                Err(_) => activity_floor(tmux, name, now, min_idle),
+                Err(_) => activity_floor(activity, now, min_idle),
             }
         }
         ReadinessProbe::None | ReadinessProbe::Disabled => {
-            activity_floor(tmux, name, now, min_idle)
+            activity_floor(activity, now, min_idle)
         }
     }
 }
 
 /// Universal floor: compare tmux session_activity against min_idle.
-fn activity_floor(tmux: &Tmux, name: &str, now: u64, min_idle: u64) -> Readiness {
-    let activity = tmux
-        .list_sessions_detailed()
-        .ok()
-        .and_then(|sessions| sessions.into_iter().find(|s| s.name == name))
-        .map(|s| s.activity);
-
-    // A FAILED lookup (tmux error / session not found) is Unknown, NOT Safe:
-    // the gate must be conservative on missing data, not permissive.
+/// `activity` is the session's last tmux-activity epoch, fetched ONCE by the
+/// caller (so a multi-session sweep is O(n), not O(n^2)). `None` = lookup
+/// failed → Unknown (conservative on missing data, never permissive Safe).
+fn activity_floor(activity: Option<u64>, now: u64, min_idle: u64) -> Readiness {
     match activity {
         None => Readiness::Unknown("tmux activity unavailable".to_string()),
         Some(a) if now.saturating_sub(a) >= min_idle => Readiness::Safe,

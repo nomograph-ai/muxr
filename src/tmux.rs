@@ -44,6 +44,17 @@ impl Tmux {
         Some(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
+    /// Last-activity epoch for a single session (None if not found / tmux error).
+    /// For a fresh per-poll read; for a sweep, fetch `list_sessions_detailed`
+    /// once and index it instead.
+    pub fn session_activity(&self, name: &str) -> Option<u64> {
+        self.list_sessions_detailed()
+            .ok()?
+            .into_iter()
+            .find(|s| s.name == name)
+            .map(|s| s.activity)
+    }
+
     /// Format a session name as a tmux target.
     /// Session names with `/` conflict with tmux's session/window target
     /// syntax. The trailing `:` tells tmux to treat the entire string as

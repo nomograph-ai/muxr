@@ -885,7 +885,14 @@ fn cmd_status(tmux: &Tmux, min_idle: u64) -> Result<()> {
             .unwrap_or_else(|| "-".to_string());
 
         let readiness_str = if let Some(ref t) = tool {
-            let r = state::session_readiness(tmux, name, t, &session_id, min_idle);
+            let r = state::session_readiness(
+                tmux,
+                name,
+                t,
+                &session_id,
+                min_idle,
+                activity.get(name).copied(),
+            );
             match r {
                 state::Readiness::Safe => "SAFE".to_string(),
                 state::Readiness::Busy(reason) => format!("BUSY({reason})"),
