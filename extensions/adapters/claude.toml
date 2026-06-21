@@ -47,3 +47,15 @@ supports_add_dirs = true
 type = "file"
 pattern = "~/.claude/sessions/{pid}.json"
 id_key = "sessionId"
+
+# Readiness probe: muxr reads this file (written by the operator's Claude Code
+# hooks -- Stop writes idle, PreToolUse/UserPromptSubmit write busy) to decide
+# whether it's safe to upgrade a session in-place. `since` enforces a quiet
+# period: even after the state flips to "idle", muxr waits until the last
+# transition is at least `min_idle` seconds old before relaunching.
+[tools.claude.readiness]
+type = "file"
+pattern = "~/.config/muxr/readiness/{session_id}.json"
+state_key = "state"
+idle_value = "idle"
+since_key = "since"

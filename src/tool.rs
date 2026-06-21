@@ -10,6 +10,19 @@ use crate::config::{Config, Tool};
 use crate::state;
 use crate::tmux::Tmux;
 
+/// Upgrade flags grouped to stay under the 7-arg clippy limit.
+pub struct UpgradeOpts<'a> {
+    pub model: Option<&'a str>,
+    pub name_filter: Option<&'a str>,
+    pub dry_run: bool,
+    /// Bypass readiness gate and upgrade unconditionally.
+    pub force: bool,
+    /// Poll readiness for up to this many seconds before skipping.
+    pub wait: Option<u64>,
+    /// Minimum seconds of tmux inactivity to consider a session safe.
+    pub min_idle: u64,
+}
+
 /// Upgrade running harness sessions onto the freshly resolved binary,
 /// resuming each conversation in place.
 ///
@@ -19,18 +32,24 @@ use crate::tmux::Tmux;
 /// 3. Send /exit to the harness (graceful exit), wait for it to quit
 /// 4. Wait for the shell prompt, then send the relaunch command
 ///
-/// `name_filter` limits the run to a single session name; `None` upgrades
-/// every session running `harness_name`. `dry_run` composes and prints the
+/// `opts.name_filter` limits the run to a single session name; `None` upgrades
+/// every session running `harness_name`. `opts.dry_run` composes and prints the
 /// relaunch command for each target without touching the session.
 pub fn upgrade(
     tmux: &Tmux,
     config: &Config,
     harness_name: &str,
     tool_def: &Tool,
-    model: Option<&str>,
-    name_filter: Option<&str>,
-    dry_run: bool,
+    opts: UpgradeOpts<'_>,
 ) -> Result<()> {
+    let UpgradeOpts {
+        model,
+        name_filter,
+        dry_run,
+        force,
+        wait,
+        min_idle,
+    } = opts;
     let sessions = tmux.list_sessions()?;
     let mut upgraded = 0;
     let mut skipped = 0;
@@ -71,14 +90,56 @@ pub fn upgrade(
         }
         let session_id = session_id.unwrap();
 
+        // Readiness gate: skip or wait unless --force.
+        if !force {
+            let readiness = state::session_readiness(tmux, name, tool_def, &session_id, min_idle);
+            match readiness {
+                state::Readiness::Safe => {}
+                state::Readiness::Busy(ref reason) | state::Readiness::Unknown(ref reason) => {
+                    if let Some(wait_secs) = wait {
+                        // Poll until Safe or timeout.
+                        let deadline =
+                            std::time::Instant::now() + std::time::Duration::from_secs(wait_secs);
+                        let mut current = readiness;
+                        while !matches!(current, state::Readiness::Safe)
+                            && std::time::Instant::now() < deadline
+                        {
+                            std::thread::sleep(std::time::Duration::from_secs(1));
+                            current = state::session_readiness(
+                                tmux,
+                                name,
+                                tool_def,
+                                &session_id,
+                                min_idle,
+                            );
+                        }
+                        if !matches!(current, state::Readiness::Safe) {
+                            eprintln!("  {name}: skipping — timed out waiting for readiness");
+                            skipped += 1;
+                            continue;
+                        }
+                    } else {
+                        eprintln!("  {name}: skipping — {reason}");
+                        skipped += 1;
+                        continue;
+                    }
+                }
+            }
+        }
+
         // Compose the FULL relaunch up front (system prompt + campaign
         // add-dirs + resume) so the resumed session keeps its harness rules
         // and working directories on the freshly resolved binary, and so a
         // dry run surfaces compose errors before any session is touched. Fall
         // back to a bare name+resume relaunch if the campaign/session files
         // can't be composed (e.g. an archived session).
-        let cmd = match crate::session::compose_launch_command(config, name, Some(&session_id), model, false)
-        {
+        let cmd = match crate::session::compose_launch_command(
+            config,
+            name,
+            Some(&session_id),
+            model,
+            false,
+        ) {
             Ok((cmd, _)) => cmd,
             Err(e) => {
                 eprintln!("    full compose failed ({e}); relaunching name+resume only");
@@ -87,7 +148,13 @@ pub fn upgrade(
         };
 
         if dry_run {
-            eprintln!("  {name}: would upgrade (session {session_id})");
+            let readiness = state::session_readiness(tmux, name, tool_def, &session_id, min_idle);
+            let verdict = match &readiness {
+                state::Readiness::Safe => "SAFE".to_string(),
+                state::Readiness::Busy(r) => format!("BUSY({r})"),
+                state::Readiness::Unknown(r) => format!("UNKNOWN({r})"),
+            };
+            eprintln!("  {name}: would upgrade (session {session_id}) [{verdict}]");
             eprintln!("    -> {cmd}");
             upgraded += 1;
             continue;
