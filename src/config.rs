@@ -299,7 +299,12 @@ pub enum ReadinessProbe {
         argv: Vec<String>,
     },
     /// No runtime probe — core uses the universal tmux-activity floor only.
+    /// This is the type default; in a user `[tools.<name>]` block it means
+    /// "inherit the builtin probe" (see `merge_tool_with_builtin`).
     None,
+    /// Explicit opt-out: floor only, and do NOT inherit the builtin probe.
+    /// Resolved to `None` during merge, so the classifier never sees it.
+    Disabled,
 }
 
 fn default_readiness_none() -> ReadinessProbe {
@@ -355,7 +360,10 @@ fn merge_tool_with_builtin(user: Tool, builtin: Tool) -> Tool {
             other => other,
         },
         readiness: match user.readiness {
+            // Unset (the type default) inherits the builtin probe...
             ReadinessProbe::None => builtin.readiness,
+            // ...but an explicit `type = "disabled"` opts out without inheriting.
+            ReadinessProbe::Disabled => ReadinessProbe::None,
             other => other,
         },
         wrapper: user.wrapper.or(builtin.wrapper),

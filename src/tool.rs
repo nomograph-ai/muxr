@@ -90,49 +90,39 @@ pub fn upgrade(
         }
         let session_id = session_id.unwrap();
 
-        // Readiness gate: skip or wait unless --force.
-        if !force {
-            let readiness = state::session_readiness(tmux, name, tool_def, &session_id, min_idle);
-            match readiness {
-                state::Readiness::Safe => {}
-                state::Readiness::Busy(ref reason) | state::Readiness::Unknown(ref reason) => {
-                    if let Some(wait_secs) = wait {
-                        // Poll until Safe or timeout.
-                        let deadline =
-                            std::time::Instant::now() + std::time::Duration::from_secs(wait_secs);
-                        let mut current = readiness;
-                        while !matches!(current, state::Readiness::Safe)
-                            && std::time::Instant::now() < deadline
-                        {
-                            std::thread::sleep(std::time::Duration::from_secs(1));
-                            current = state::session_readiness(
-                                tmux,
-                                name,
-                                tool_def,
-                                &session_id,
-                                min_idle,
-                            );
-                        }
-                        if !matches!(current, state::Readiness::Safe) {
-                            eprintln!("  {name}: skipping — timed out waiting for readiness");
-                            skipped += 1;
-                            continue;
-                        }
-                    } else {
-                        eprintln!("  {name}: skipping — {reason}");
-                        skipped += 1;
-                        continue;
-                    }
-                }
-            }
+        // Self-upgrade guard: never send the exit command to the session we are
+        // invoked from -- it would kill the in-flight `upgrade` run.
+        if tmux.current_session().as_deref() == Some(name.as_str()) {
+            eprintln!("  {name}: skipping — this is the session running `upgrade`");
+            skipped += 1;
+            continue;
         }
 
-        // Compose the FULL relaunch up front (system prompt + campaign
-        // add-dirs + resume) so the resumed session keeps its harness rules
-        // and working directories on the freshly resolved binary, and so a
-        // dry run surfaces compose errors before any session is touched. Fall
-        // back to a bare name+resume relaunch if the campaign/session files
-        // can't be composed (e.g. an archived session).
+        // Compute readiness ONCE (--force skips the probe entirely).
+        let readiness = if force {
+            None
+        } else {
+            Some(state::session_readiness(
+                tmux,
+                name,
+                tool_def,
+                &session_id,
+                min_idle,
+            ))
+        };
+        let verdict = match &readiness {
+            None => "FORCED".to_string(),
+            Some(state::Readiness::Safe) => "SAFE".to_string(),
+            Some(state::Readiness::Busy(r)) => format!("BUSY({r})"),
+            Some(state::Readiness::Unknown(r)) => format!("UNKNOWN({r})"),
+        };
+        let is_safe = matches!(readiness, None | Some(state::Readiness::Safe));
+
+        // Compose the FULL relaunch up front (system prompt + campaign add-dirs
+        // + resume) so the resumed session keeps its harness rules and working
+        // dirs on the freshly resolved binary, and so a dry run surfaces compose
+        // errors before any session is touched. Fall back to a bare name+resume
+        // relaunch if the campaign/session files can't be composed.
         let cmd = match crate::session::compose_launch_command(
             config,
             name,
@@ -148,16 +138,41 @@ pub fn upgrade(
         };
 
         if dry_run {
-            let readiness = state::session_readiness(tmux, name, tool_def, &session_id, min_idle);
-            let verdict = match &readiness {
-                state::Readiness::Safe => "SAFE".to_string(),
-                state::Readiness::Busy(r) => format!("BUSY({r})"),
-                state::Readiness::Unknown(r) => format!("UNKNOWN({r})"),
-            };
-            eprintln!("  {name}: would upgrade (session {session_id}) [{verdict}]");
+            // Never poll/sleep in a dry run; report the live verdict + decision.
+            if is_safe {
+                eprintln!("  {name}: would upgrade (session {session_id}) [{verdict}]");
+                upgraded += 1;
+            } else {
+                eprintln!("  {name}: would skip [{verdict}]");
+                skipped += 1;
+            }
             eprintln!("    -> {cmd}");
-            upgraded += 1;
             continue;
+        }
+
+        // Live readiness gate: wait or skip unless already safe (or forced).
+        if !is_safe {
+            if let Some(wait_secs) = wait {
+                let deadline =
+                    std::time::Instant::now() + std::time::Duration::from_secs(wait_secs);
+                let mut current =
+                    state::session_readiness(tmux, name, tool_def, &session_id, min_idle);
+                while !matches!(current, state::Readiness::Safe)
+                    && std::time::Instant::now() < deadline
+                {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    current = state::session_readiness(tmux, name, tool_def, &session_id, min_idle);
+                }
+                if !matches!(current, state::Readiness::Safe) {
+                    eprintln!("  {name}: skipping — timed out waiting for readiness [{verdict}]");
+                    skipped += 1;
+                    continue;
+                }
+            } else {
+                eprintln!("  {name}: skipping — {verdict}");
+                skipped += 1;
+                continue;
+            }
         }
 
         eprintln!("  {name}: upgrading (session {session_id})");
@@ -169,11 +184,18 @@ pub fn upgrade(
                 .into_iter()
                 .find(|pid| state::pid_runs_bin(*pid, &tool_def.bin))
         });
+        if shell_pid.is_some() && harness_pid.is_none() {
+            eprintln!(
+                "  {name}: no live {} process found; may have already exited",
+                tool_def.bin
+            );
+        }
 
-        // Send /exit for graceful shutdown
+        // Send the harness's graceful-exit command (runtime-specific: Pi = /quit).
+        let exit_cmd = tool_def.exit_command.as_deref().unwrap_or("/exit");
         let target = Tmux::target(name);
         let _ = Command::new("tmux")
-            .args(["send-keys", "-t", &target, "/exit", "Enter"])
+            .args(["send-keys", "-t", &target, exit_cmd, "Enter"])
             .status();
 
         // Wait for exit (up to 10s, then SIGKILL)

@@ -117,14 +117,18 @@ enum Commands {
         #[arg(long)]
         wait: Option<u64>,
         /// Minimum seconds of tmux inactivity to consider a session safe.
-        #[arg(long, default_value_t = 20)]
+        #[arg(long, default_value_t = state::DEFAULT_MIN_IDLE_SECS)]
         min_idle: u64,
     },
     /// Show readiness status for all sessions.
     ///
     /// For every tmux session (except `muxr`), resolves the tool, discovers
     /// the session id, runs the readiness classifier, and prints a summary table.
-    Status,
+    Status {
+        /// Minimum seconds of inactivity to consider a session safe.
+        #[arg(long, default_value_t = state::DEFAULT_MIN_IDLE_SECS)]
+        min_idle: u64,
+    },
     /// Interactive session switcher (TUI)
     Switch,
     /// Broadcast a slash command to every harness session.
@@ -293,7 +297,7 @@ fn main() -> Result<()> {
                 },
             )
         }
-        Some(Commands::Status) => cmd_status(&tmux),
+        Some(Commands::Status { min_idle }) => cmd_status(&tmux, min_idle),
         Some(Commands::Switch) => cmd_switch(&tmux),
         Some(Commands::Broadcast {
             cmd,
@@ -837,10 +841,34 @@ fn find_flag_value(args: &[String], flag: &str) -> Option<String> {
         .cloned()
 }
 
-/// Print readiness status for every session.
-fn cmd_status(tmux: &Tmux) -> Result<()> {
+/// Format a seconds duration compactly, e.g. `12s`, `4m`, `2h3m`.
+fn fmt_age(secs: u64) -> String {
+    if secs >= 3600 {
+        format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
+    } else if secs >= 60 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{secs}s")
+    }
+}
+
+/// Print readiness status for every session. `min_idle` is the quiet period
+/// (seconds) used by the classifier; the AGE column shows seconds since the
+/// session's last tmux activity (a freshness cue independent of the verdict).
+fn cmd_status(tmux: &Tmux, min_idle: u64) -> Result<()> {
     let config = Config::load()?;
     let sessions = tmux.list_sessions()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // One tmux round-trip for activity timestamps, reused for every row.
+    let activity: std::collections::HashMap<String, u64> = tmux
+        .list_sessions_detailed()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| (s.name, s.activity))
+        .collect();
 
     let mut any = false;
     for (name, _) in &sessions {
@@ -856,7 +884,7 @@ fn cmd_status(tmux: &Tmux) -> Result<()> {
             .unwrap_or_else(|| "-".to_string());
 
         let readiness_str = if let Some(ref t) = tool {
-            let r = state::session_readiness(tmux, name, t, &session_id, 20);
+            let r = state::session_readiness(tmux, name, t, &session_id, min_idle);
             match r {
                 state::Readiness::Safe => "SAFE".to_string(),
                 state::Readiness::Busy(reason) => format!("BUSY({reason})"),
@@ -866,7 +894,12 @@ fn cmd_status(tmux: &Tmux) -> Result<()> {
             "UNKNOWN(no tool configured)".to_string()
         };
 
-        println!("{name}  {tool_name}  {readiness_str}");
+        let age = activity
+            .get(name)
+            .map(|a| fmt_age(now.saturating_sub(*a)))
+            .unwrap_or_else(|| "-".to_string());
+
+        println!("{name}  {tool_name}  {readiness_str}  quiet {age}");
     }
 
     if !any {
