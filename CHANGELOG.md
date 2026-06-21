@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.2.0] (2026-06-20)
+
+### Added
+- **Readiness-gated `upgrade`** and a read-only **`muxr status`** command.
+  `muxr upgrade` now checks whether each session is at a safe-to-relaunch
+  boundary before relaunching it, so a fleet migration no longer interrupts
+  in-flight turns. Runtime-agnostic and extension-based: a declarative
+  `ReadinessProbe` (`File`/`Command`/`None`) on the `Tool` descriptor —
+  mirroring `session_discovery` — read generically by core, with a universal
+  tmux-activity floor when no probe is declared or it returns `Unknown`.
+  `Unknown` is treated as not-safe unless `--force`.
+  - New flags: `--force`, `--wait <secs>`, `--min-idle <secs>`.
+  - `muxr status` prints per-session readiness (`SAFE`/`BUSY`/`UNKNOWN`).
+  - The Claude adapter ships a `[readiness]` File probe; `pi`/`opencode`
+    default to the floor. The producer side (a runtime's turn-boundary hooks
+    writing the state file) lives in the operator's harness, not muxr.
+  - Design: `docs/readiness-gated-upgrade.md`.
+
 ## [3.1.1] (2026-06-17)
 
 Fixes from an adversarial review of the 3.0.1/3.1.0 cluster (the prior tags
