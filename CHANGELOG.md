@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.3.1] (2026-06-21)
+
+Closes the loose ends left open by the 3.3.0 hardening review.
+
+### Fixed
+- **Isolated-server (`-L`) support in `upgrade`.** The exit-send, relaunch-send,
+  model-switch send, and `wait_for_prompt` capture used a bare `tmux` and so hit
+  the default socket; they now route through the `-L`-aware handle (new
+  `Tmux::send_keys` / `Tmux::capture_pane`). `MUXR_TMUX_SERVER` setups now work.
+- **`muxr <tool> upgrade --name X`** now honors the filter (was ignored —
+  upgraded every session); the dispatch path also picks up
+  `DEFAULT_MIN_IDLE_SECS` instead of a stray hardcoded `20`.
+- **Narrowed the readiness→exit TOCTOU window.** On a confirmed-Safe verdict,
+  `upgrade` now sends the exit command BEFORE composing the relaunch (compose
+  happens while the session exits), instead of composing in between.
+- **`muxr status` / multi-session `upgrade` no longer re-query tmux per
+  session** — activity is fetched once per sweep (the `--wait` poll still reads
+  the single session live). `session_readiness` takes the activity in.
+
+### Added
+- Test for `ReadinessProbe::Disabled` (explicit opt-out resolves to `None`).
+
 ## [3.3.0] (2026-06-21)
 
 Hardening pass on the readiness gate (3.2.0), from an adversarial review.

@@ -802,12 +802,13 @@ fn cmd_harness_dispatch(tmux: &Tmux, config: &Config, args: &[String]) -> Result
     match sub {
         "upgrade" => {
             let model = find_flag_value(&args[2..], "--model");
+            let name = find_flag_value(&args[2..], "--name");
             let dry_run = args[2..].iter().any(|a| a == "--dry-run");
             let force = args[2..].iter().any(|a| a == "--force");
             let wait = find_flag_value(&args[2..], "--wait").and_then(|v| v.parse().ok());
             let min_idle = find_flag_value(&args[2..], "--min-idle")
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(20u64);
+                .unwrap_or(state::DEFAULT_MIN_IDLE_SECS);
             tool::upgrade(
                 tmux,
                 config,
@@ -815,7 +816,7 @@ fn cmd_harness_dispatch(tmux: &Tmux, config: &Config, args: &[String]) -> Result
                 &harness,
                 tool::UpgradeOpts {
                     model: model.as_deref(),
-                    name_filter: None,
+                    name_filter: name.as_deref(),
                     dry_run,
                     force,
                     wait,
@@ -884,7 +885,14 @@ fn cmd_status(tmux: &Tmux, min_idle: u64) -> Result<()> {
             .unwrap_or_else(|| "-".to_string());
 
         let readiness_str = if let Some(ref t) = tool {
-            let r = state::session_readiness(tmux, name, t, &session_id, min_idle);
+            let r = state::session_readiness(
+                tmux,
+                name,
+                t,
+                &session_id,
+                min_idle,
+                activity.get(name).copied(),
+            );
             match r {
                 state::Readiness::Safe => "SAFE".to_string(),
                 state::Readiness::Busy(reason) => format!("BUSY({reason})"),
