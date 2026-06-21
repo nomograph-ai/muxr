@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 use sysinfo::{Pid, ProcessesToUpdate, System};
 
 use crate::config::{Config, ReadinessProbe, SessionDiscovery, Tool};
@@ -111,6 +111,20 @@ pub enum Readiness {
     Unknown(String),
 }
 
+/// Default quiet period (seconds) a session must be idle before it is
+/// considered safe to relaunch. Shared by `muxr upgrade` and `muxr status`.
+pub const DEFAULT_MIN_IDLE_SECS: u64 = 180;
+
+/// A `busy` state file older than this is treated as stale -- a likely crashed
+/// session that fired its busy hook but never wrote `idle` (no `Stop`). Such a
+/// file would otherwise block the session's upgrade forever; instead we fall
+/// through to the floor so tmux activity can resolve it.
+pub const STALE_BUSY_SECS: u64 = 3600;
+
+/// Max wall-clock a `Command` readiness probe may run before it is killed and
+/// the result treated as Unknown (-> floor), so a hung probe can't block muxr.
+pub const PROBE_TIMEOUT_SECS: u64 = 10;
+
 /// Pure helper that classifies a state file without any tmux or process deps.
 /// Path is tilde-expanded; `{session_id}` in `path` must already be
 /// interpolated by the caller. Returns `Unknown` on any file/parse error.
@@ -139,19 +153,29 @@ pub fn classify_state_file(
             ));
         }
     };
+    let since = since_key.and_then(|sk| v.get(sk).and_then(|s| s.as_u64()));
     if state != idle_value {
+        // Stale-busy guard: a `busy` file older than STALE_BUSY_SECS is almost
+        // certainly a crashed session that never wrote `idle`. Return Unknown so
+        // the caller falls through to the floor instead of blocking forever.
+        if let Some(s) = since
+            && now.saturating_sub(s) > STALE_BUSY_SECS
+        {
+            return Readiness::Unknown("stale busy (possible crashed session)".to_string());
+        }
         return Readiness::Busy("turn in flight".to_string());
     }
-    // state == idle_value: check the quiet period if since_key is present.
-    // If since_key is declared but absent/not-a-number, treat as Safe:
-    // don't block indefinitely when the runtime hasn't written a timestamp yet.
-    if let Some(sk) = since_key
-        && let Some(since) = v.get(sk).and_then(|s| s.as_u64())
-        && now.saturating_sub(since) < min_idle
-    {
-        return Readiness::Busy("settling".to_string());
+    // state == idle_value: enforce the cooldown.
+    match (since_key, since) {
+        // Declared a since_key but the file has no usable timestamp: be
+        // conservative (Unknown -> floor) rather than declaring Safe with no
+        // cooldown -- this is what made a just-idled session read Safe instantly.
+        (Some(_), None) => Readiness::Unknown("idle but missing since timestamp".to_string()),
+        (Some(_), Some(s)) if now.saturating_sub(s) < min_idle => {
+            Readiness::Busy("settling".to_string())
+        }
+        _ => Readiness::Safe,
     }
-    Readiness::Safe
 }
 
 /// Epoch seconds from SystemTime::now(). Returns 0 on platform error (shouldn't happen).
@@ -197,6 +221,11 @@ pub fn session_readiness(
             if let Some(pid) = pane_pid {
                 path = path.replace("{pid}", &pid.to_string());
             }
+            if path.contains("{pid}") {
+                eprintln!(
+                    "muxr: readiness probe for {name}: pattern still has {{pid}} (pane pid unknown)"
+                );
+            }
             let result = classify_state_file(
                 &path,
                 state_key,
@@ -227,16 +256,35 @@ pub fn session_readiness(
                     s
                 })
                 .collect();
+            // Bounded by PROBE_TIMEOUT_SECS so a hung probe can't block muxr.
             match std::process::Command::new(&interpolated[0])
                 .args(&interpolated[1..])
-                .status()
+                .spawn()
             {
-                Ok(s) if s.success() => Readiness::Safe,
-                Ok(_) => Readiness::Busy("probe reports busy".to_string()),
+                Ok(mut child) => {
+                    let deadline = Instant::now() + Duration::from_secs(PROBE_TIMEOUT_SECS);
+                    loop {
+                        match child.try_wait() {
+                            Ok(Some(status)) if status.success() => return Readiness::Safe,
+                            Ok(Some(_)) => {
+                                return Readiness::Busy("probe reports busy".to_string());
+                            }
+                            Ok(None) if Instant::now() >= deadline => {
+                                let _ = child.kill();
+                                let _ = child.wait();
+                                return activity_floor(tmux, name, now, min_idle);
+                            }
+                            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+                            Err(_) => return activity_floor(tmux, name, now, min_idle),
+                        }
+                    }
+                }
                 Err(_) => activity_floor(tmux, name, now, min_idle),
             }
         }
-        ReadinessProbe::None => activity_floor(tmux, name, now, min_idle),
+        ReadinessProbe::None | ReadinessProbe::Disabled => {
+            activity_floor(tmux, name, now, min_idle)
+        }
     }
 }
 
@@ -246,13 +294,14 @@ fn activity_floor(tmux: &Tmux, name: &str, now: u64, min_idle: u64) -> Readiness
         .list_sessions_detailed()
         .ok()
         .and_then(|sessions| sessions.into_iter().find(|s| s.name == name))
-        .map(|s| s.activity)
-        .unwrap_or(0);
+        .map(|s| s.activity);
 
-    if activity == 0 || now.saturating_sub(activity) >= min_idle {
-        Readiness::Safe
-    } else {
-        Readiness::Busy("recent pane activity".to_string())
+    // A FAILED lookup (tmux error / session not found) is Unknown, NOT Safe:
+    // the gate must be conservative on missing data, not permissive.
+    match activity {
+        None => Readiness::Unknown("tmux activity unavailable".to_string()),
+        Some(a) if now.saturating_sub(a) >= min_idle => Readiness::Safe,
+        Some(_) => Readiness::Busy("recent pane activity".to_string()),
     }
 }
 
@@ -571,6 +620,43 @@ mod tests {
             "idle",
             None,
             0,
+            20,
+        );
+        assert!(matches!(result, super::Readiness::Unknown(_)), "{result:?}");
+    }
+
+    #[test]
+    fn classify_state_file_stale_busy_is_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        // busy, since > STALE_BUSY_SECS ago -> Unknown (not Busy), so the caller
+        // can fall through to the floor instead of blocking forever.
+        let now: u64 = 1_750_000_000 + super::STALE_BUSY_SECS + 100;
+        let since: u64 = 1_750_000_000;
+        std::fs::write(&path, format!(r#"{{"state":"busy","since":{since}}}"#)).unwrap();
+        let result = super::classify_state_file(
+            path.to_str().unwrap(),
+            "state",
+            "idle",
+            Some("since"),
+            now,
+            20,
+        );
+        assert!(matches!(result, super::Readiness::Unknown(_)), "{result:?}");
+    }
+
+    #[test]
+    fn classify_state_file_idle_missing_since_is_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        // idle but no `since` while since_key is declared -> conservative Unknown.
+        std::fs::write(&path, r#"{"state":"idle"}"#).unwrap();
+        let result = super::classify_state_file(
+            path.to_str().unwrap(),
+            "state",
+            "idle",
+            Some("since"),
+            1_750_000_000,
             20,
         );
         assert!(matches!(result, super::Readiness::Unknown(_)), "{result:?}");
