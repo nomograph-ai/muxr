@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default = "default_tool")]
     pub default_tool: String,
@@ -52,6 +53,7 @@ pub struct Config {
 /// a thin opt-out for users who prefer their own picker for plain attach, NOT
 /// a full replacement.
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Chooser {
     /// Shell command run (with an inherited terminal) instead of the built-in
     /// TUI. The command owns listing + attaching. Absent -> built-in.
@@ -65,6 +67,7 @@ pub struct Chooser {
 /// means muxr runs its built-in default and behaves exactly as 2.1 -- so a
 /// config with no `[extensions]` is a fully usable launcher.
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Extensions {
     /// RESOLVER: given a launch intent (`{session, repo, campaign, resume_id,
     /// model}`) return the layout facts (`{dir, campaign_md, log_path,
@@ -85,6 +88,7 @@ pub struct Extensions {
 /// override via `[layout]` so the harness layout is data, not compiled-in.
 /// Path-construction methods are implemented in `primitives.rs`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Layout {
     /// Directory under a repo holding campaigns. Default `campaigns`.
     #[serde(default = "default_campaigns_dir")]
@@ -132,6 +136,7 @@ impl Default for Layout {
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Hooks {
     /// Commands to run before creating a new session.
     #[serde(default)]
@@ -143,6 +148,7 @@ pub struct Hooks {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Repo {
     pub dir: String,
     pub color: String,
@@ -157,6 +163,7 @@ pub struct Repo {
 /// Settings passed to the tool on launch. Muxr passes these through
 /// to the runtime -- it does not interpret them.
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct LaunchSettings {
     /// Text appended to the system prompt. Multiple entries joined with newlines.
     #[serde(default)]
@@ -185,23 +192,33 @@ pub struct LaunchSettings {
     pub wrapper: Option<String>,
 }
 
+/// File-based session-discovery payload. A standalone `deny_unknown_fields`
+/// struct (not inline enum-variant fields) so a typo'd sibling key inside
+/// `[tools.*.session_discovery]` is REJECTED rather than silently dropped --
+/// the internally-tagged `SessionDiscovery` enum can't carry
+/// `deny_unknown_fields` itself (serde forbids it with `tag`).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct FileDiscovery {
+    /// Path pattern with `{pid}` placeholder.
+    pub pattern: String,
+    /// JSON key containing the session ID.
+    pub id_key: String,
+}
+
 /// How to discover harness session IDs from running processes.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum SessionDiscovery {
     /// Walk the process tree, look for a session file per PID.
-    File {
-        /// Path pattern with `{pid}` placeholder.
-        pattern: String,
-        /// JSON key containing the session ID.
-        id_key: String,
-    },
+    File(FileDiscovery),
     /// No session discovery (tool doesn't support resume).
     None,
 }
 
 /// Configuration for a harness (AI coding tool).
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Tool {
     /// Binary name or path.
     pub bin: String,
@@ -277,27 +294,42 @@ fn default_discovery_none() -> SessionDiscovery {
     SessionDiscovery::None
 }
 
+/// File readiness-probe payload. Standalone `deny_unknown_fields` struct so a
+/// typo inside `[tools.*.readiness]` (e.g. `idle_valeu` for `idle_value`, which
+/// would silently disable the quiet-period guard and let muxr upgrade a busy
+/// session) is rejected, not dropped. See `FileDiscovery` for why the payload
+/// can't live as inline enum-variant fields.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct FileProbe {
+    /// Path pattern with `{session_id}` (preferred) or `{pid}` placeholder.
+    pub pattern: String,
+    /// JSON key containing the state string.
+    pub state_key: String,
+    /// Value meaning "safe to upgrade", e.g. `"idle"`.
+    pub idle_value: String,
+    /// Optional epoch-seconds key for quiet-period enforcement.
+    #[serde(default)]
+    pub since_key: Option<String>,
+}
+
+/// Command readiness-probe payload. Standalone `deny_unknown_fields` struct
+/// (same rationale as `FileProbe`).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CommandProbe {
+    /// Command + args; `{session_id}` and `{pid}` are interpolated.
+    pub argv: Vec<String>,
+}
+
 /// How to probe a session for upgrade readiness.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum ReadinessProbe {
     /// Read a normalized state file the runtime's hooks maintain.
-    File {
-        /// Path pattern with `{session_id}` (preferred) or `{pid}` placeholder.
-        pattern: String,
-        /// JSON key containing the state string.
-        state_key: String,
-        /// Value meaning "safe to upgrade", e.g. `"idle"`.
-        idle_value: String,
-        /// Optional epoch-seconds key for quiet-period enforcement.
-        #[serde(default)]
-        since_key: Option<String>,
-    },
+    File(FileProbe),
     /// Escape hatch: a runtime that exposes readiness via a CLI. Exit 0 = safe.
-    Command {
-        /// Command + args; `{session_id}` and `{pid}` are interpolated.
-        argv: Vec<String>,
-    },
+    Command(CommandProbe),
     /// No runtime probe — core uses the universal tmux-activity floor only.
     /// This is the type default; in a user `[tools.<name>]` block it means
     /// "inherit the builtin probe" (see `merge_tool_with_builtin`).
@@ -401,9 +433,42 @@ const RESERVED_NAMES: &[&str] = &[
     "completions",
 ];
 
+/// Top-level config keys muxr has renamed across versions, as `(old, new)`.
+/// Now that the config structs `deny_unknown_fields`, an old key is a hard
+/// parse error -- but serde's generic "unknown field" message doesn't say what
+/// to do. On a parse failure we scan the raw TOML for these so the error can
+/// name the replacement. Append future renames here as the schema evolves.
+const KNOWN_RENAMES: &[(&str, &str)] = &[
+    // muxr 3.x renamed the repo table `[harnesses.*]` -> `[repos.*]`.
+    ("harnesses", "repos"),
+];
+
+/// If `content` is parseable TOML that still uses a renamed top-level key,
+/// return an actionable hint naming the replacement(s). Returns `None` when
+/// the content has no known-old keys (or isn't even valid TOML -- then the
+/// raw parse error stands on its own). This runs only on the error path, so
+/// it never costs the happy path a second parse.
+fn rename_hint(content: &str) -> Option<String> {
+    let table: toml::Table = toml::from_str(content).ok()?;
+    let hits: Vec<String> = KNOWN_RENAMES
+        .iter()
+        .filter(|(old, _)| table.contains_key(*old))
+        .map(|(old, new)| format!("  `[{old}.*]` was renamed to `[{new}.*]`"))
+        .collect();
+    if hits.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "hint: this config uses key(s) muxr has renamed:\n{}\nRename them and retry \
+         (the old names are no longer accepted).",
+        hits.join("\n")
+    ))
+}
+
 /// One shipped adapter file: `extensions/adapters/<name>.toml` is a single
 /// `[tools.<name>]` block, so it deserializes into this one-entry table.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AdapterFile {
     #[serde(default)]
     tools: HashMap<String, Tool>,
@@ -691,6 +756,7 @@ fn shell_escape(s: &str) -> String {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Remote {
     pub project: String,
     pub zone: String,
@@ -743,8 +809,26 @@ impl Config {
         }
         let content = std::fs::read_to_string(&path)
             .with_context(|| format!("Failed to read {}", path.display()))?;
-        let config: Config = toml::from_str(&content)
-            .with_context(|| format!("Failed to parse {}", path.display()))?;
+        Self::parse(&content, &path.display().to_string())
+    }
+
+    /// Parse + validate config TOML. Split from `load()` so the strict-parse,
+    /// rename diagnostics, and collision checks are exercised by tests without
+    /// a config file on disk. `source` is the path/label used in error messages.
+    ///
+    /// The structs `deny_unknown_fields`, so an unknown or renamed key is a hard
+    /// error rather than a silently-dropped table (the failure mode of #3, where
+    /// `[harnesses.*]` parsed to an empty `repos` and surfaced later as a baffling
+    /// "unknown repo"). On parse failure we enrich the serde error with a rename
+    /// hint when the raw TOML still uses a known-old key.
+    pub fn parse(content: &str, source: &str) -> Result<Self> {
+        let config: Config = toml::from_str(content).map_err(|e| {
+            let base = format!("Failed to parse {source}:\n{e}");
+            match rename_hint(content) {
+                Some(hint) => anyhow::anyhow!("{base}\n\n{hint}"),
+                None => anyhow::anyhow!("{base}"),
+            }
+        })?;
 
         // Validate no name collisions between repos, remotes, and tools
         for name in config.remotes.keys() {
@@ -970,6 +1054,10 @@ impl Config {
 # Repos are named project estates. Each maps to a directory and a
 # status-bar color. Sessions launch under `campaigns/<campaign>/` inside
 # the repo directory, named `<repo>/<campaign>`.
+#
+# This file is validated STRICTLY against the running muxr: an unknown,
+# misspelled, or renamed key is a hard error that names the offending key
+# (no silent drops). Keep muxr and this config in step.
 
 default_tool = "claude"
 
@@ -1279,7 +1367,7 @@ session_discovery = { type = "none" }
         let h = Tool::builtin_claude();
         assert_eq!(h.bin, "claude");
         assert_eq!(h.rename_command, Some("/rename {name}".to_string()));
-        assert!(matches!(h.session_discovery, SessionDiscovery::File { .. }));
+        assert!(matches!(h.session_discovery, SessionDiscovery::File(_)));
     }
 
     #[test]
@@ -1324,7 +1412,7 @@ args = ["--name", "{name}", "--verbose"]
         // Field user did NOT specify falls back to builtin (was None
         // type-default before; now File via merge).
         assert!(
-            matches!(h.session_discovery, SessionDiscovery::File { .. }),
+            matches!(h.session_discovery, SessionDiscovery::File(_)),
             "session_discovery should fall back to builtin Claude's File pattern"
         );
         assert_eq!(
@@ -1350,12 +1438,9 @@ prompt_mode = "string"
         let config: Config = toml::from_str(toml_str).unwrap();
         let h = config.tool_for("pi").unwrap();
         match h.session_discovery {
-            SessionDiscovery::File {
-                ref pattern,
-                ref id_key,
-            } => {
-                assert_eq!(pattern, "~/.pi/sessions/{pid}.json");
-                assert_eq!(id_key, "sessionId");
+            SessionDiscovery::File(ref d) => {
+                assert_eq!(d.pattern, "~/.pi/sessions/{pid}.json");
+                assert_eq!(d.id_key, "sessionId");
             }
             SessionDiscovery::None => {
                 panic!("pi partial override must inherit builtin File discovery");
@@ -1499,12 +1584,9 @@ prompt_mode = "string"
         assert_eq!(h.prompt_mode, PromptMode::String);
         assert!(h.wrapper.is_none());
         match h.session_discovery {
-            SessionDiscovery::File {
-                ref pattern,
-                ref id_key,
-            } => {
-                assert_eq!(pattern, "~/.pi/sessions/{pid}.json");
-                assert_eq!(id_key, "sessionId");
+            SessionDiscovery::File(ref d) => {
+                assert_eq!(d.pattern, "~/.pi/sessions/{pid}.json");
+                assert_eq!(d.id_key, "sessionId");
             }
             _ => panic!("expected file-based session discovery"),
         }
@@ -1785,7 +1867,7 @@ args = ["--name", "{name}", "--verbose"]
         let config: Config = toml::from_str(toml_str).unwrap();
         let h = config.tool_for("claude").unwrap();
         assert!(
-            matches!(h.readiness, ReadinessProbe::File { .. }),
+            matches!(h.readiness, ReadinessProbe::File(_)),
             "readiness should fall back to builtin File probe; got {:?}",
             h.readiness
         );
@@ -1807,7 +1889,7 @@ argv = ["my-probe", "--session", "{session_id}"]
         let config: Config = toml::from_str(toml_str).unwrap();
         let h = config.tool_for("claude").unwrap();
         assert!(
-            matches!(h.readiness, ReadinessProbe::Command { .. }),
+            matches!(h.readiness, ReadinessProbe::Command(_)),
             "user readiness override should win; got {:?}",
             h.readiness
         );
@@ -1863,6 +1945,176 @@ type = "disabled"
         assert!(
             !cmd.contains("from singular"),
             "singular must be suppressed; got: {cmd}"
+        );
+    }
+
+    // -- Strict parse + rename advice (#3) --
+
+    #[test]
+    fn unknown_top_level_key_is_rejected() {
+        // The #3 failure mode: a renamed/typo'd top-level table used to be
+        // silently dropped (repos defaulted empty -> baffling "unknown repo"
+        // later). deny_unknown_fields now makes it a hard parse error.
+        let err = toml::from_str::<Config>("[harnesses.work]\ndir = \"~/w\"\ncolor = \"#fff\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("harnesses") || err.contains("unknown field"),
+            "expected an unknown-field error naming the key; got: {err}"
+        );
+    }
+
+    #[test]
+    fn unknown_nested_key_is_rejected() {
+        // A typo in an optional field inside [repos.<n>] (here `colour` for
+        // `color`) used to be silently ignored; now it's rejected.
+        let err = toml::from_str::<Config>(
+            "[repos.work]\ndir = \"~/w\"\ncolor = \"#fff\"\ncolour = \"#000\"\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("colour") || err.contains("unknown field"),
+            "expected an unknown-field error for the nested typo; got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_enriches_renamed_key_with_hint() {
+        // Config::parse routes a renamed key through rename_hint, so the error
+        // names the replacement instead of only "unknown field harnesses".
+        let err = Config::parse(
+            "[harnesses.work]\ndir = \"~/w\"\ncolor = \"#fff\"\n",
+            "<test>",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("`[harnesses.*]` was renamed to `[repos.*]`"),
+            "expected the rename hint; got: {err}"
+        );
+    }
+
+    #[test]
+    fn rename_hint_none_for_clean_config() {
+        // A config with no known-old keys yields no hint (the raw parse error,
+        // if any, stands alone).
+        assert!(rename_hint("[repos.work]\ndir = \"~/w\"\ncolor = \"#fff\"\n").is_none());
+        // Also None when the content isn't valid TOML at all.
+        assert!(rename_hint("this is not = = toml").is_none());
+    }
+
+    #[test]
+    fn parse_accepts_a_known_good_config() {
+        // The full happy path through Config::parse: real-shaped config with
+        // repos, a remote, hooks, a launch block, and a partial tool override.
+        let toml_str = r##"
+default_tool = "claude"
+
+[hooks]
+pre_create = ["mise install"]
+path = ["~/.local/share/mise/shims"]
+
+[repos.work]
+dir = "~/w"
+color = "#fff"
+
+[repos.work.launch]
+add_dirs = ["~/docs"]
+append_system_prompt_files = ["base.md", "HARNESS.md"]
+exclude_dynamic_prompt = true
+
+[remotes.lab]
+project = "p"
+zone = "z"
+user = "u"
+color = "#000"
+
+[tools.pi]
+bin = "pi"
+prompt_mode = "string"
+"##;
+        let cfg = Config::parse(toml_str, "<test>").expect("known-good config must parse");
+        assert_eq!(cfg.repos.len(), 1);
+        assert_eq!(cfg.remotes.len(), 1);
+        assert!(cfg.repos["work"].launch.exclude_dynamic_prompt);
+    }
+
+    #[test]
+    fn parse_still_catches_name_collisions() {
+        // The collision validation moved into parse(); confirm it still fires.
+        let err = Config::parse(
+            "[repos.lab]\ndir = \"~/l\"\ncolor = \"#fff\"\n\n[remotes.lab]\nproject = \"p\"\nzone = \"z\"\nuser = \"u\"\ncolor = \"#000\"\n",
+            "<test>",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("Name collision"), "got: {err}");
+    }
+
+    #[test]
+    fn readiness_file_probe_rejects_unknown_key() {
+        // The internally-tagged ReadinessProbe can't carry deny_unknown_fields,
+        // so its payload is a FileProbe struct that does. A typo'd sibling
+        // (here `idle_valeu`) -- which would otherwise silently disable the
+        // quiet-period guard -- must be rejected, not dropped.
+        let toml_str = r##"
+[repos]
+
+[tools.claude]
+bin = "claude"
+
+[tools.claude.readiness]
+type = "file"
+pattern = "~/r/{session_id}.json"
+state_key = "state"
+idle_value = "idle"
+idle_valeu = "idle"
+"##;
+        let err = toml::from_str::<Config>(toml_str).unwrap_err().to_string();
+        assert!(
+            err.contains("idle_valeu") || err.contains("unknown field"),
+            "expected the typo'd probe key to be rejected; got: {err}"
+        );
+    }
+
+    #[test]
+    fn session_discovery_rejects_unknown_key() {
+        let toml_str = r##"
+[repos]
+
+[tools.claude]
+bin = "claude"
+
+[tools.claude.session_discovery]
+type = "file"
+pattern = "~/.claude/sessions/{pid}.json"
+id_key = "sessionId"
+bogus = "x"
+"##;
+        let err = toml::from_str::<Config>(toml_str).unwrap_err().to_string();
+        assert!(
+            err.contains("bogus") || err.contains("unknown field"),
+            "expected the typo'd discovery key to be rejected; got: {err}"
+        );
+    }
+
+    #[test]
+    fn readiness_probe_unknown_type_still_rejected() {
+        // The tag itself stays validated: an unknown `type` is a loud error.
+        let toml_str = r##"
+[repos]
+
+[tools.claude]
+bin = "claude"
+
+[tools.claude.readiness]
+type = "bogus"
+"##;
+        let err = toml::from_str::<Config>(toml_str).unwrap_err().to_string();
+        assert!(
+            err.contains("bogus") || err.contains("unknown variant"),
+            "expected unknown-variant rejection; got: {err}"
         );
     }
 }

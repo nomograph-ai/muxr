@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.3.2] (2026-06-22)
+
+Config robustness (#3): unknown, misspelled, or renamed config keys now fail
+loudly instead of being silently dropped. From an adversarial review.
+
+### Fixed
+- **Silent config drops on a schema bump (#3).** The config structs used
+  `#[serde(default)]` with no `deny_unknown_fields`, so a renamed top-level
+  table like `[harnesses.*]` (the old name for `[repos.*]`) parsed to an empty
+  `repos` and surfaced much later as a baffling "unknown repo". Every config
+  struct now `deny_unknown_fields`, so an unknown/misspelled/renamed key is a
+  hard parse error that names the offending key and lists the valid ones. A
+  `KNOWN_RENAMES` table adds an actionable hint when a known-old key is still
+  present (e.g. ``hint: `[harnesses.*]` was renamed to `[repos.*]` ``).
+- **Silent drops inside the probe blocks (review follow-up).**
+  `[tools.*.readiness]` and `[tools.*.session_discovery]` are internally-tagged
+  enums, which serde forbids combining with `deny_unknown_fields`; their
+  payloads moved into dedicated `deny_unknown_fields` structs (`FileProbe`,
+  `CommandProbe`, `FileDiscovery`). A typo like `idle_valeu` -- which would have
+  silently disabled the `muxr upgrade` quiet-period guard and let a busy session
+  be relaunched -- is now rejected. The flat TOML format is unchanged.
+
+### Internal
+- `Config::load()` split into a testable `Config::parse(content, source)`; the
+  strict-parse, rename-hint, and collision checks are now unit-tested directly.
+
 ## [3.3.1] (2026-06-21)
 
 Closes the loose ends left open by the 3.3.0 hardening review.

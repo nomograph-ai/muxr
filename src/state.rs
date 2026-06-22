@@ -87,7 +87,7 @@ pub fn discover_session_id(
 ) -> Option<String> {
     let harness = harness?;
     let (pattern, id_key) = match &harness.session_discovery {
-        SessionDiscovery::File { pattern, id_key } => (pattern.as_str(), id_key.as_str()),
+        SessionDiscovery::File(d) => (d.pattern.as_str(), d.id_key.as_str()),
         SessionDiscovery::None => return None,
     };
 
@@ -211,14 +211,9 @@ pub fn session_readiness(
     let pane_pid: Option<u32> = tmux.pane_pid(name).ok().flatten();
 
     match &tool.readiness {
-        ReadinessProbe::File {
-            pattern,
-            state_key,
-            idle_value,
-            since_key,
-        } => {
+        ReadinessProbe::File(p) => {
             // Interpolate {session_id} and {pid} into the path pattern.
-            let mut path = pattern.replace("{session_id}", session_id);
+            let mut path = p.pattern.replace("{session_id}", session_id);
             if let Some(pid) = pane_pid {
                 path = path.replace("{pid}", &pid.to_string());
             }
@@ -229,9 +224,9 @@ pub fn session_readiness(
             }
             let result = classify_state_file(
                 &path,
-                state_key,
-                idle_value,
-                since_key.as_deref(),
+                &p.state_key,
+                &p.idle_value,
+                p.since_key.as_deref(),
                 now,
                 min_idle,
             );
@@ -242,12 +237,13 @@ pub fn session_readiness(
                 result
             }
         }
-        ReadinessProbe::Command { argv } => {
-            if argv.is_empty() {
+        ReadinessProbe::Command(c) => {
+            if c.argv.is_empty() {
                 return activity_floor(activity, now, min_idle);
             }
             // Interpolate {session_id} and {pid}.
-            let interpolated: Vec<String> = argv
+            let interpolated: Vec<String> = c
+                .argv
                 .iter()
                 .map(|a| {
                     let mut s = a.replace("{session_id}", session_id);
