@@ -70,7 +70,11 @@ pub(crate) fn cmd_open(
     // If the campaign doesn't exist yet, scaffold a stub so the human can
     // onboard it in-flow. Keeps the launch single-command from the control
     // plane.
-    if !config.layout.campaign_md_path(&repo_dir, campaign).is_file() {
+    if !config
+        .layout
+        .campaign_md_path(&repo_dir, campaign)
+        .is_file()
+    {
         primitives::scaffold_campaign_stub(&config.layout, &repo_dir, campaign)?;
     }
     let campaign_md = primitives::campaign_file(&config.layout, &repo_dir, campaign)?;
@@ -120,7 +124,10 @@ pub(crate) fn cmd_open(
         ui::detail("trees", &campaign_data.synthesist_trees.join(", "));
     }
     if !campaign_data.paths.is_empty() {
-        ui::detail("paths", &format!("+{} --add-dir", campaign_data.paths.len()));
+        ui::detail(
+            "paths",
+            &format!("+{} --add-dir", campaign_data.paths.len()),
+        );
     }
     let ep = log_data.entrypoint.lines().next().unwrap_or("").trim();
     if !ep.is_empty() {
@@ -319,7 +326,8 @@ pub(crate) fn cmd_recycle(
         // supplies the flush message (so "what to serialize" is the harness's
         // concern, not muxr's); absent -> the built-in self-contained prompt.
         // An empty message means "nothing to flush" -> just exit.
-        let msg = make_durable_message(&config, &session, &repo_name, &campaign, &log_md, &locales)?;
+        let msg =
+            make_durable_message(&config, &session, &repo_name, &campaign, &log_md, &locales)?;
         let exit_cmd = tool_def
             .as_ref()
             .and_then(|t| t.exit_command.clone())
@@ -417,7 +425,9 @@ pub(crate) fn cmd_migrate_layout(
             config.resolve_dir(r)?
         }
         (None, None) => {
-            anyhow::bail!("Specify a repo to migrate: `muxr migrate-layout <repo>` or `--dir <path>`.")
+            anyhow::bail!(
+                "Specify a repo to migrate: `muxr migrate-layout <repo>` or `--dir <path>`."
+            )
         }
     };
 
@@ -551,6 +561,11 @@ struct ResolveIntent<'a> {
     session: &'a str,
     repo: &'a str,
     campaign: &'a str,
+    /// The repo checkout dir muxr resolved for this launch (the default for
+    /// `ResolveOutcome.dir`). Handed over so a resolver needn't re-parse muxr's
+    /// own config to find where the repo lives. Carries `config.resolve_dir`'s
+    /// output: `~` is already expanded, so this is an absolute path string.
+    repo_dir: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     resume_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -630,13 +645,17 @@ fn resolve_layout(
         session: session_name,
         repo: repo_name,
         campaign,
+        repo_dir: &default_dir.to_string_lossy(),
         resume_id,
         model,
     };
     let outcome: ResolveOutcome = crate::extension::invoke(cmd, "resolver", &intent)
         .with_context(|| format!("resolver extension for '{session_name}'"))?;
 
-    let dir = outcome.dir.map(std::path::PathBuf::from).unwrap_or(default_dir);
+    let dir = outcome
+        .dir
+        .map(std::path::PathBuf::from)
+        .unwrap_or(default_dir);
     let (default_campaign_md, default_log_path) = layout_paths(&dir);
 
     Ok(ResolvedLayout {
@@ -669,7 +688,14 @@ pub(crate) fn compose_launch_command(
     // The default reproduces the 2.1 config-drive layout exactly; a configured
     // `[extensions].resolver` may override any of dir/campaign_md/log_path/
     // runtime/resume_id and contribute extra --add-dirs.
-    let resolved = resolve_layout(config, &repo_name, &campaign, session_name, resume_id, model)?;
+    let resolved = resolve_layout(
+        config,
+        &repo_name,
+        &campaign,
+        session_name,
+        resume_id,
+        model,
+    )?;
     let repo_dir = resolved.dir;
     let campaign_md = resolved.campaign_md;
     let log_path = resolved.log_path;
@@ -692,15 +718,21 @@ pub(crate) fn compose_launch_command(
     // failing the whole relaunch. Genuinely fatal errors (unknown repo,
     // unparseable slug) are still surfaced above, so callers keep their
     // name+resume fallback for the truly-unrecoverable case.
-    let (campaign_data, campaign_body) = primitives::load_campaign(&campaign_md).unwrap_or_default();
+    let (campaign_data, campaign_body) =
+        primitives::load_campaign(&campaign_md).unwrap_or_default();
     // Only the entrypoint (the movable pointer) goes inline; the full log body
     // stays on disk and is pointed at, not snapshotted into the prompt.
     let entrypoint = primitives::load_log(&log_path)
         .map(|(log, _)| log.entrypoint)
         .unwrap_or_default();
 
-    let composed =
-        primitives::compose_prompt(&campaign, &campaign_body, &entrypoint, &campaign_md, &log_path);
+    let composed = primitives::compose_prompt(
+        &campaign,
+        &campaign_body,
+        &entrypoint,
+        &campaign_md,
+        &log_path,
+    );
 
     // Claude Code rejects --append-system-prompt and --append-system-prompt-file
     // together, and multi-line content via shell send-keys breaks parsing.
@@ -850,4 +882,31 @@ fn cmd_remote_ls(remote: &config::Remote, remote_name: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_intent_serializes_resolved_repo_dir() {
+        // The resolver is handed the repo's resolved checkout dir (the same
+        // value muxr uses for the default `dir`), so it needn't re-parse muxr's
+        // config to find where the repo lives. Additive: existing resolvers
+        // that ignore `repo_dir` are unaffected.
+        let intent = ResolveIntent {
+            session: "work/auth-revamp",
+            repo: "work",
+            campaign: "auth-revamp",
+            repo_dir: "/Users/me/src/work",
+            resume_id: None,
+            model: None,
+        };
+        let json = serde_json::to_value(&intent).unwrap();
+        assert_eq!(json["repo_dir"], "/Users/me/src/work");
+        assert_eq!(json["repo"], "work");
+        // resume_id/model stay omitted when absent (skip_serializing_if).
+        assert!(json.get("resume_id").is_none());
+        assert!(json.get("model").is_none());
+    }
 }
