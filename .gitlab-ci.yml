@@ -7,7 +7,7 @@ default:
 
 include:
   - template: Jobs/Secret-Detection.gitlab-ci.yml
-  - component: gitlab.com/nomograph/pipeline/tool-rust@v5.2.1
+  - component: gitlab.com/nomograph/pipeline/tool-rust@v5.3.0
     inputs:
       binary_name: muxr
       project_description: "Tmux session manager for AI coding workflows."
