@@ -113,6 +113,12 @@ to split into a standalone `muxr-extensions` bundle once external runtimes adopt
   contract shape, is a major bump -- the core/extension re-architecture is what
   earned the 3.0 major.
 
+## Decision records
+Architecture decisions live as numbered records in [`docs/adr/`](docs/adr/) --
+one file per decision, with an RFC-style `Design detail` section where the
+mechanism warrants it. A record is an RFC while `Proposed` and an ADR once
+`Accepted`; supersede rather than rewrite. See [`docs/adr/README.md`](docs/adr/README.md).
+
 ## History
 - **2.0.1** -- last pre-cutover release (http: generic-package era).
 - **2.1.0** -- config-drive resolver: a `[layout]` struct makes the harness layout
