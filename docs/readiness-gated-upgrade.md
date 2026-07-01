@@ -1,6 +1,8 @@
 # Readiness-gated upgrade
 
-Status: design (proposed)
+Status: implemented -- probe classifier in `src/state.rs`, gated `muxr upgrade` /
+`muxr migrate`, and the read-only `muxr status` view. This doc is the design
+rationale for that code.
 Scope: `muxr upgrade` / `muxr migrate`, plus a read-only `muxr status` view.
 
 ## Problem
@@ -98,6 +100,32 @@ Evaluation order — none of it tool-specific:
    would break agnosticism. The floor stays coarse-but-correct.
 3. **Conservative default:** `Unknown` is treated as not-safe unless `--force`.
    Never relaunch on doubt.
+
+## Reclaiming a stale `busy` (interrupted turns)
+
+The `busy` arm has a failure mode worth calling out. The state file is driven by
+turn-boundary hooks: `UserPromptSubmit` / `PreToolUse` write `busy`, `Stop`
+writes `idle`. But when an operator **interrupts** a turn, Claude Code fires no
+`Stop` hook, so `busy` is never cleared. Left alone, `classify_state_file`
+trusts that `busy` until it is older than `STALE_BUSY_SECS` (1h), after which it
+returns `Unknown` and the tmux floor resolves it. In between, an
+idle-and-waiting session reads `Busy("turn in flight")` and every gated
+`upgrade` skips it -- for up to an hour.
+
+The `File` probe is time-only here (no corroboration), which is the safe,
+dependency-free default. To close the window sooner, use a `Command` probe that
+**corroborates** the `busy` claim against pane activity instead of waiting out
+`STALE_BUSY_SECS`:
+
+- `busy` + pane active within `min_idle` -> genuinely working -> Busy.
+- `busy` + pane quiet for >= `min_idle` -> stale/interrupted -> reclaim (Safe).
+
+muxr interpolates `{pid}` (the tmux `pane_pid`) into a `Command` probe's argv, so
+the script can recover the pane's `session_activity` from tmux and make that
+call itself -- no core change, and no semantic process-tree interpretation. See
+[`../extensions/examples/readiness.sh`](../extensions/examples/readiness.sh) for
+a copyable implementation, wired via the adapter's
+`[tools.<name>.readiness] type = "command"`.
 
 ## `upgrade()` integration
 
