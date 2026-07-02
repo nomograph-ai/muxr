@@ -59,7 +59,7 @@ Extensions take two shapes:
   (interrupt reclaim) is a `Command` probe with zero core change. That is the
   posture working as intended.
 - Bare muxr (no `[extensions]` / `[session_env]` / `[chooser]`) stays a fully
-  usable launcher -- the "Josh test."
+  usable launcher -- the bare-launcher test.
 - The cost is one indirection per chokepoint (a subprocess) and the discipline
   below. Accepted deliberately over a richer embedded runtime.
 - **Not in core:** the statusline (a runtime's own chrome, shed in 3.0.0), WASM /

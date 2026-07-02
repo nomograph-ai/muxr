@@ -164,7 +164,7 @@ table; the per-runtime `match tool { "claude" => ..., "pi" => ... }` and the
 hardcoded claude/pi name injection are gone. Adding or shipping a runtime is now
 purely a matter of adapter TOML.
 
-Behavior is preserved byte-for-byte (the Josh test): a config naming `claude`
+Behavior is preserved byte-for-byte (the bare-launcher test): a config naming `claude`
 composes the identical launch/resume command as 3.0.x; the existing
 `builtin_*_harness` / `tool_for_returns_builtin_*` / `tool_names_includes_*` tests
 now assert against the shipped TOML. The shipped default set stays exactly

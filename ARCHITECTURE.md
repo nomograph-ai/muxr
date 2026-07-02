@@ -33,7 +33,7 @@ make-durable, alongside the existing hook/statusline seams), not designed up
 front, then **locked at 3.0.0** -- the discipline below governs further change.
 
 Points (all default-when-absent; bare muxr with no `[extensions]` /
-`[session_env]` / `[chooser]` is a fully usable launcher -- the Josh test):
+`[session_env]` / `[chooser]` is a fully usable launcher -- the bare-launcher test):
 1. **RESOLVER** (`[extensions].resolver`) -- intent `{session,repo,campaign,
    resume_id,model}` in, layout facts `{dir,campaign_md,log_path,runtime,
    add_dirs,resume_id}` out; any omitted field falls back to the built-in
