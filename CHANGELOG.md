@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.4.0] (2026-07-02)
+
+Extension levers for the readiness gate and the resolver, plus an ADR/RFC
+decision-record convention. The behavior lands as extension examples + config;
+the only core change is an additive `repo_dir` field on the resolver intent, per
+the small-stable-core posture (ADR 0001).
+
+### Added
+- **Interrupt-reclaim readiness probe (#6).** `extensions/examples/readiness.sh`,
+  a Command probe that corroborates a `busy` state file against tmux pane
+  activity and reclaims an interrupted-but-idle session instead of stranding it
+  for up to `STALE_BUSY_SECS`. Shipped as a commented opt-in in the Claude
+  adapter; the File probe stays the default. See ADR 0003.
+- **Repo-scoped, portable resolver (#7).** `extensions/examples/resolver.sh`
+  gains a `.repo` opt-out branch (repo-scoping via the launch intent, no per-repo
+  schema field); docs recommend `~/`-relative resolver paths for portability.
+- **Decision records (`docs/adr/`).** An ADR/RFC convention (RFC while
+  `Proposed`, ADR once `Accepted`) with a template + index: 0001 the
+  small-stable-core / extension architecture posture, 0002 readiness-gated
+  upgrade, 0003 interrupt reclaim.
+- **`repo_dir` on the resolver `ResolveIntent`.** The launch intent now carries
+  the resolved repo checkout dir, so a resolver need not re-derive it (additive).
+
+### Changed
+- deps: pipeline component to v5.3.1; lock-file maintenance.
+
 ## [3.3.2] (2026-06-22)
 
 Config robustness (#3): unknown, misspelled, or renamed config keys now fail
