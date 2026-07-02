@@ -341,4 +341,57 @@ mod tests {
         assert_eq!(Tmux::target("work/api"), "=work/api:");
         assert_eq!(Tmux::target("muxr"), "=muxr:");
     }
+
+    // Behavioral: drives the real create_session against an ISOLATED tmux server
+    // and asserts the companion adds exactly one pane. Restore calls the SAME
+    // create_session with companion_for, so a faithful restore follows from this.
+    // `#[ignore]`d because it spawns a tmux server; run: `cargo test -- --ignored`.
+    #[test]
+    #[ignore]
+    fn create_session_adds_companion_pane() {
+        use crate::config::ResolvedCompanion;
+        use std::process::Command as Pc;
+
+        let srv = "muxr-companion-selftest";
+        let kill = || {
+            let _ = Pc::new("tmux").args(["-L", srv, "kill-server"]).status();
+        };
+        kill(); // clean any leftover from a prior run
+
+        let tmux = Tmux::new(Some(srv.to_string()));
+        let dir = std::env::temp_dir();
+        let companion = ResolvedCompanion {
+            cmd: "sleep 600".to_string(),
+            side: "h".to_string(),
+            size: 40,
+        };
+
+        tmux.create_session("cp/with", &dir, "", &[], Some(&companion))
+            .expect("create session with companion");
+        tmux.create_session("cp/without", &dir, "", &[], None)
+            .expect("create session without companion");
+
+        let panes = |name: &str| -> usize {
+            let out = Pc::new("tmux")
+                .args([
+                    "-L",
+                    srv,
+                    "list-panes",
+                    "-t",
+                    &Tmux::target(name),
+                    "-F",
+                    "#{pane_id}",
+                ])
+                .output()
+                .expect("tmux list-panes");
+            String::from_utf8_lossy(&out.stdout).lines().count()
+        };
+
+        let with = panes("cp/with");
+        let without = panes("cp/without");
+        kill();
+
+        assert_eq!(with, 2, "companion session must have a second pane");
+        assert_eq!(without, 1, "no-companion session stays single-pane");
+    }
 }
