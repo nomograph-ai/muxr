@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.5.0] (2026-07-02)
+
+Companion panes: an optional review/preview pane beside the runtime, created at
+launch and faithfully recreated on restore (ADR 0004).
+
+### Added
+- **Companion pane (ADR 0004).** Opt-in, config-driven: `[companion]` (global)
+  or `[repos.<name>.companion]` (per-repo override), with `enabled` / `cmd`
+  (templated: `{session} {repo} {campaign} {session_slug} {dir}`) / `side`
+  (`h`|`v`) / `size` (percent). muxr splits an auxiliary pane at the
+  `create_session` chokepoint, so launch, recycle, and local restore all
+  recreate it identically with no `state.json` change; focus stays on the
+  runtime pane. What the pane renders is an operator-owned command (per ADR
+  0001); remote and bare sessions get no companion.
+
 ## [3.4.0] (2026-07-02)
 
 Extension levers for the readiness gate and the resolver, plus an ADR/RFC
