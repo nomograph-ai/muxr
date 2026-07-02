@@ -150,6 +150,9 @@ pub(crate) fn cmd_open(
         &session_dir,
         &tool_cmd,
         &config.session_env_for(&session_name),
+        config
+            .companion_for(&session_name, session_dir.to_str().unwrap_or(""))
+            .as_ref(),
     )?;
     tmux.attach(&session_name)?;
     Ok(())
@@ -362,6 +365,9 @@ pub(crate) fn cmd_recycle(
         &session_dir,
         &tool_cmd,
         &config.session_env_for(&session),
+        config
+            .companion_for(&session, session_dir.to_str().unwrap_or(""))
+            .as_ref(),
     )?;
 
     ui::ok(&format!(
@@ -855,7 +861,7 @@ fn cmd_open_remote(tmux: &Tmux, config: &Config, remote_name: &str, args: &[Stri
         let connect_cmd = remote::connect_command(remote, &instance, &context)?;
         eprintln!("Creating {session} -> {instance} via {}", remote.connect);
         let home = dirs::home_dir().context("No home directory")?;
-        tmux.create_session(&session, &home, &connect_cmd, &[])?;
+        tmux.create_session(&session, &home, &connect_cmd, &[], None)?;
         tmux.attach(&session)?;
     }
 

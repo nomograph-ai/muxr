@@ -496,7 +496,7 @@ impl SavedState {
                 match remote::connect_command(remote, &instance, context) {
                     Ok(connect_cmd) => {
                         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
-                        tmux.create_session(&s.name, &home, &connect_cmd, &[])?;
+                        tmux.create_session(&s.name, &home, &connect_cmd, &[], None)?;
                         eprintln!("  {} -> {} (remote)", s.name, instance);
                         count += 1;
                     }
@@ -536,7 +536,15 @@ impl SavedState {
                         }
                     }
                 };
-                tmux.create_session(&s.name, &dir, &tool_cmd, &config.session_env_for(&s.name))?;
+                tmux.create_session(
+                    &s.name,
+                    &dir,
+                    &tool_cmd,
+                    &config.session_env_for(&s.name),
+                    config
+                        .companion_for(&s.name, dir.to_str().unwrap_or(""))
+                        .as_ref(),
+                )?;
                 eprintln!("  {} -> {}", s.name, s.dir);
                 count += 1;
             }
