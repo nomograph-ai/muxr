@@ -34,21 +34,32 @@ implements. If your CLI's session id isn't a per-pid file, set
 ### 2. Imperative extensions (`examples/*.sh`) -- opinionated, user-owned
 
 For logic a template can't express, muxr invokes a **subprocess**: JSON on
-stdin, JSON on stdout, fail-closed, run a built-in default when absent. Two
-points exist today:
+stdin, JSON on stdout (or, for a probe, an exit code), fail-closed, run a
+built-in default when absent. The subprocess points today:
 
 - [`examples/resolver.sh`](examples/resolver.sh) -- `[extensions].resolver`. The
   single launch chokepoint: launch intent in, layout facts out. Omitted fields
-  fall back to muxr's built-in `[layout]`.
+  fall back to muxr's built-in `[layout]`. Repo-scope it by branching on the
+  intent's `repo` (emit `{}` to defer to defaults) -- no per-repo config field
+  needed.
 - [`examples/make-durable.sh`](examples/make-durable.sh) -- `[extensions].make_durable`.
   Supplies the pre-recycle flush message; muxr always appends its own exit
   directive after it.
+- [`examples/readiness.sh`](examples/readiness.sh) -- a `Command` readiness
+  probe, wired via a runtime adapter's `[tools.<name>.readiness] type = "command"`
+  (not `[extensions]`). exit 0 = safe to relaunch, non-zero = busy. Corroborates
+  a `busy` state file against tmux pane activity so an interrupted-but-idle
+  session is reclaimed instead of stranded for up to an hour.
 
 These are templates to copy, not drop-in installs -- they encode *your*
 workflow. In practice they live in your own estate repo (e.g. a `configs/`
-dir), referenced by absolute path in your muxr config. They are deliberately
-**not** something muxr distributes for you; that is the whole point of the
-subprocess contract (any language, any logic).
+dir), referenced from your muxr config. Prefer a `~/`-relative path so the
+config stays portable across machines and usernames: `[extensions]` commands
+run via `sh -c`, so a leading `~/` expands. (A `Command` readiness probe is the
+exception -- its `argv[0]` is executed directly, without a shell, so give it an
+absolute path or a bare name on `PATH`.) They are deliberately **not** something
+muxr distributes for you; that is the whole point of the subprocess contract
+(any language, any logic).
 
 ## Using an adapter
 
@@ -56,12 +67,13 @@ muxr does not yet auto-discover this directory. Until adapter `include`/glob
 lands (tracked for 3.1), wire one of two ways:
 
 1. **Copy** the `[tools.<name>]` block from an adapter into your muxr config.
-2. **Reference** a subprocess extension by absolute path:
+2. **Reference** a subprocess extension by path -- prefer `~/`-relative so it is
+   portable across machines (these run via `sh -c`, which expands `~/`):
 
    ```toml
    [extensions]
-   resolver     = "~/gitlab.com/dunn.dev/<estate>/configs/resolver.sh"
-   make_durable = "~/gitlab.com/dunn.dev/<estate>/configs/make-durable.sh"
+   resolver     = "~/<your-estate>/configs/resolver.sh"
+   make_durable = "~/<your-estate>/configs/make-durable.sh"
    ```
 
 ## Distribution

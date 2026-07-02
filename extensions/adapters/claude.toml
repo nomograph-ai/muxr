@@ -59,3 +59,17 @@ pattern = "~/.config/muxr/readiness/{session_id}.json"
 state_key = "state"
 idle_value = "idle"
 since_key = "since"
+
+# OPT-IN alternative: reclaim interrupted-but-idle sessions.
+#
+# The File probe above trusts a `busy` flag until it is an hour old
+# (STALE_BUSY_SECS). But an INTERRUPTED Claude turn fires no `Stop` hook, so the
+# `busy` written by UserPromptSubmit/PreToolUse is never cleared -- the session
+# reads Busy for up to an hour and `muxr upgrade` skips it. A Command probe can
+# corroborate the `busy` claim against tmux pane activity and reclaim it. See
+# extensions/examples/readiness.sh. To enable, REPLACE the block above with:
+#
+#   [tools.claude.readiness]
+#   type = "command"
+#   # argv[0] is executed directly (no shell) -> use an ABSOLUTE path.
+#   argv = ["/abs/path/to/readiness.sh", "{session_id}", "{pid}"]

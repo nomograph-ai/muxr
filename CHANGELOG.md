@@ -95,7 +95,7 @@ Hardening pass on the readiness gate (3.2.0), from an adversarial review.
   - The Claude adapter ships a `[readiness]` File probe; `pi`/`opencode`
     default to the floor. The producer side (a runtime's turn-boundary hooks
     writing the state file) lives in the operator's harness, not muxr.
-  - Design: `docs/readiness-gated-upgrade.md`.
+  - Design: [ADR 0002](docs/adr/0002-readiness-gated-upgrade.md).
 
 ## [3.1.1] (2026-06-17)
 
