@@ -46,6 +46,12 @@ pub struct Config {
     /// campaign lifecycle stays available via subcommands.
     #[serde(default)]
     pub chooser: Chooser,
+    /// Optional companion pane created beside the runtime at launch and
+    /// recreated on restore. Global default; a per-repo
+    /// `[repos.<name>.companion]` overrides it. Absent -> no companion.
+    /// See ADR 0004.
+    #[serde(default)]
+    pub companion: Option<Companion>,
 }
 
 /// External chooser delegation. The built-in TUI does far more than a generic
@@ -158,6 +164,9 @@ pub struct Repo {
     /// Tool-launch settings. Passed through to the runtime at session start.
     #[serde(default)]
     pub launch: LaunchSettings,
+    /// Per-repo companion-pane override of the global `[companion]`.
+    #[serde(default)]
+    pub companion: Option<Companion>,
 }
 
 /// Settings passed to the tool on launch. Muxr passes these through
@@ -190,6 +199,44 @@ pub struct LaunchSettings {
     /// Example: `nono run --profile dunn --` for the dunn harness.
     #[serde(default)]
     pub wrapper: Option<String>,
+}
+
+/// An optional companion pane: a review/preview pane created beside the runtime
+/// at launch and recreated on restore (config-driven, opt-in, per-repo
+/// overridable). muxr only splits the pane and runs `cmd`; what it renders is
+/// the operator's concern. See ADR 0004.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Companion {
+    /// Off by default; must be true for the pane to be created.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Command run in the companion pane. Templated with the same tokens as
+    /// `[session_env]`: `{session}` `{repo}` `{campaign}` `{session_slug}` `{dir}`.
+    pub cmd: String,
+    /// Split direction: "h" (side-by-side) or "v" (stacked). Default "h".
+    #[serde(default = "default_companion_side")]
+    pub side: String,
+    /// Companion pane size, as a percentage of the split. Default 40.
+    #[serde(default = "default_companion_size")]
+    pub size: u8,
+}
+
+fn default_companion_side() -> String {
+    "h".to_string()
+}
+
+fn default_companion_size() -> u8 {
+    40
+}
+
+/// A `[companion]` resolved for a concrete session: the literal command (tokens
+/// interpolated) plus its geometry. Returned by `Config::companion_for`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedCompanion {
+    pub cmd: String,
+    pub side: String,
+    pub size: u8,
 }
 
 /// File-based session-discovery payload. A standalone `deny_unknown_fields`
@@ -943,6 +990,45 @@ impl Config {
             .collect()
     }
 
+    /// Resolve the companion pane for a concrete session, or `None` if none
+    /// applies. A repo-level `[repos.<repo>.companion]` wins over the global
+    /// `[companion]`; returns `None` when neither is set or the resolved one is
+    /// disabled. Tokens `{session}` `{repo}` `{campaign}` `{session_slug}`
+    /// `{dir}` are interpolated into `cmd` (same slug rule as `session_env_for`).
+    pub fn companion_for(&self, session_name: &str, dir: &str) -> Option<ResolvedCompanion> {
+        let (repo, campaign) = session_name.split_once('/').unwrap_or((session_name, ""));
+        let companion = self
+            .repos
+            .get(repo)
+            .and_then(|r| r.companion.as_ref())
+            .or(self.companion.as_ref())?;
+        if !companion.enabled {
+            return None;
+        }
+        let slug: String = session_name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        let cmd = companion
+            .cmd
+            .replace("{session_slug}", &slug)
+            .replace("{session}", session_name)
+            .replace("{repo}", repo)
+            .replace("{campaign}", campaign)
+            .replace("{dir}", dir);
+        Some(ResolvedCompanion {
+            cmd,
+            side: companion.side.clone(),
+            size: companion.size,
+        })
+    }
+
     /// Get the harness config for a tool name.
     ///
     /// User config in `[tools.<name>]` is treated as a PARTIAL override over
@@ -1104,6 +1190,16 @@ default_tool = "claude"
 #
 # [chooser]
 # command = "sesh connect \"$(sesh list | fzf)\""
+
+# Optional companion pane beside the runtime, recreated faithfully on restore.
+# Global default here, or per-repo via [repos.<name>.companion]. `cmd` is
+# templated with {session} {repo} {campaign} {session_slug} {dir}. See ADR 0004.
+#
+# [companion]
+# enabled = true
+# cmd = "my-previewer {dir}"
+# side = "h"   # "h" side-by-side, "v" stacked
+# size = 40    # companion pane size, percent
 "##
         .to_string()
     }
@@ -1138,6 +1234,50 @@ mod tests {
     fn session_env_empty_when_unconfigured() {
         let config: Config = toml::from_str("[repos]").unwrap();
         assert!(config.session_env_for("work/x").is_empty());
+    }
+
+    #[test]
+    fn companion_global_resolves_and_interpolates() {
+        let config: Config = toml::from_str(
+            "[repos]\n\n[companion]\nenabled = true\ncmd = \"prev {repo} {campaign} {session_slug} {dir}\"\n",
+        )
+        .unwrap();
+        let c = config
+            .companion_for("work/in-place/fix", "/tmp/d")
+            .expect("global companion resolves");
+        assert_eq!(c.cmd, "prev work in-place/fix work-in-place-fix /tmp/d");
+        assert_eq!(c.side, "h"); // default
+        assert_eq!(c.size, 40); // default
+    }
+
+    #[test]
+    fn companion_repo_override_wins_and_global_is_fallback() {
+        let config: Config = toml::from_str(
+            "[repos.work]\ndir = \"~/w\"\ncolor = \"#fff\"\n\n\
+             [repos.work.companion]\nenabled = true\ncmd = \"repo-prev\"\nside = \"v\"\nsize = 30\n\n\
+             [companion]\nenabled = true\ncmd = \"global-prev\"\n",
+        )
+        .unwrap();
+        let c = config.companion_for("work/x", "/d").expect("repo companion");
+        assert_eq!((c.cmd.as_str(), c.side.as_str(), c.size), ("repo-prev", "v", 30));
+        // a repo with no override falls back to the global companion
+        let g = config
+            .companion_for("other/y", "/d")
+            .expect("global fallback");
+        assert_eq!(g.cmd, "global-prev");
+    }
+
+    #[test]
+    fn companion_disabled_is_none() {
+        let config: Config =
+            toml::from_str("[repos]\n\n[companion]\nenabled = false\ncmd = \"x\"\n").unwrap();
+        assert!(config.companion_for("work/x", "/d").is_none());
+    }
+
+    #[test]
+    fn companion_absent_is_none() {
+        let config: Config = toml::from_str("[repos]").unwrap();
+        assert!(config.companion_for("work/x", "/d").is_none());
     }
 
     fn sample_config() -> Config {
@@ -1358,6 +1498,7 @@ session_discovery = { type = "none" }
         assert!(cfg.extensions.make_durable.is_none());
         assert!(cfg.session_env.is_empty());
         assert!(cfg.chooser.command.is_none());
+        assert!(cfg.companion.is_none());
     }
 
     // -- Harness config tests --

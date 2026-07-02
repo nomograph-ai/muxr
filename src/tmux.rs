@@ -91,12 +91,15 @@ impl Tmux {
     /// If `tool_cmd` is empty, creates a bare shell session.
     /// `env` sets session-scoped variables via `new-session -e KEY=VALUE`
     /// (tmux 3.2+); pass `&[]` for none.
+    /// `companion`, when set, splits an extra pane running its command (focus
+    /// stays on the tool pane). Recreated identically on restore. See ADR 0004.
     pub fn create_session(
         &self,
         name: &str,
         dir: &Path,
         tool_cmd: &str,
         env: &[(String, String)],
+        companion: Option<&crate::config::ResolvedCompanion>,
     ) -> Result<()> {
         let dir_str = dir.to_str().context("Invalid directory path")?;
 
@@ -122,6 +125,33 @@ impl Tmux {
 
             if !status.success() {
                 anyhow::bail!("tmux send-keys failed for {name}");
+            }
+        }
+
+        // Companion pane: split an auxiliary pane running the configured command
+        // (`-d` keeps focus on the tool pane). Runs on launch AND restore, so a
+        // restored session comes back byte-identical. See ADR 0004.
+        if let Some(c) = companion {
+            let flag = if c.side == "v" { "-v" } else { "-h" };
+            let size = format!("{}%", c.size);
+            let status = self
+                .command()
+                .args([
+                    "split-window",
+                    flag,
+                    "-d",
+                    "-l",
+                    &size,
+                    "-t",
+                    &Self::target(name),
+                    "-c",
+                    dir_str,
+                    &c.cmd,
+                ])
+                .status()
+                .context("Failed to split companion pane")?;
+            if !status.success() {
+                anyhow::bail!("tmux split-window (companion) failed for {name}");
             }
         }
 

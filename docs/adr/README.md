@@ -30,4 +30,4 @@ place. No separate RFC and ADR trees, no re-filing.
 | [0001](0001-extension-architecture.md) | A small stable core, iterated through extensions | Accepted |
 | [0002](0002-readiness-gated-upgrade.md) | Readiness-gated upgrade | Accepted (implemented) |
 | [0003](0003-reclaim-interrupted-sessions.md) | Reclaim interrupted sessions via a Command probe | Accepted |
-| [0004](0004-companion-pane.md) | Companion pane (auxiliary review/preview panes) | Proposed |
+| [0004](0004-companion-pane.md) | Companion pane (auxiliary review/preview panes) | Accepted (implemented) |

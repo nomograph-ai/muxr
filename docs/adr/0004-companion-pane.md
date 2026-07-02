@@ -1,8 +1,9 @@
 # ADR 0004: Companion pane (auxiliary review/preview panes)
 
-- Status: Proposed
+- Status: Accepted (implemented in v3.5.0)
 - Date: 2026-07-02
 - Relates to: [ADR 0001](0001-extension-architecture.md)
+- Implemented in: `src/config.rs` (`Companion` + `companion_for`) and `src/tmux.rs::create_session` (the split), threaded through the launch / recycle / local-restore call sites; remote + bare sessions pass `None`.
 
 ## Context
 
