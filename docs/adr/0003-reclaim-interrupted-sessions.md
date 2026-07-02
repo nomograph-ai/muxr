@@ -1,13 +1,13 @@
-# ADR 0002: Reclaim interrupted-but-idle sessions via a Command probe
+# ADR 0003: Reclaim interrupted-but-idle sessions via a Command probe
 
 - Status: Accepted
 - Date: 2026-07-01
-- Relates to: [ADR 0001](0001-readiness-gated-upgrade.md), nomograph/muxr#6
+- Relates to: [ADR 0001](0001-extension-architecture.md), [ADR 0002](0002-readiness-gated-upgrade.md), nomograph/muxr#6
 - Realized in: `extensions/examples/readiness.sh` (reference implementation)
 
 ## Context
 
-Under [ADR 0001](0001-readiness-gated-upgrade.md) the `File` probe trusts a
+Under [ADR 0002](0002-readiness-gated-upgrade.md) the `File` probe trusts a
 `busy` state file until it is older than `STALE_BUSY_SECS` (1h). The flag is
 written by turn-boundary hooks (`UserPromptSubmit` / `PreToolUse` -> `busy`,
 `Stop` -> `idle`). But an **interrupted** Claude turn fires no `Stop` hook, so
@@ -21,7 +21,8 @@ interrupted session from one that is genuinely working.
 
 Do not trust `busy` blindly -- corroborate it against real tmux pane activity,
 and do so **in the extension layer with no muxr core change** (per the
-extensions-first direction: keep core stable, release rarely). Wire a `Command`
+extensions-first posture of [ADR 0001](0001-extension-architecture.md): keep core
+stable, release rarely). Wire a `Command`
 readiness probe in place of the `File` probe:
 
 - `busy` + pane active within `min_idle` -> genuinely working -> stay Busy.

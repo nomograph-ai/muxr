@@ -118,6 +118,9 @@ Architecture decisions live as numbered records in [`docs/adr/`](docs/adr/) --
 one file per decision, with an RFC-style `Design detail` section where the
 mechanism warrants it. A record is an RFC while `Proposed` and an ADR once
 `Accepted`; supersede rather than rewrite. See [`docs/adr/README.md`](docs/adr/README.md).
+The extension contract and the small-stable-core posture in this document are
+recorded as [ADR 0001](docs/adr/0001-extension-architecture.md); the sections
+above are its living reference.
 
 ## History
 - **2.0.1** -- last pre-cutover release (http: generic-package era).

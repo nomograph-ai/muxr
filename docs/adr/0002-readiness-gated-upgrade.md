@@ -1,8 +1,9 @@
-# ADR 0001: Readiness-gated upgrade
+# ADR 0002: Readiness-gated upgrade
 
 - Status: Accepted (implemented)
 - Date: 2026-07-01 (recorded; the design predates this and was captured as prose)
 - Implemented in: `src/state.rs` (probe classifier + gate), `muxr upgrade` / `muxr migrate`, `muxr status`
+- Relates to: [ADR 0001](0001-extension-architecture.md) -- the extensions-first posture this instantiates
 
 ## Context
 
@@ -154,4 +155,4 @@ Non-goals:
 Follow-up: a `busy` flag can go **stale** when a runtime fires no turn-end hook
 (e.g. an interrupted Claude turn leaves `busy` set with no `Stop`). Closing that
 without breaking agnosticism is its own decision -- see
-[ADR 0002](0002-reclaim-interrupted-sessions.md).
+[ADR 0003](0003-reclaim-interrupted-sessions.md).
