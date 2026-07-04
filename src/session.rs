@@ -274,6 +274,12 @@ pub(crate) fn cmd_reorient(tmux: &Tmux, name: Option<&str>) -> Result<()> {
 /// take a long time -- then reopens the session FRESH (no resume) so it
 /// rehydrates from that pointer. The prior conversation persists on disk and is
 /// recoverable via --resume, so recycling never destroys context.
+/// How long a recycling session must read idle -- via the readiness probe, or
+/// the tmux-activity floor -- before muxr sends the exit. Long enough not to
+/// trip on a mid-flush pause, short enough that recycle stays snappy (unlike the
+/// relaunch-safety cooldown `upgrade` uses).
+const RECYCLE_IDLE_SECS: u64 = 5;
+
 pub(crate) fn cmd_recycle(
     tmux: &Tmux,
     name: Option<&str>,
@@ -338,19 +344,57 @@ pub(crate) fn cmd_recycle(
 
         if msg.trim().is_empty() {
             ui::action(&format!("recycle {session}: nothing to flush -> exiting"));
-            tmux.send_text(&session, &exit_cmd)?;
         } else {
+            // Send ONLY the flush instructions. muxr drives the exit itself (below)
+            // once the agent goes idle -- an interactive agent CANNOT self-`/exit`
+            // (the CLI input loop owns that command; the model can't invoke it), so
+            // baking "run /exit" into the message is what hung recycle 600s -> SIGKILL.
             ui::action(&format!(
-                "recycle {session}: asked the agent to flush -> {} then exit",
+                "recycle {session}: asked the agent to flush -> {}",
                 log_md.display()
             ));
-            tmux.send_text(&session, &compose_recycle_message(&msg, &exit_cmd))?;
+            tmux.send_text(&session, &compose_recycle_message(&msg))?;
+
+            // Wait for the flush to COMPLETE by gating on the readiness idle signal
+            // (Stop hook, or the tmux-activity floor), NOT process-exit -- mirrors
+            // `tool::upgrade`. Bounded by `wait`; on timeout muxr exits anyway.
+            ui::note("waiting for the agent to finish flushing (agent-paced)…");
+            if let Some(td) = tool_def.as_ref()
+                && let Some(sid) = state::discover_session_id(tmux, &session, Some(td))
+            {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait);
+                // Brief grace so the agent registers "busy" before we poll for idle.
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                loop {
+                    let ready = state::session_readiness(
+                        tmux,
+                        &session,
+                        td,
+                        &sid,
+                        RECYCLE_IDLE_SECS,
+                        tmux.session_activity(&session),
+                    );
+                    if matches!(ready, state::Readiness::Safe) {
+                        break;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        ui::note("flush wait timed out; exiting anyway");
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                }
+            } else {
+                // No session id / tool def: can't gate on readiness -> short grace.
+                std::thread::sleep(std::time::Duration::from_secs(5));
+            }
         }
-        ui::note("waiting for the agent to finish and exit (agent-paced)…");
+
+        // muxr drives the exit itself. This WORKS -- it is the CLI input loop
+        // receiving the keystroke, unlike asking the agent to self-exit.
+        tmux.send_text(&session, &exit_cmd)?;
         match harness_pid {
-            Some(pid) => tool::wait_for_exit(pid, wait as u32),
-            // No detectable harness process: fall back to a short grace.
-            None => std::thread::sleep(std::time::Duration::from_secs(5)),
+            Some(pid) => tool::wait_for_exit(pid, 10),
+            None => std::thread::sleep(std::time::Duration::from_secs(3)),
         }
     }
 
@@ -502,16 +546,15 @@ struct MakeDurableOutput {
 /// `[extensions].make_durable` is invoked with the session context and
 /// supplies the message; absent -> muxr's built-in self-contained prompt
 /// (names the exact log.md path, so it never depends on a `/serialize` skill).
-/// Compose the agent-facing recycle message: flush instructions (built-in or
-/// from a `make_durable` extension) + muxr's own exit directive. The exit
-/// directive is ALWAYS appended, so a custom extension message that forgets to
-/// tell the agent to exit can't hang recycle until the SIGKILL timeout.
-pub(crate) fn compose_recycle_message(flush: &str, exit_cmd: &str) -> String {
+/// Compose the agent-facing recycle FLUSH message. muxr drives the exit itself
+/// (via `tmux.send_text` once the agent goes idle), because an interactive agent
+/// cannot self-`/exit` -- so this asks ONLY for the flush and must NOT tell the
+/// agent to exit (baking that in is what hung recycle 600s -> SIGKILL, #8).
+pub(crate) fn compose_recycle_message(flush: &str) -> String {
     format!(
-        "{}\n\nWhen you've finished, run {} -- muxr is waiting and will reopen \
-         this session FRESH from the pointer. Take as long as you need.",
-        flush.trim_end(),
-        exit_cmd
+        "{}\n\nFlush your state to the pointer now -- muxr is waiting and will \
+         reopen this session FRESH once you're idle. Take as long as you need.",
+        flush.trim_end()
     )
 }
 

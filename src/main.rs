@@ -941,14 +941,16 @@ mod tests {
     use crate::session::{compose_launch_command, compose_recycle_message};
 
     #[test]
-    fn recycle_message_always_appends_exit_directive() {
-        // A make_durable extension that forgets to instruct an exit must still
-        // get muxr's exit directive appended, or recycle hangs to SIGKILL.
-        let m = compose_recycle_message("flush your state", "/exit");
+    fn recycle_message_flushes_without_asking_to_exit() {
+        // muxr drives the exit itself once the agent is idle (an interactive agent
+        // cannot self-`/exit`), so the flush message must ask ONLY for the flush --
+        // baking in an exit directive is what hung recycle to SIGKILL (#8).
+        let m = compose_recycle_message("flush your state");
         assert!(m.starts_with("flush your state"), "flush content kept: {m}");
-        assert!(m.contains("run /exit"), "exit directive appended: {m}");
-        // Honors a custom exit command (e.g. Pi's /quit).
-        assert!(compose_recycle_message("do the thing", "/quit").contains("run /quit"));
+        assert!(
+            !m.contains("/exit") && !m.contains("/quit"),
+            "must NOT ask the agent to exit: {m}"
+        );
     }
 
     #[test]
