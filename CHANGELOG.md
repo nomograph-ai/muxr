@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.5.1] (2026-07-02)
+
+### Fixed
+- **recycle hung 600s -> SIGKILL for interactive sessions (#8).** `cmd_recycle`
+  used harness process-exit as the flush-complete signal and asked the agent to
+  reach it by embedding "run `/exit`" in the flush message -- but an interactive
+  Claude Code agent cannot self-`/exit` (the CLI input loop owns that command),
+  so the process never exited and `wait_for_exit` blocked the full timeout. Recycle
+  now mirrors `upgrade`: send the flush, gate on the readiness idle signal (Stop
+  hook / tmux-activity floor) rather than process-exit, then muxr sends the exit
+  keystroke itself. `compose_recycle_message` no longer asks the agent to exit.
+
 ## [3.5.0] (2026-07-02)
 
 Companion panes: an optional review/preview pane beside the runtime, created at
