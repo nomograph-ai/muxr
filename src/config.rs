@@ -52,6 +52,36 @@ pub struct Config {
     /// See ADR 0004.
     #[serde(default)]
     pub companion: Option<Companion>,
+    /// Namespace roots scanned for drop-in per-repo `muxr.toml` fragments, so a
+    /// repo carries its own muxr entry with no central edit. Empty `roots` (the
+    /// default, and any config with no `[discovery]`) means no discovery: the
+    /// single-file, pre-3.6 behavior. A root absent on this machine is simply
+    /// not discovered -- zero cross-machine knowledge. See `discover_and_merge`.
+    #[serde(default)]
+    pub discovery: Discovery,
+}
+
+/// Per-repo config discovery. `roots` are namespace directories walked (bounded
+/// to 2 levels: `<root>/<namespace>/<repo>`) for a `fragment` file at a git
+/// repo root; each qualifying fragment's `repos`/`remotes` are merged into the
+/// central config. Absent `[discovery]` -> empty `roots` -> discovery disabled.
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Discovery {
+    /// Namespace directories to scan. Each entry is tilde-expanded. A root that
+    /// does not exist on this machine is skipped, not an error.
+    #[serde(default)]
+    pub roots: Vec<String>,
+    /// Fragment file name looked for at each candidate repo root. Default
+    /// `muxr.toml`. (Note: `Default::default` leaves this empty -- serde's
+    /// default fn only fires on deserialize -- so the walk falls back to
+    /// `muxr.toml` when it is empty.)
+    #[serde(default = "default_fragment_name")]
+    pub fragment: String,
+}
+
+fn default_fragment_name() -> String {
+    "muxr.toml".to_string()
 }
 
 /// External chooser delegation. The built-in TUI does far more than a generic
@@ -865,7 +895,9 @@ impl Config {
         }
         let content = std::fs::read_to_string(&path)
             .with_context(|| format!("Failed to read {}", path.display()))?;
-        Self::parse(&content, &path.display().to_string())
+        let mut config = Self::parse(&content, &path.display().to_string())?;
+        config.discover_and_merge()?;
+        Ok(config)
     }
 
     /// Parse + validate config TOML. Split from `load()` so the strict-parse,
@@ -886,25 +918,125 @@ impl Config {
             }
         })?;
 
-        // Validate no name collisions between repos, remotes, and tools
-        for name in config.remotes.keys() {
-            if config.repos.contains_key(name) {
+        config.check_collisions()?;
+        Ok(config)
+    }
+
+    /// Validate no name collisions between repos, remotes, and tools (and that
+    /// no repo/tool name shadows a built-in command). Split out of `parse` so
+    /// the same rules run after discovery merges fragments into the config.
+    fn check_collisions(&self) -> Result<()> {
+        for name in self.remotes.keys() {
+            if self.repos.contains_key(name) {
                 anyhow::bail!("Name collision: '{name}' is defined as both a repo and a remote");
             }
         }
-        for name in config.tools.keys() {
-            if config.repos.contains_key(name) {
+        for name in self.tools.keys() {
+            if self.repos.contains_key(name) {
                 anyhow::bail!("Name collision: '{name}' is defined as both a tool and a repo");
             }
-            if config.remotes.contains_key(name) {
+            if self.remotes.contains_key(name) {
                 anyhow::bail!("Name collision: '{name}' is defined as both a remote and a repo");
             }
             if RESERVED_NAMES.contains(&name.as_str()) {
                 anyhow::bail!("Repo name '{name}' is reserved (conflicts with built-in command)");
             }
         }
+        Ok(())
+    }
 
-        Ok(config)
+    /// Parse one per-repo `muxr.toml` fragment. Same strict-parse + rename-hint
+    /// enrichment as `parse`, but NO collision check: a fragment's names are
+    /// validated only after the full merge (`check_collisions` at the end of
+    /// `discover_and_merge`), since collisions are a whole-config property.
+    fn parse_fragment(content: &str, source: &str) -> Result<Self> {
+        toml::from_str(content).map_err(|e| {
+            let base = format!("Failed to parse fragment {source}:\n{e}");
+            match rename_hint(content) {
+                Some(hint) => anyhow::anyhow!("{base}\n\n{hint}"),
+                None => anyhow::anyhow!("{base}"),
+            }
+        })
+    }
+
+    /// Discover drop-in per-repo `muxr.toml` fragments under the configured
+    /// `[discovery]` roots and merge their `repos`/`remotes` into this config.
+    ///
+    /// No roots -> immediate no-op (single-file, pre-3.6 behavior). Otherwise
+    /// each root is tilde-expanded and walked exactly 2 levels deep
+    /// (`<root>/<namespace>/<repo>`); a candidate `<repo>/<fragment>` qualifies
+    /// only when both that file and a `<repo>/.git` entry exist (a git repo
+    /// root -- `.git` may be a dir or a worktree file, so `.exists()`). A root
+    /// or namespace dir that cannot be read is skipped, not an error, so a repo
+    /// absent on this machine is simply not discovered. Fragments are merged in
+    /// sorted path order for determinism. Only `repos` and `remotes` are taken
+    /// from a fragment; any other field it carries is ignored (a fragment must
+    /// not redefine hooks/extensions/etc). A fragment name already present in
+    /// the config is a hard error naming the key and the fragment path.
+    fn discover_and_merge(&mut self) -> Result<()> {
+        if self.discovery.roots.is_empty() {
+            return Ok(());
+        }
+
+        // `Default::default` leaves `fragment` empty (serde's default fn only
+        // fires on deserialize), so fall back to the shipped name here.
+        let fragment_name = if self.discovery.fragment.is_empty() {
+            "muxr.toml"
+        } else {
+            self.discovery.fragment.as_str()
+        };
+
+        // Bounded 2-level walk (no walkdir/glob dep): root -> namespace -> repo.
+        let mut fragments: Vec<PathBuf> = Vec::new();
+        for root in &self.discovery.roots {
+            let root_path = PathBuf::from(shellexpand::tilde(root).to_string());
+            let Ok(namespaces) = std::fs::read_dir(&root_path) else {
+                continue; // missing/unreadable root: skipped, not an error
+            };
+            for namespace in namespaces.flatten() {
+                let ns_path = namespace.path();
+                let Ok(repos) = std::fs::read_dir(&ns_path) else {
+                    continue; // unreadable namespace dir: skip
+                };
+                for repo in repos.flatten() {
+                    let repo_path = repo.path();
+                    let fragment = repo_path.join(fragment_name);
+                    // Qualifies only at a git repo root carrying the fragment.
+                    if fragment.exists() && repo_path.join(".git").exists() {
+                        fragments.push(fragment);
+                    }
+                }
+            }
+        }
+
+        // Deterministic merge order regardless of read_dir ordering.
+        fragments.sort();
+
+        for fragment in &fragments {
+            let source = fragment.display().to_string();
+            let content = std::fs::read_to_string(fragment)
+                .with_context(|| format!("Failed to read fragment {source}"))?;
+            let parsed = Self::parse_fragment(&content, &source)?;
+            // Only repos and remotes cross the fragment boundary.
+            for (name, repo) in parsed.repos {
+                if self.repos.contains_key(&name) {
+                    anyhow::bail!(
+                        "Duplicate repo '{name}' in fragment {source} (already defined)"
+                    );
+                }
+                self.repos.insert(name, repo);
+            }
+            for (name, remote) in parsed.remotes {
+                if self.remotes.contains_key(&name) {
+                    anyhow::bail!(
+                        "Duplicate remote '{name}' in fragment {source} (already defined)"
+                    );
+                }
+                self.remotes.insert(name, remote);
+            }
+        }
+
+        self.check_collisions()
     }
 
     /// Resolve the config file path. `MUXR_CONFIG`, when set and non-empty,
@@ -2229,6 +2361,96 @@ prompt_mode = "string"
         .unwrap_err()
         .to_string();
         assert!(err.contains("Name collision"), "got: {err}");
+    }
+
+    #[test]
+    fn discovery_empty_roots_is_noop() {
+        // No [discovery] -> empty roots -> discover_and_merge changes nothing.
+        let mut config = Config::parse(
+            "[repos.base]\ndir = \"~/b\"\ncolor = \"#fff\"\n",
+            "<test>",
+        )
+        .unwrap();
+        assert!(config.discovery.roots.is_empty());
+        config.discover_and_merge().unwrap();
+        assert_eq!(config.repos.len(), 1);
+        assert!(config.repos.contains_key("base"));
+    }
+
+    #[test]
+    fn discovery_merges_fragment_repos() {
+        // <root>/ns/repoA/{.git/, muxr.toml} with [repos.alpha] + ext.
+        let root = tempfile::tempdir().unwrap();
+        let repo_a = root.path().join("ns").join("repoA");
+        std::fs::create_dir_all(repo_a.join(".git")).unwrap();
+        std::fs::write(
+            repo_a.join("muxr.toml"),
+            "[repos.alpha]\ndir = \"~/a\"\ncolor = \"#123456\"\n\n[repos.alpha.ext.chrome]\nglyph = \"A\"\n",
+        )
+        .unwrap();
+
+        let mut config = Config::parse(
+            "[repos.base]\ndir = \"~/b\"\ncolor = \"#fff\"\n",
+            "<test>",
+        )
+        .unwrap();
+        config.discovery.roots = vec![root.path().to_string_lossy().into_owned()];
+        config.discover_and_merge().unwrap();
+
+        assert!(config.repos.contains_key("alpha"), "fragment repo merged");
+        assert!(config.repos.contains_key("base"), "base repo retained");
+        let alpha = &config.repos["alpha"];
+        assert_eq!(alpha.color, "#123456");
+        // The open ext namespace survives the merge verbatim.
+        assert!(
+            alpha.ext.contains_key("chrome"),
+            "repo ext survived the merge"
+        );
+    }
+
+    #[test]
+    fn discovery_ignores_non_git_dir() {
+        // A muxr.toml in a dir WITHOUT .git is not a git repo root -> skipped.
+        let root = tempfile::tempdir().unwrap();
+        let not_a_repo = root.path().join("ns").join("plain");
+        std::fs::create_dir_all(&not_a_repo).unwrap();
+        std::fs::write(
+            not_a_repo.join("muxr.toml"),
+            "[repos.ghost]\ndir = \"~/g\"\ncolor = \"#000\"\n",
+        )
+        .unwrap();
+
+        let mut config = Config::parse("[repos]\n", "<test>").unwrap();
+        config.discovery.roots = vec![root.path().to_string_lossy().into_owned()];
+        config.discover_and_merge().unwrap();
+
+        assert!(
+            !config.repos.contains_key("ghost"),
+            "fragment without .git must not be merged"
+        );
+        assert!(config.repos.is_empty());
+    }
+
+    #[test]
+    fn discovery_duplicate_repo_errors() {
+        // A fragment redefining a name already in the base config is an error.
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("ns").join("dup");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(
+            repo.join("muxr.toml"),
+            "[repos.base]\ndir = \"~/other\"\ncolor = \"#abc\"\n",
+        )
+        .unwrap();
+
+        let mut config = Config::parse(
+            "[repos.base]\ndir = \"~/b\"\ncolor = \"#fff\"\n",
+            "<test>",
+        )
+        .unwrap();
+        config.discovery.roots = vec![root.path().to_string_lossy().into_owned()];
+        let err = config.discover_and_merge().unwrap_err().to_string();
+        assert!(err.contains("Duplicate repo 'base'"), "got: {err}");
     }
 
     #[test]
