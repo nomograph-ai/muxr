@@ -167,6 +167,15 @@ pub struct Repo {
     /// Per-repo companion-pane override of the global `[companion]`.
     #[serde(default)]
     pub companion: Option<Companion>,
+    /// Open extension namespace: arbitrary TOML muxr carries but never
+    /// interprets, handed to extensions verbatim (the resolver intent's `ext`
+    /// field and the `muxr config` query). This is how a repo declares
+    /// extension/preference data -- chrome (statusline glyph/color), launcher
+    /// hints -- as CONFIG, with no muxr schema change. The core keys above keep
+    /// `deny_unknown_fields` (a typo in `dir`/`color`/... still fails loud);
+    /// only this one namespace is deliberately open.
+    #[serde(default)]
+    pub ext: toml::Table,
 }
 
 /// Settings passed to the tool on launch. Muxr passes these through
@@ -1450,6 +1459,35 @@ session_discovery = { type = "none" }
         assert!(RESERVED_NAMES.contains(&"retire"));
         assert!(RESERVED_NAMES.contains(&"broadcast"));
         assert!(!RESERVED_NAMES.contains(&"claude"));
+    }
+
+    #[test]
+    fn repo_ext_namespace_is_open_but_core_stays_strict() {
+        // The `ext` namespace accepts arbitrary nested tables -- adding a
+        // preference is a config change, not a muxr rebuild.
+        let c = Config::parse(
+            "[repos.work]\ndir = \"~/w\"\ncolor = \"#111\"\n\
+             [repos.work.ext.chrome]\nglyph_codepoint = \"100002\"\nfamily = \"Work Mark\"\n",
+            "test",
+        )
+        .expect("open ext namespace parses");
+        let chrome = c.repos["work"].ext["chrome"]
+            .as_table()
+            .expect("chrome is a table");
+        assert_eq!(chrome["glyph_codepoint"].as_str(), Some("100002"));
+
+        // A repo with no ext gets an empty table, not an error.
+        let c2 = Config::parse("[repos.w]\ndir = \"~/w\"\ncolor = \"#111\"\n", "test").unwrap();
+        assert!(c2.repos["w"].ext.is_empty());
+
+        // But a typo in a CORE key still fails loud (deny_unknown_fields intact).
+        let err = Config::parse(
+            "[repos.work]\ndir = \"~/w\"\ncolor = \"#111\"\ncolr = \"oops\"\n",
+            "test",
+        )
+        .unwrap_err();
+        let msg = format!("{err}").to_lowercase();
+        assert!(msg.contains("colr") || msg.contains("unknown"), "got: {msg}");
     }
 
     #[test]

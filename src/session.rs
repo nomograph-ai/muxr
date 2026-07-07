@@ -602,6 +602,12 @@ fn make_durable_message(
     ))
 }
 
+/// Skip-serializing predicate for a borrowed, possibly-empty extension table:
+/// serde hands `&field`, i.e. `&&toml::Table`, so the signature is double-ref.
+fn ext_table_is_empty(t: &&toml::Table) -> bool {
+    t.is_empty()
+}
+
 /// The launch intent handed to a resolver extension. Identifies WHAT muxr is
 /// trying to launch; the extension answers WHERE/HOW (see `ResolveOutcome`).
 #[derive(serde::Serialize)]
@@ -610,6 +616,12 @@ struct ResolveIntent<'a> {
     session: &'a str,
     repo: &'a str,
     campaign: &'a str,
+    /// The repo's open extension namespace (`[repos.<name>.ext]`), verbatim, so
+    /// a resolver/launcher extension reads repo preference/hint data without a
+    /// muxr schema change. Omitted when empty (keeps intents byte-compatible for
+    /// repos that declare no `ext`).
+    #[serde(skip_serializing_if = "ext_table_is_empty")]
+    ext: &'a toml::Table,
     /// The repo checkout dir muxr resolved for this launch (the default for
     /// `ResolveOutcome.dir`). Handed over so a resolver needn't re-parse muxr's
     /// own config to find where the repo lives. Carries `config.resolve_dir`'s
@@ -690,10 +702,17 @@ fn resolve_layout(
         });
     };
 
+    let empty_ext = toml::Table::new();
+    let ext = config
+        .repos
+        .get(repo_name)
+        .map(|r| &r.ext)
+        .unwrap_or(&empty_ext);
     let intent = ResolveIntent {
         session: session_name,
         repo: repo_name,
         campaign,
+        ext,
         repo_dir: &default_dir.to_string_lossy(),
         resume_id,
         model,
@@ -943,16 +962,21 @@ mod tests {
         // value muxr uses for the default `dir`), so it needn't re-parse muxr's
         // config to find where the repo lives. Additive: existing resolvers
         // that ignore `repo_dir` are unaffected.
+        let empty = toml::Table::new();
         let intent = ResolveIntent {
             session: "work/auth-revamp",
             repo: "work",
             campaign: "auth-revamp",
+            ext: &empty,
             repo_dir: "/Users/me/src/work",
             resume_id: None,
             model: None,
         };
         let json = serde_json::to_value(&intent).unwrap();
         assert_eq!(json["repo_dir"], "/Users/me/src/work");
+        // Empty ext is omitted, so intents for repos with no `ext` stay
+        // byte-compatible with pre-3.6 resolvers.
+        assert!(json.get("ext").is_none());
         assert_eq!(json["repo"], "work");
         // resume_id/model stay omitted when absent (skip_serializing_if).
         assert!(json.get("resume_id").is_none());
