@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.5.2] (2026-07-07)
+
+### Fixed
+- **recycle/upgrade stranded a long flush unsubmitted in the composer.**
+  `send_text` sent the prompt body and its submitting Enter in one `send-keys`
+  burst. An agent TUI (Claude Code) detects a large fast burst as a paste and
+  holds it as a draft, folding the same-burst Enter into the draft as a newline
+  instead of submitting, so a long multi-line recycle flush (and the `/exit`
+  after it) sat unsubmitted and the recycle stalled. Reproduced end-to-end
+  against CC 2.1.202: a ~680-byte multi-line message strands via the old path
+  and submits via the new one. Fix: send the body with `send-keys -l --`
+  (literal, no trailing Enter) so it lands as a draft, then submit with a
+  SEPARATE Enter after a 250 ms settle so the paste closes first.
+
 ## [3.5.1] (2026-07-02)
 
 ### Fixed
