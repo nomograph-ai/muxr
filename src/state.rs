@@ -527,9 +527,11 @@ impl SavedState {
 
                 // Rebuild the full launch (prompt + add-dirs + resume) through
                 // the shared composer so a restored session is identical to a
-                // freshly opened one. If the campaign/session files are gone
-                // (e.g. the session was archived), fall back to a name+resume
-                // relaunch rather than dropping the session.
+                // freshly opened one. Missing campaign/session files (e.g. an
+                // archived session) degrade cleanly inside compose and still
+                // restore via --continue/--resume. A file that EXISTS but is
+                // unparseable returns Err: surface it loud and SKIP this session
+                // rather than bring it back stripped of its rules (issue #11).
                 let tool_cmd = match crate::session::compose_launch_command(
                     config,
                     &s.name,
@@ -540,13 +542,11 @@ impl SavedState {
                     Ok((cmd, _)) => cmd,
                     Err(e) => {
                         eprintln!(
-                            "  {} -- full compose failed ({e}); restoring name+resume only",
+                            "  {} -- skipping restore: compose failed: {e:#} \
+                             (fix the frontmatter, then restore again)",
                             s.name
                         );
-                        match config.tool_for(&s.tool) {
-                            Some(h) => h.restore_command(Some(&s.name), s.session_id.as_deref()),
-                            None => s.tool.clone(),
-                        }
+                        continue;
                     }
                 };
                 tmux.create_session(

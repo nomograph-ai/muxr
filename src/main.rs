@@ -1270,6 +1270,74 @@ mod tests {
     }
 
     #[test]
+    fn compose_launch_command_fails_loud_on_unparseable_log() {
+        // Issue #11: a PRESENT-but-unparseable log must FAIL the relaunch loud,
+        // not degrade to name+resume (which silently strips a live session's
+        // composed prompt + campaign --add-dir paths). Contrast the ABSENT case
+        // above, which degrades cleanly.
+        let dir = tempfile::tempdir().unwrap();
+        let campaign_dir = dir.path().join("campaigns/factory");
+        std::fs::create_dir_all(&campaign_dir).unwrap();
+        std::fs::write(
+            campaign_dir.join("campaign.md"),
+            "---\ncategory: \"\"\nsynthesist_trees: []\npaths: []\n---\n\n# factory\nbody\n",
+        )
+        .unwrap();
+        // A single unescaped inner `"` inside the double-quoted entrypoint scalar
+        // makes the YAML unparseable -- the exact one-character typo from the
+        // field report.
+        std::fs::write(
+            campaign_dir.join("log.md"),
+            "---\nentrypoint: \"he said \"hi\" here\"\n---\n\nbody\n",
+        )
+        .unwrap();
+
+        let toml = format!(
+            "[repos.nomograph]\ndir = {dir:?}\ncolor = \"#fff\"\n",
+            dir = dir.path()
+        );
+        let config: Config = toml::from_str(&toml).unwrap();
+
+        let err = compose_launch_command(&config, "nomograph/factory", Some("ZID9"), None, false)
+            .expect_err("unparseable log frontmatter must fail loud, not degrade");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("log file present but unparseable"),
+            "error should state the fail-loud reason: {msg}"
+        );
+        assert!(msg.contains("log.md"), "error should name the file: {msg}");
+    }
+
+    #[test]
+    fn compose_launch_command_fails_loud_on_unparseable_campaign() {
+        // Issue #11, campaign side: a PRESENT-but-unparseable campaign.md must
+        // also fail loud (surfaced before the log is even read).
+        let dir = tempfile::tempdir().unwrap();
+        let campaign_dir = dir.path().join("campaigns/factory");
+        std::fs::create_dir_all(&campaign_dir).unwrap();
+        // Unterminated double-quoted scalar -> YAML scanner error.
+        std::fs::write(
+            campaign_dir.join("campaign.md"),
+            "---\ncategory: \"unterminated\nsynthesist_trees: []\npaths: []\n---\n\nbody\n",
+        )
+        .unwrap();
+
+        let toml = format!(
+            "[repos.nomograph]\ndir = {dir:?}\ncolor = \"#fff\"\n",
+            dir = dir.path()
+        );
+        let config: Config = toml::from_str(&toml).unwrap();
+
+        let err = compose_launch_command(&config, "nomograph/factory", Some("ZID9"), None, false)
+            .expect_err("unparseable campaign frontmatter must fail loud, not degrade");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("campaign file present but unparseable"),
+            "error should state the fail-loud reason: {msg}"
+        );
+    }
+
+    #[test]
     fn compose_launch_command_continue_fallback_when_no_id() {
         // restore passes continue_fallback=true; with no discovered id the
         // command must re-attach via --continue rather than starting cold.

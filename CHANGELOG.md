@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.6.1] (2026-07-07)
+
+### Fixed
+- **A present-but-unparseable `campaign.md`/`log.md` silently stripped a live
+  session on relaunch.** `compose_launch_command` loaded both files best-effort
+  and collapsed every failure to an empty default, so a MISSING file and a
+  PRESENT-BUT-UNPARSEABLE file were indistinguishable. A single unescaped inner
+  `"` inside a double-quoted `entrypoint:` scalar made a `log.md` unparseable,
+  and the next recycle/upgrade relaunched the session with no composed HARNESS
+  prompt and none of its campaign `--add-dir` paths -- booting healthy on the
+  surface, with no error surfaced. Fix (ADR 0006): distinguish ABSENT (degrade
+  is fine -- an archived-but-running session) from PRESENT-BUT-UNPARSEABLE (fail
+  loud, naming the file). `recycle` now pre-flights both files before the
+  destructive flush/exit/kill and refuses without touching the live session;
+  `upgrade` composes before the exit and skips the session loud on a parse
+  error; `restore` skips and surfaces rather than restoring a de-fanged session.
+  Missing-file degradation is preserved throughout. (#11)
+
+### Removed
+- **`Tool::restore_command`.** Restore now routes entirely through the shared
+  composer, whose `continue_fallback` already handles the no-session-id
+  `--continue` case, so the two relaunch paths can no longer diverge.
+
 ## [3.6.0] (2026-07-07)
 
 Config seam: muxr stops owning the whole config file. Estate/preference data
