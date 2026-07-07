@@ -897,6 +897,7 @@ fn cmd_status(tmux: &Tmux, min_idle: u64) -> Result<()> {
                 t,
                 &session_id,
                 min_idle,
+                config.readiness.stale_busy_secs,
                 activity.get(name).copied(),
             );
             match r {

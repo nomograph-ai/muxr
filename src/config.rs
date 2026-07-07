@@ -59,6 +59,45 @@ pub struct Config {
     /// not discovered -- zero cross-machine knowledge. See `discover_and_merge`.
     #[serde(default)]
     pub discovery: Discovery,
+    /// Readiness-gate thresholds for `muxr upgrade`/`recycle`. Absent
+    /// `[readiness]` -> the built-in defaults, byte-identical to pre-3.6
+    /// behavior. Currently exposes `stale_busy_secs` so an operator can reclaim
+    /// interrupted-but-quiet sessions sooner without a rebuild.
+    #[serde(default)]
+    pub readiness: ReadinessConfig,
+}
+
+/// Thresholds for the upgrade/recycle readiness gate. Defaults reproduce the
+/// built-in behavior exactly (`stale_busy_secs` = [`state::STALE_BUSY_SECS`]);
+/// an operator lowers `stale_busy_secs` to reclaim a session whose agent turn
+/// was interrupted (a `busy` state file that never got its `idle`) sooner. This
+/// stays conservative: a stale-busy file resolves to `Unknown` and falls
+/// through to the tmux-activity floor, which only returns `Safe` once the pane
+/// has actually been quiet for `min_idle`.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadinessConfig {
+    /// A `busy` state file older than this (seconds) is treated as stale (a
+    /// likely crashed/interrupted session that fired `busy` but never wrote
+    /// `idle`) and falls through to the activity floor instead of blocking
+    /// upgrade. Default 3600 (1 hour), the pre-3.6 hardcoded value.
+    #[serde(default = "default_stale_busy_secs")]
+    pub stale_busy_secs: u64,
+}
+
+fn default_stale_busy_secs() -> u64 {
+    crate::state::STALE_BUSY_SECS
+}
+
+impl Default for ReadinessConfig {
+    // Manual (not derived) so `Default::default()` yields 3600, NOT 0 -- a 0
+    // threshold would make every `busy` file instantly stale. Reuses the same
+    // default fn as serde so there is a single source for the default.
+    fn default() -> Self {
+        Self {
+            stale_busy_secs: default_stale_busy_secs(),
+        }
+    }
 }
 
 /// Per-repo config discovery. `roots` are namespace directories walked (bounded
@@ -1341,6 +1380,14 @@ default_tool = "claude"
 # cmd = "my-previewer {dir}"
 # side = "h"   # "h" side-by-side, "v" stacked
 # size = 40    # companion pane size, percent
+
+# Upgrade/recycle readiness gate. Absent -> built-in defaults (unchanged).
+# Lower stale_busy_secs to reclaim a session whose agent turn was interrupted
+# (a `busy` state file that never got its `idle`) sooner; still corroborated
+# against pane quiet (min_idle) via the activity floor.
+#
+# [readiness]
+# stale_busy_secs = 600   # default 3600 (1h)
 "##
         .to_string()
     }
