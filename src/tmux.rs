@@ -2,6 +2,12 @@ use anyhow::{Context, Result};
 use std::path::Path;
 use std::process::Command;
 
+/// Settle delay between sending a prompt body and the Enter that submits it.
+/// An agent TUI buffers a fast input burst as a paste and folds a same-burst
+/// trailing Enter into the draft as a newline instead of submitting; a
+/// distinct, later Enter submits cleanly. See `send_text`.
+const SEND_TEXT_SUBMIT_SETTLE_MS: u64 = 250;
+
 /// Tmux client with optional server isolation.
 ///
 /// When `server` is set, all commands use `tmux -L <server>` to operate
@@ -158,16 +164,38 @@ impl Tmux {
         Ok(())
     }
 
-    /// Send a single line of text to a session's pane, then Enter. Used to
-    /// inject a prompt (e.g. a reorient nudge) into a live harness session.
+    /// Send text to a session's pane and submit it with a separate Enter.
+    ///
+    /// Used to inject a prompt (reorient nudge, recycle flush, `/exit`) into a
+    /// live agent pane. Two deliberate details, both learned from a stranded
+    /// recycle where a long multi-line flush sat unsubmitted in the composer:
+    ///   1. The body is sent with `-l` (literal) and NO trailing Enter, so text
+    ///      is never parsed as tmux key names and a multi-line prompt lands as a
+    ///      draft rather than partially submitting on an embedded newline.
+    ///   2. Enter is a SEPARATE send-keys after a short settle. An agent TUI
+    ///      (e.g. Claude Code) buffers a fast input burst as a paste and folds a
+    ///      same-burst trailing Enter into the draft as a newline; a distinct,
+    ///      later Enter submits cleanly.
     pub fn send_text(&self, name: &str, text: &str) -> Result<()> {
-        let status = self
+        let target = Self::target(name);
+        let body = self
             .command()
-            .args(["send-keys", "-t", &Self::target(name), text, "Enter"])
+            .args(["send-keys", "-t", &target, "-l", "--", text])
             .status()
-            .context("Failed to send keys to tmux session")?;
-        if !status.success() {
-            anyhow::bail!("tmux send-keys failed for {name}");
+            .context("Failed to send text to tmux session")?;
+        if !body.success() {
+            anyhow::bail!("tmux send-keys (text) failed for {name}");
+        }
+        // Let the TUI ingest the (possibly paste-buffered) input and close the
+        // paste before we submit, so Enter is treated as submit, not newline.
+        std::thread::sleep(std::time::Duration::from_millis(SEND_TEXT_SUBMIT_SETTLE_MS));
+        let submit = self
+            .command()
+            .args(["send-keys", "-t", &target, "Enter"])
+            .status()
+            .context("Failed to submit text to tmux session")?;
+        if !submit.success() {
+            anyhow::bail!("tmux send-keys (submit) failed for {name}");
         }
         Ok(())
     }
