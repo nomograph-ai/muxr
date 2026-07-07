@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.6.0] (2026-07-07)
+
+Config seam: muxr stops owning the whole config file. Estate/preference data
+becomes drop-in per-repo config, never a muxr rebuild (ADR 0005).
+
+### Added
+- **Per-repo fragment discovery.** `[discovery].roots` -> muxr finds `muxr.toml`
+  fragments at git-repo roots under those namespaces and merges their repos +
+  remotes. Config is drop-in per repo; a repo absent on a machine is simply not
+  discovered (zero cross-machine knowledge). Empty roots (the default) is
+  byte-identical to the pre-3.6 single-file config.
+- **Open `[repos.<name>.ext]` namespace.** Arbitrary TOML muxr carries but never
+  interprets, handed to extensions verbatim (the resolver intent's `ext`, and
+  `muxr config`). Chrome/launcher data is config, not a schema change; core keys
+  keep `deny_unknown_fields` so a typo in `dir`/`color` still fails loud.
+- **`muxr config`.** Prints the merged repos (color + `ext`) as JSON for
+  extensions (statusline, glyph builder) to read instead of hardcoding a repo
+  registry.
+- **`[readiness].stale_busy_secs`** (default 3600). Lower it to reclaim an
+  interrupted-but-quiet session (a `busy` state file with no `idle`) sooner than
+  the hardcoded hour, without a rebuild; reclaim still corroborates against tmux
+  pane activity, so it stays conservative.
+
 ## [3.5.2] (2026-07-07)
 
 ### Fixed
