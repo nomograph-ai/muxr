@@ -123,6 +123,23 @@ pub const DEFAULT_MIN_IDLE_SECS: u64 = 180;
 /// `[readiness].stale_busy_secs` and threaded in as `stale_busy_secs`.
 pub const STALE_BUSY_SECS: u64 = 3600;
 
+/// The `Busy` reason `classify_state_file` returns for a non-idle state file
+/// (a turn the hooks marked busy that has not yet written `idle`). The
+/// interrupt-reclaim corroboration keys on this exact reason to tell an
+/// in-flight turn apart from a post-idle cooldown (`"settling"`).
+pub const BUSY_IN_FLIGHT: &str = "turn in flight";
+
+/// Interrupt-reclaim quiet floor (#12). A `busy` state file that reads
+/// [`BUSY_IN_FLIGHT`] is reclaimed once the tmux pane has been quiet at least
+/// this long (or `min_idle`, whichever is larger). A genuinely in-flight turn
+/// keeps the pane refreshing (elapsed timer / streamed tokens), so a pane quiet
+/// this long means the turn was interrupted and never wrote `idle`. Sized well
+/// above any refresh gap of a live turn so it does not cut one off; it only
+/// floors the SMALL `min_idle` a caller like recycle passes, so an interrupted
+/// session is reclaimed in a couple of minutes instead of waiting out
+/// `stale_busy_secs`.
+pub const INTERRUPT_RECLAIM_QUIET_SECS: u64 = 120;
+
 /// Max wall-clock a `Command` readiness probe may run before it is killed and
 /// the result treated as Unknown (-> floor), so a hung probe can't block muxr.
 pub const PROBE_TIMEOUT_SECS: u64 = 10;
@@ -170,7 +187,7 @@ pub fn classify_state_file(
         {
             return Readiness::Unknown("stale busy (possible crashed session)".to_string());
         }
-        return Readiness::Busy("turn in flight".to_string());
+        return Readiness::Busy(BUSY_IN_FLIGHT.to_string());
     }
     // state == idle_value: enforce the cooldown.
     match (since_key, since) {
@@ -198,7 +215,10 @@ fn now_epoch() -> u64 {
 /// Evaluation order:
 /// 1. If `tool.readiness` is `File` or `Command`, evaluate the probe.
 ///    - `File`: interpolate `{session_id}` (and `{pid}` if resolvable), call
-///      `classify_state_file`. If `Unknown`, fall through to floor.
+///      `classify_state_file`. If `Unknown`, fall through to floor; if
+///      still-busy (in flight), corroborate against pane activity via
+///      `corroborate_busy` so an interrupted-but-quiet turn is reclaimed
+///      instead of blocking until `stale_busy_secs` (#12).
 ///    - `Command`: interpolate, run; exit 0 → `Safe`, non-zero → `Busy`,
 ///      spawn error → fall through to floor.
 /// 2. **Floor** (probe is `None` or returned `Unknown`): compare tmux
@@ -247,7 +267,11 @@ pub fn session_readiness(
                 // Fall through to the floor
                 activity_floor(activity, now, min_idle)
             } else {
-                result
+                // Corroborate a still-busy (in-flight) verdict against pane
+                // activity: reclaim an interrupted-but-quiet turn now rather
+                // than trusting the `busy` file until stale_busy_secs (#12).
+                // Safe / settling verdicts pass through unchanged.
+                corroborate_busy(result, activity, now, min_idle)
             }
         }
         ReadinessProbe::Command(c) => {
@@ -307,6 +331,31 @@ fn activity_floor(activity: Option<u64>, now: u64, min_idle: u64) -> Readiness {
         None => Readiness::Unknown("tmux activity unavailable".to_string()),
         Some(a) if now.saturating_sub(a) >= min_idle => Readiness::Safe,
         Some(_) => Readiness::Busy("recent pane activity".to_string()),
+    }
+}
+
+/// Interrupt-reclaim corroboration (#12). Pure: no tmux, no process deps.
+///
+/// A `busy` state file that reads [`BUSY_IN_FLIGHT`] is trusted ONLY if the
+/// tmux pane still looks active. A genuinely in-flight turn keeps the pane
+/// refreshing (elapsed timer / streamed tokens); a pane quiet for at least
+/// [`INTERRUPT_RECLAIM_QUIET_SECS`] (or `min_idle`, whichever is larger) means
+/// the turn was interrupted and never wrote `idle` -- reclaim it now (Safe)
+/// instead of blocking until `stale_busy_secs`. Every other verdict is returned
+/// unchanged: `Safe`, a post-idle `"settling"` cooldown, or an in-flight file
+/// whose pane is still active (kept `Busy`) or whose activity is unavailable
+/// (kept `Busy`, so `stale_busy_secs` remains the backstop when tmux can't be
+/// read). `Unknown` never reaches here -- the caller floors it directly.
+fn corroborate_busy(verdict: Readiness, activity: Option<u64>, now: u64, min_idle: u64) -> Readiness {
+    match &verdict {
+        Readiness::Busy(reason) if reason == BUSY_IN_FLIGHT => {
+            let quiet = min_idle.max(INTERRUPT_RECLAIM_QUIET_SECS);
+            match activity_floor(activity, now, quiet) {
+                Readiness::Safe => Readiness::Safe,
+                _ => verdict,
+            }
+        }
+        _ => verdict,
     }
 }
 
@@ -571,6 +620,73 @@ impl SavedState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- Interrupt-reclaim corroboration (#12) --
+
+    // now well past any quiet window; activity `Some(a)` gives quiet = now - a.
+    const NOW: u64 = 1_750_000_000;
+
+    #[test]
+    fn corroborate_reclaims_in_flight_when_pane_quiet() {
+        // busy state file (in flight), pane quiet for 200s (> the 120s floor)
+        // with recycle's tiny min_idle=5 -> reclaimed as Safe, not left Busy
+        // until stale_busy_secs.
+        let verdict = super::Readiness::Busy(super::BUSY_IN_FLIGHT.to_string());
+        let out = super::corroborate_busy(verdict, Some(NOW - 200), NOW, 5);
+        assert!(matches!(out, super::Readiness::Safe), "{out:?}");
+    }
+
+    #[test]
+    fn corroborate_keeps_in_flight_when_pane_active() {
+        // busy + pane active 30s ago (< 120s floor) -> stays Busy (a live turn
+        // refreshes the pane, so it must not be reclaimed).
+        let verdict = super::Readiness::Busy(super::BUSY_IN_FLIGHT.to_string());
+        let out = super::corroborate_busy(verdict, Some(NOW - 30), NOW, 5);
+        assert!(
+            matches!(out, super::Readiness::Busy(ref r) if r == super::BUSY_IN_FLIGHT),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn corroborate_keeps_in_flight_when_activity_unavailable() {
+        // busy + activity None -> keep Busy so stale_busy_secs stays the
+        // backstop when tmux activity can't be read (never permissive-reclaim
+        // on missing data).
+        let verdict = super::Readiness::Busy(super::BUSY_IN_FLIGHT.to_string());
+        let out = super::corroborate_busy(verdict, None, NOW, 5);
+        assert!(
+            matches!(out, super::Readiness::Busy(ref r) if r == super::BUSY_IN_FLIGHT),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn corroborate_uses_larger_min_idle_when_it_exceeds_floor() {
+        // upgrade's min_idle=300 exceeds the 120s floor: quiet=200s is NOT
+        // enough to reclaim, so it stays Busy.
+        let verdict = super::Readiness::Busy(super::BUSY_IN_FLIGHT.to_string());
+        let out = super::corroborate_busy(verdict, Some(NOW - 200), NOW, 300);
+        assert!(
+            matches!(out, super::Readiness::Busy(ref r) if r == super::BUSY_IN_FLIGHT),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn corroborate_leaves_settling_and_safe_untouched() {
+        // A post-idle cooldown ("settling") is NOT an interrupted turn: leave
+        // it to expire on its own timer even if the pane reads quiet.
+        let settling = super::Readiness::Busy("settling".to_string());
+        let out = super::corroborate_busy(settling, Some(NOW - 200), NOW, 5);
+        assert!(
+            matches!(out, super::Readiness::Busy(ref r) if r == "settling"),
+            "{out:?}"
+        );
+        // Safe passes through.
+        let out = super::corroborate_busy(super::Readiness::Safe, Some(NOW - 200), NOW, 5);
+        assert!(matches!(out, super::Readiness::Safe), "{out:?}");
+    }
 
     // -- Readiness tests --
 
