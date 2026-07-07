@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.6.2] (2026-07-07)
+
+### Fixed
+- **Interrupted turns stayed `Busy` for up to `stale_busy_secs` (#12).** An
+  interrupted Claude turn fires no `Stop` hook, so the `busy` state file is
+  never cleared to `idle`; the default File probe trusted it until it was an
+  hour old, so `upgrade` skipped the session and `recycle` waited out its full
+  timeout. The default probe now corroborates a still-busy verdict against tmux
+  pane activity (ADR 0007): if the pane has been quiet at least
+  `max(min_idle, 120s)`, the turn was interrupted and the session is reclaimed
+  now instead of blocking until `stale_busy_secs`. Conservative by design -- a
+  live turn keeps the pane refreshing, the 120s floor keeps a briefly-paused
+  recycle flush (which passes a 5s idle window) from being cut off, and when
+  tmux activity is unavailable the verdict stays `Busy` so `stale_busy_secs`
+  remains the backstop. Promotes ADR 0003's opt-in `Command`-probe reclaim into
+  the core default. `settling` and `Safe` verdicts are unchanged.
+
 ## [3.6.1] (2026-07-07)
 
 ### Fixed
