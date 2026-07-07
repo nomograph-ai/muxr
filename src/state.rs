@@ -115,10 +115,12 @@ pub enum Readiness {
 /// considered safe to relaunch. Shared by `muxr upgrade` and `muxr status`.
 pub const DEFAULT_MIN_IDLE_SECS: u64 = 180;
 
-/// A `busy` state file older than this is treated as stale -- a likely crashed
-/// session that fired its busy hook but never wrote `idle` (no `Stop`). Such a
-/// file would otherwise block the session's upgrade forever; instead we fall
-/// through to the floor so tmux activity can resolve it.
+/// Default threshold: a `busy` state file older than this is treated as stale
+/// -- a likely crashed session that fired its busy hook but never wrote `idle`
+/// (no `Stop`). Such a file would otherwise block the session's upgrade forever;
+/// instead we fall through to the floor so tmux activity can resolve it. This is
+/// the DEFAULT only; the effective threshold is configurable via
+/// `[readiness].stale_busy_secs` and threaded in as `stale_busy_secs`.
 pub const STALE_BUSY_SECS: u64 = 3600;
 
 /// Max wall-clock a `Command` readiness probe may run before it is killed and
@@ -128,6 +130,10 @@ pub const PROBE_TIMEOUT_SECS: u64 = 10;
 /// Pure helper that classifies a state file without any tmux or process deps.
 /// Path is tilde-expanded; `{session_id}` in `path` must already be
 /// interpolated by the caller. Returns `Unknown` on any file/parse error.
+///
+/// `stale_busy_secs` is the stale-busy threshold (configurable via
+/// `[readiness].stale_busy_secs`; defaults to [`STALE_BUSY_SECS`]): a `busy`
+/// file older than this reads `Unknown` so the caller falls through to the floor.
 pub fn classify_state_file(
     path: &str,
     state_key: &str,
@@ -135,6 +141,7 @@ pub fn classify_state_file(
     since_key: Option<&str>,
     now: u64,
     min_idle: u64,
+    stale_busy_secs: u64,
 ) -> Readiness {
     let expanded = shellexpand::tilde(path).to_string();
     let content = match std::fs::read_to_string(&expanded) {
@@ -155,11 +162,11 @@ pub fn classify_state_file(
     };
     let since = since_key.and_then(|sk| v.get(sk).and_then(|s| s.as_u64()));
     if state != idle_value {
-        // Stale-busy guard: a `busy` file older than STALE_BUSY_SECS is almost
+        // Stale-busy guard: a `busy` file older than `stale_busy_secs` is almost
         // certainly a crashed session that never wrote `idle`. Return Unknown so
         // the caller falls through to the floor instead of blocking forever.
         if let Some(s) = since
-            && now.saturating_sub(s) > STALE_BUSY_SECS
+            && now.saturating_sub(s) > stale_busy_secs
         {
             return Readiness::Unknown("stale busy (possible crashed session)".to_string());
         }
@@ -197,12 +204,17 @@ fn now_epoch() -> u64 {
 /// 2. **Floor** (probe is `None` or returned `Unknown`): compare tmux
 ///    `session_activity` against `now - min_idle`. Quiet → `Safe`, else
 ///    `Busy("recent pane activity")`.
+///
+/// `stale_busy_secs` (configurable via `[readiness].stale_busy_secs`, default
+/// [`STALE_BUSY_SECS`]) is threaded into `classify_state_file` as the stale-busy
+/// threshold.
 pub fn session_readiness(
     tmux: &Tmux,
     name: &str,
     tool: &Tool,
     session_id: &str,
     min_idle: u64,
+    stale_busy_secs: u64,
     activity: Option<u64>,
 ) -> Readiness {
     let now = now_epoch();
@@ -229,6 +241,7 @@ pub fn session_readiness(
                 p.since_key.as_deref(),
                 now,
                 min_idle,
+                stale_busy_secs,
             );
             if matches!(result, Readiness::Unknown(_)) {
                 // Fall through to the floor
@@ -576,6 +589,7 @@ mod tests {
             Some("since"),
             now,
             20,
+            super::STALE_BUSY_SECS,
         );
         assert!(matches!(result, super::Readiness::Safe), "{result:?}");
     }
@@ -595,6 +609,7 @@ mod tests {
             Some("since"),
             now,
             20,
+            super::STALE_BUSY_SECS,
         );
         assert!(
             matches!(result, super::Readiness::Busy(ref r) if r == "settling"),
@@ -607,8 +622,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state.json");
         std::fs::write(&path, r#"{"state":"busy"}"#).unwrap();
-        let result =
-            super::classify_state_file(path.to_str().unwrap(), "state", "idle", None, 0, 20);
+        let result = super::classify_state_file(
+            path.to_str().unwrap(),
+            "state",
+            "idle",
+            None,
+            0,
+            20,
+            super::STALE_BUSY_SECS,
+        );
         assert!(matches!(result, super::Readiness::Busy(_)), "{result:?}");
     }
 
@@ -621,6 +643,7 @@ mod tests {
             None,
             0,
             20,
+            super::STALE_BUSY_SECS,
         );
         assert!(matches!(result, super::Readiness::Unknown(_)), "{result:?}");
     }
@@ -641,6 +664,7 @@ mod tests {
             Some("since"),
             now,
             20,
+            super::STALE_BUSY_SECS,
         );
         assert!(matches!(result, super::Readiness::Unknown(_)), "{result:?}");
     }
@@ -658,8 +682,70 @@ mod tests {
             Some("since"),
             1_750_000_000,
             20,
+            super::STALE_BUSY_SECS,
         );
         assert!(matches!(result, super::Readiness::Unknown(_)), "{result:?}");
+    }
+
+    #[test]
+    fn classify_state_file_stale_busy_custom_threshold_is_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        // busy file aged 200s. With a lowered stale_busy_secs = 100, 200 > 100
+        // -> stale -> Unknown, so the caller falls through to the floor and can
+        // reclaim the interrupted-but-quiet session sooner.
+        let since: u64 = 1_750_000_000;
+        let now: u64 = since + 200;
+        std::fs::write(&path, format!(r#"{{"state":"busy","since":{since}}}"#)).unwrap();
+        let result = super::classify_state_file(
+            path.to_str().unwrap(),
+            "state",
+            "idle",
+            Some("since"),
+            now,
+            20,
+            100,
+        );
+        assert!(matches!(result, super::Readiness::Unknown(_)), "{result:?}");
+    }
+
+    #[test]
+    fn classify_state_file_busy_default_threshold_stays_busy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        // The SAME 200s-old busy file, but with the default stale_busy_secs =
+        // 3600: 200 < 3600 -> still Busy("turn in flight"). Default behavior is
+        // preserved -- the gate blocks upgrade exactly as pre-3.6.
+        let since: u64 = 1_750_000_000;
+        let now: u64 = since + 200;
+        std::fs::write(&path, format!(r#"{{"state":"busy","since":{since}}}"#)).unwrap();
+        let result = super::classify_state_file(
+            path.to_str().unwrap(),
+            "state",
+            "idle",
+            Some("since"),
+            now,
+            20,
+            super::STALE_BUSY_SECS,
+        );
+        assert!(
+            matches!(result, super::Readiness::Busy(ref r) if r == "turn in flight"),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn readiness_config_default_is_3600() {
+        // Guards the Default-is-not-zero trap: a 0 threshold would make every
+        // busy file instantly stale. Default must equal the const (3600).
+        assert_eq!(
+            crate::config::ReadinessConfig::default().stale_busy_secs,
+            3600
+        );
+        assert_eq!(
+            crate::config::ReadinessConfig::default().stale_busy_secs,
+            super::STALE_BUSY_SECS
+        );
     }
 
     #[test]

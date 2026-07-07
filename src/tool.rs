@@ -119,6 +119,7 @@ pub fn upgrade(
                 tool_def,
                 &session_id,
                 min_idle,
+                config.readiness.stale_busy_secs,
                 activity_map.get(name).copied(),
             ))
         };
@@ -174,6 +175,7 @@ pub fn upgrade(
                     tool_def,
                     &session_id,
                     min_idle,
+                    config.readiness.stale_busy_secs,
                     tmux.session_activity(name),
                 );
                 while !matches!(current, state::Readiness::Safe)
@@ -186,6 +188,7 @@ pub fn upgrade(
                         tool_def,
                         &session_id,
                         min_idle,
+                        config.readiness.stale_busy_secs,
                         tmux.session_activity(name),
                     );
                 }

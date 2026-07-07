@@ -70,6 +70,11 @@ enum Commands {
     /// Generate tmux status-left config from harnesses
     #[command(name = "tmux-status")]
     TmuxStatus,
+    /// Print the merged config as JSON for extensions (statusline, glyph): each
+    /// repo's color + open `ext` namespace. Reflects discovered fragments, so a
+    /// preference (chrome, glyph) lives in config, never compiled into muxr.
+    #[command(name = "config")]
+    Config,
     /// Rename the current session
     Rename {
         /// New name for the current session
@@ -269,6 +274,7 @@ fn main() -> Result<()> {
             state::SavedState::restore(&tmux, &config)
         }
         Some(Commands::TmuxStatus) => cmd_tmux_status(&tmux),
+        Some(Commands::Config) => cmd_config(),
         Some(Commands::Upgrade {
             name,
             tool,
@@ -891,6 +897,7 @@ fn cmd_status(tmux: &Tmux, min_idle: u64) -> Result<()> {
                 t,
                 &session_id,
                 min_idle,
+                config.readiness.stale_busy_secs,
                 activity.get(name).copied(),
             );
             match r {
@@ -918,6 +925,27 @@ fn cmd_status(tmux: &Tmux, min_idle: u64) -> Result<()> {
 
 /// Generate tmux status-left format string from config harnesses.
 /// Used by tmux.conf: set -g status-left "#(muxr tmux-status)"
+/// Print the merged config as JSON for extensions to consume (statusline
+/// glyph/color, glyph builder): `{ "repos": { "<name>": { "color", "ext" } } }`.
+/// `ext` is the repo's open namespace verbatim, so preference data (chrome) is
+/// config muxr carries, never compiled-in. Reflects any discovered fragments.
+fn cmd_config() -> Result<()> {
+    let config = Config::load()?;
+    let mut repos = serde_json::Map::new();
+    for (name, repo) in &config.repos {
+        let mut o = serde_json::Map::new();
+        o.insert(
+            "color".into(),
+            serde_json::Value::String(repo.color.clone()),
+        );
+        o.insert("ext".into(), serde_json::to_value(&repo.ext)?);
+        repos.insert(name.clone(), serde_json::Value::Object(o));
+    }
+    let out = serde_json::json!({ "repos": serde_json::Value::Object(repos) });
+    println!("{}", serde_json::to_string_pretty(&out)?);
+    Ok(())
+}
+
 fn cmd_tmux_status(tmux: &Tmux) -> Result<()> {
     let session_name = tmux.display_message("#{session_name}")?;
 
