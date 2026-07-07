@@ -677,25 +677,6 @@ impl Tool {
         parts.join(" ")
     }
 
-    /// Build the resume command for restore. Uses --continue as fallback
-    /// when session ID is lost.
-    pub fn restore_command(&self, session_name: Option<&str>, resume_id: Option<&str>) -> String {
-        if resume_id.is_some() {
-            return self.launch_command(session_name, resume_id, None);
-        }
-        // No session ID -- fall back to --continue
-        let mut parts = vec![self.bin.clone()];
-        if let Some(name) = session_name {
-            for arg in &self.args {
-                parts.push(interpolate(arg, "name", name));
-            }
-        }
-        for arg in &self.continue_args {
-            parts.push(arg.clone());
-        }
-        parts.join(" ")
-    }
-
     /// Build the launch command with harness-specific settings from the harness.
     ///
     /// If the tool has a `wrapper` set, the final command is
@@ -2045,17 +2026,6 @@ session_discovery = { type = "none" }
         assert!(
             !cmd.contains("--continue"),
             "should not fall back to --continue when session_id is set; got: {cmd}"
-        );
-
-        // Continue/restore case: no session_id -> restore_command falls back to --continue.
-        let restore = tool.restore_command(Some("work/pi"), None);
-        assert!(
-            restore.contains("--continue"),
-            "expected --continue fallback; got: {restore}"
-        );
-        assert!(
-            !restore.contains("--resume"),
-            "no --resume without session id; got: {restore}"
         );
     }
 

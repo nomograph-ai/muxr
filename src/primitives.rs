@@ -98,6 +98,31 @@ pub fn load_log(path: &Path) -> Result<(Log, String)> {
     Ok((log, body.to_string()))
 }
 
+/// Load an OPTIONAL campaign/log file, distinguishing ABSENT from
+/// PRESENT-BUT-UNPARSEABLE.
+///
+/// - Absent file -> `Ok(None)`: a legitimate degrade (e.g. an
+///   archived-but-still-running session whose log body is gone).
+/// - Present + parses -> `Ok(Some(..))`.
+/// - Present but unreadable / unparseable -> `Err`: a one-character
+///   frontmatter typo must FAIL LOUD rather than silently strip a live
+///   session's composed prompt and `--add-dir` paths on the next
+///   recycle/upgrade (issue #11), mirroring the resolver extension's
+///   fail-closed contract. A `stat` that cannot even determine existence
+///   also fails loud rather than being treated as absent.
+pub fn load_optional<T>(
+    path: &Path,
+    load: impl FnOnce(&Path) -> Result<T>,
+) -> Result<Option<T>> {
+    match path.try_exists() {
+        Ok(false) => Ok(None),
+        Ok(true) => load(path).map(Some),
+        Err(e) => {
+            Err(anyhow::Error::new(e).context(format!("cannot stat {}", path.display())))
+        }
+    }
+}
+
 /// Resolve `<repo-dir>/campaigns/<campaign>/campaign.md`, erroring if
 /// the campaign does not exist.
 pub fn campaign_file(layout: &Layout, repo_dir: &Path, campaign: &str) -> Result<PathBuf> {

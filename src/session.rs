@@ -296,13 +296,33 @@ pub(crate) fn cmd_recycle(
     }
     let repo_dir = config.resolve_dir(&repo_name)?;
     let log_md = config.layout.log_md_path(&repo_dir, &campaign);
-    // The campaign's declared work surface: the project repos this session
-    // touches. A flush must reach all of these, not just log.md, or in-flight
-    // work in the project repos is stranded when the session dies.
-    let locales = config.layout.campaign_md_path(&repo_dir, &campaign);
-    let locales = primitives::load_campaign(&locales)
+    let campaign_md = config.layout.campaign_md_path(&repo_dir, &campaign);
+
+    // Fail loud BEFORE the destructive flush+exit+kill (issue #11): if the
+    // campaign or log file EXISTS but its frontmatter is unparseable, refuse
+    // the recycle rather than kill the live session and relaunch it stripped of
+    // its composed prompt and --add-dir paths. An ABSENT file is fine (an
+    // archived-but-running session), so this only trips on genuine corruption.
+    // The `locales` load below also carries the campaign's declared work
+    // surface -- the project repos this session touches -- so the flush reaches
+    // all of them, not just log.md, or in-flight project work is stranded.
+    let locales = primitives::load_optional(&campaign_md, primitives::load_campaign)
+        .with_context(|| {
+            format!(
+                "refusing to recycle {session}: campaign file present but unparseable: {} \
+                 (fix the frontmatter or remove the file)",
+                campaign_md.display()
+            )
+        })?
         .map(|(c, _)| c.paths)
         .unwrap_or_default();
+    primitives::load_optional(&log_md, primitives::load_log).with_context(|| {
+        format!(
+            "refusing to recycle {session}: log file present but unparseable: {} \
+             (fix the frontmatter or remove the file)",
+            log_md.display()
+        )
+    })?;
 
     // Locate the harness process so we can wait for the agent's own exit as
     // the "flush complete" signal, rather than guessing a wall-clock delay.
@@ -778,20 +798,35 @@ pub(crate) fn compose_launch_command(
     // paths and the composed prompt on top.
     let mut settings = repo.map(|v| v.launch.clone()).unwrap_or_default();
 
-    // Campaign and log files are loaded best-effort. A relaunch must keep
-    // the repo-level prompt and campaign --add-dir paths even when the log
-    // body file is missing -- e.g. an archived-but-still-running session.
-    // Without this an in-place upgrade of such a session would silently drop
-    // its HARNESS rules and working dirs. Missing or unparseable files
-    // degrade the composition (empty body / no campaign paths) instead of
-    // failing the whole relaunch. Genuinely fatal errors (unknown repo,
-    // unparseable slug) are still surfaced above, so callers keep their
-    // name+resume fallback for the truly-unrecoverable case.
+    // Campaign and log files distinguish ABSENT from PRESENT-BUT-UNPARSEABLE.
+    // A relaunch must keep the repo-level prompt and campaign --add-dir paths
+    // even when the log/campaign file is MISSING -- e.g. an archived-but-still-
+    // running session; that degrades cleanly (empty body / no campaign paths).
+    // But a file that EXISTS and fails to parse (a one-character frontmatter
+    // typo) must FAIL LOUD, not silently strip a live session's HARNESS rules
+    // and working dirs on the next recycle/upgrade (issue #11) -- consistent
+    // with the resolver extension's fail-closed contract. Genuinely fatal
+    // errors (unknown repo, unparseable slug) are surfaced above.
     let (campaign_data, campaign_body) =
-        primitives::load_campaign(&campaign_md).unwrap_or_default();
+        primitives::load_optional(&campaign_md, primitives::load_campaign)
+            .with_context(|| {
+                format!(
+                    "campaign file present but unparseable: {} \
+                     (fix the frontmatter or remove the file)",
+                    campaign_md.display()
+                )
+            })?
+            .unwrap_or_default();
     // Only the entrypoint (the movable pointer) goes inline; the full log body
     // stays on disk and is pointed at, not snapshotted into the prompt.
-    let entrypoint = primitives::load_log(&log_path)
+    let entrypoint = primitives::load_optional(&log_path, primitives::load_log)
+        .with_context(|| {
+            format!(
+                "log file present but unparseable: {} \
+                 (fix the frontmatter or remove the file)",
+                log_path.display()
+            )
+        })?
         .map(|(log, _)| log.entrypoint)
         .unwrap_or_default();
 

@@ -131,31 +131,31 @@ pub fn upgrade(
         };
         let is_safe = matches!(readiness, None | Some(state::Readiness::Safe));
 
-        // Compose the FULL relaunch (system prompt + campaign add-dirs + resume),
-        // falling back to a bare name+resume if the campaign/session files can't
-        // be composed. Deferred behind a closure: in a live run we compose AFTER
-        // sending the exit (off the readiness->exit TOCTOU path), and we skip
-        // composing entirely for a dry-run that would skip.
-        let compose = || match crate::session::compose_launch_command(
-            config,
-            name,
-            Some(&session_id),
-            model,
-            false,
-        ) {
-            Ok((cmd, _)) => cmd,
-            Err(e) => {
-                eprintln!("    full compose failed ({e}); relaunching name+resume only");
-                tool_def.launch_command(Some(name), Some(&session_id), model)
-            }
+        // Compose the FULL relaunch (system prompt + campaign add-dirs + resume).
+        // A MISSING campaign/log file degrades cleanly inside compose (an
+        // archived-but-running session keeps its repo prompt + resume); a file
+        // that EXISTS but is unparseable returns Err and we SKIP the session
+        // loud rather than exit + relaunch it stripped of its rules (issue #11).
+        // Deferred behind a closure so a dry-run that would skip never composes.
+        let compose = || {
+            crate::session::compose_launch_command(config, name, Some(&session_id), model, false)
+                .map(|(cmd, _)| cmd)
         };
 
         if dry_run {
             // Never poll/sleep in a dry run; report the live verdict + decision.
             if is_safe {
-                eprintln!("  {name}: would upgrade (session {session_id}) [{verdict}]");
-                eprintln!("    -> {}", compose());
-                upgraded += 1;
+                match compose() {
+                    Ok(cmd) => {
+                        eprintln!("  {name}: would upgrade (session {session_id}) [{verdict}]");
+                        eprintln!("    -> {cmd}");
+                        upgraded += 1;
+                    }
+                    Err(e) => {
+                        eprintln!("  {name}: would skip — compose failed: {e:#}");
+                        skipped += 1;
+                    }
+                }
             } else {
                 eprintln!("  {name}: would skip [{verdict}]");
                 skipped += 1;
@@ -204,9 +204,21 @@ pub fn upgrade(
             }
         }
 
-        // CONFIRMED SAFE. Find the harness pid, then send the exit IMMEDIATELY --
-        // before the slower compose -- to shrink the window between the readiness
-        // check and the relaunch trigger (TOCTOU).
+        // CONFIRMED SAFE. Compose the relaunch FIRST: a present-but-unparseable
+        // campaign/log must SKIP this session loud -- never exit it and relaunch
+        // stripped of its composed prompt (issue #11). We accept the small extra
+        // latency before the exit (a marginally wider readiness->exit TOCTOU
+        // window) as the correct trade against silently de-fanging a live
+        // session; the exit still precedes the slow wait-for-exit + relaunch.
+        let cmd = match compose() {
+            Ok(cmd) => cmd,
+            Err(e) => {
+                eprintln!("  {name}: skipping — compose failed: {e:#}");
+                skipped += 1;
+                continue;
+            }
+        };
+
         eprintln!("  {name}: upgrading (session {session_id})");
         let shell_pid = tmux.pane_pid(name).ok().flatten();
         let harness_pid = shell_pid.and_then(|sp| {
@@ -225,9 +237,6 @@ pub fn upgrade(
         let exit_cmd = tool_def.exit_command.as_deref().unwrap_or("/exit");
         let target = Tmux::target(name);
         tmux.send_keys(&target, exit_cmd);
-
-        // Compose the relaunch WHILE the session is exiting (off the TOCTOU path).
-        let cmd = compose();
 
         // Wait for exit (up to 10s, then SIGKILL), then the shell prompt.
         if let Some(pid) = harness_pid {
