@@ -50,15 +50,17 @@ impl Tmux {
         Some(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
-    /// Last-activity epoch for a single session (None if not found / tmux error).
-    /// For a fresh per-poll read; for a sweep, fetch `list_sessions_detailed`
-    /// once and index it instead.
-    pub fn session_activity(&self, name: &str) -> Option<u64> {
+    /// Last PANE-OUTPUT epoch (`window_activity`) for a single session (None if
+    /// not found / tmux error). This is the readiness signal: it advances while
+    /// an agent produces output, unlike `session_activity` (client interaction),
+    /// which is frozen for an unattended working session. For a fresh per-poll
+    /// read; for a sweep, fetch `list_sessions_detailed` once and index it.
+    pub fn output_activity(&self, name: &str) -> Option<u64> {
         self.list_sessions_detailed()
             .ok()?
             .into_iter()
             .find(|s| s.name == name)
-            .map(|s| s.activity)
+            .map(|s| s.window_activity)
     }
 
     /// Format a session name as a tmux target.
@@ -259,7 +261,7 @@ impl Tmux {
             .args([
                 "list-sessions",
                 "-F",
-                "#{session_name}|#{session_path}|#{session_activity}",
+                "#{session_name}|#{session_path}|#{session_activity}|#{window_activity}",
             ])
             .output()
             .context("Failed to list tmux sessions")?;
@@ -272,12 +274,13 @@ impl Tmux {
         let sessions = stdout
             .lines()
             .filter_map(|line| {
-                let parts: Vec<&str> = line.splitn(3, '|').collect();
-                if parts.len() == 3 {
+                let parts: Vec<&str> = line.splitn(4, '|').collect();
+                if parts.len() == 4 {
                     Some(SessionInfo {
                         name: parts[0].to_string(),
                         path: parts[1].to_string(),
                         activity: parts[2].parse().unwrap_or(0),
+                        window_activity: parts[3].parse().unwrap_or(0),
                     })
                 } else {
                     None
@@ -357,7 +360,16 @@ pub struct SessionInfo {
     pub name: String,
     #[allow(dead_code)]
     pub path: String,
+    /// `#{session_activity}`: time of last CLIENT interaction with the session
+    /// (keystroke / attach / switch). Used by the switcher for recency sort.
+    /// NOT a signal of agent work -- it stays frozen while an unattended agent
+    /// streams output (see `output_activity` / readiness).
     pub activity: u64,
+    /// `#{window_activity}`: time of last PANE OUTPUT in the session's active
+    /// window. This DOES advance while an agent is producing output (even
+    /// detached/headless), so it is the signal the readiness gate uses to tell
+    /// a working turn from an interrupted/idle one.
+    pub window_activity: u64,
 }
 
 #[cfg(test)]

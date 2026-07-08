@@ -3,7 +3,7 @@
 - Status: Accepted
 - Date: 2026-07-07
 - Relates to: [ADR 0001](0001-extension-architecture.md), [ADR 0002](0002-readiness-gated-upgrade.md), [ADR 0003](0003-reclaim-interrupted-sessions.md), nomograph/muxr#12
-- Implemented in: 3.6.2
+- Implemented in: 3.6.2; **corroboration signal corrected in 3.6.3** (see "The signal" below)
 
 ## Context
 
@@ -12,7 +12,7 @@ trusts a `busy` state file until it is older than `stale_busy_secs` (default
 1 h). The flag is written by turn-boundary hooks (`UserPromptSubmit` /
 `PreToolUse` -> `busy`, `Stop` -> `idle`). An INTERRUPTED turn fires no `Stop`,
 so `busy` is never cleared: `classify_state_file` returns `Busy` and
-`session_readiness` returns it directly, never consulting the tmux-activity
+`session_readiness` returns it directly, never consulting the pane-activity
 floor. For up to an hour `upgrade` skips the session and `recycle` waits out its
 timeout (#12).
 
@@ -32,6 +32,30 @@ and if the pane has been quiet at least `max(min_idle, INTERRUPT_RECLAIM_QUIET_S
 the turn is treated as interrupted and reclaimed (`Safe`). A genuinely in-flight
 turn keeps the pane refreshing (elapsed timer / streamed tokens), so a pane
 quiet that long is not a live turn.
+
+## The signal: `window_activity`, not `session_activity` (corrected in 3.6.3)
+
+3.6.2 fed the corroboration from `#{session_activity}`, and a live simulation
+found that unsafe. `#{session_activity}` is the time of last CLIENT interaction
+(keystroke / attach / switch) with a session -- it does NOT advance while an
+unattended agent streams output. Verified against a real muxr session actively
+rendering: its `session_activity` stayed frozen for 800+ s. So 3.6.2 would have
+seen a working-but-unattended session as "quiet" and reclaimed (killed) its live
+turn once it ran past the window -- a regression against 3.6.1, which never
+touched a `busy` session.
+
+3.6.3 reads `#{window_activity}` instead: the time of last PANE OUTPUT in the
+session's active window, which DOES advance while an agent produces output (even
+detached/headless -- confirmed by simulation). `now - window_activity` is
+therefore a true "seconds since the agent last emitted output": ~0 during a live
+turn (the elapsed-time counter ticks every second), and it grows once the turn
+is interrupted or idle. The switcher keeps using `session_activity` for its
+recency sort (last time YOU touched the session); only the readiness gate moved
+to `window_activity`. This also repairs muxr's activity floor generally, not just
+the #12 corroboration -- the floor was reading the interaction signal all along.
+
+(A companion pane's output also counts toward `window_activity`, keeping such a
+session `Busy` a bit longer -- an error in the safe direction.)
 
 ## Consequences
 

@@ -393,7 +393,7 @@ pub(crate) fn cmd_recycle(
                         &sid,
                         RECYCLE_IDLE_SECS,
                         config.readiness.stale_busy_secs,
-                        tmux.session_activity(&session),
+                        tmux.output_activity(&session),
                     );
                     if matches!(ready, state::Readiness::Safe) {
                         break;

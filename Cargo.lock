@@ -557,7 +557,7 @@ dependencies = [
 
 [[package]]
 name = "nomograph-muxr"
-version = "3.6.2"
+version = "3.6.3"
 dependencies = [
  "anyhow",
  "clap",

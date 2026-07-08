@@ -61,7 +61,10 @@ pub fn upgrade(
         .list_sessions_detailed()
         .unwrap_or_default()
         .into_iter()
-        .map(|s| (s.name, s.activity))
+        // Readiness reads window_activity (pane output), not session_activity
+        // (client interaction) -- the latter is frozen for an unattended
+        // working session, which would mis-reclaim it (#12).
+        .map(|s| (s.name, s.window_activity))
         .collect();
 
     for (name, _path) in &sessions {
@@ -176,7 +179,7 @@ pub fn upgrade(
                     &session_id,
                     min_idle,
                     config.readiness.stale_busy_secs,
-                    tmux.session_activity(name),
+                    tmux.output_activity(name),
                 );
                 while !matches!(current, state::Readiness::Safe)
                     && std::time::Instant::now() < deadline
@@ -189,7 +192,7 @@ pub fn upgrade(
                         &session_id,
                         min_idle,
                         config.readiness.stale_busy_secs,
-                        tmux.session_activity(name),
+                        tmux.output_activity(name),
                     );
                 }
                 if !matches!(current, state::Readiness::Safe) {

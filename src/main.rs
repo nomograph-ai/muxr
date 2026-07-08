@@ -870,11 +870,13 @@ fn cmd_status(tmux: &Tmux, min_idle: u64) -> Result<()> {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     // One tmux round-trip for activity timestamps, reused for every row.
+    // Readiness uses window_activity (pane output), not session_activity
+    // (client interaction) -- see Tmux::output_activity (#12).
     let activity: std::collections::HashMap<String, u64> = tmux
         .list_sessions_detailed()
         .unwrap_or_default()
         .into_iter()
-        .map(|s| (s.name, s.activity))
+        .map(|s| (s.name, s.window_activity))
         .collect();
 
     let mut any = false;
