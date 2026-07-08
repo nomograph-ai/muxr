@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.6.3] (2026-07-07)
+
+### Fixed
+- **Readiness read the wrong activity signal, making the 3.6.2 interrupt-reclaim
+  unsafe (#12).** 3.6.2 corroborated a `busy` state file against
+  `#{session_activity}`, which is the time of last CLIENT interaction (keystroke
+  / attach), NOT agent output -- it stays frozen while an unattended agent
+  streams a turn (verified: a live muxr session actively rendering showed
+  `session_activity` frozen for 800+ s). So 3.6.2 could reclaim (kill) a
+  working-but-unattended session once its turn ran past the quiet window. The
+  readiness gate now reads `#{window_activity}` (last PANE OUTPUT in the active
+  window), which advances while an agent produces output, even detached: a live
+  turn reads quiet ~0 s (kept `Busy`), an interrupted one grows past the window
+  (reclaimed). Simulated both directions on real Claude Code 2.1.202 before
+  shipping. The switcher keeps `session_activity` for its recency sort; only
+  readiness moved. This also repairs muxr's activity floor generally. ADR 0007.
+
 ## [3.6.2] (2026-07-07)
 
 ### Fixed
