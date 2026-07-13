@@ -7,6 +7,15 @@ use std::sync::OnceLock;
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    /// Config schema version. Absent = the current baseline (treated as
+    /// [`MAX_SCHEMA_VERSION`]). A value GREATER than this binary's
+    /// `MAX_SCHEMA_VERSION` makes muxr fail loud with "upgrade muxr" BEFORE the
+    /// strict `deny_unknown_fields` parse trips on the newer schema's fields
+    /// (see `check_schema_version`). Introduced in 3.7.0 as the forward-compat
+    /// floor: only meaningful once every machine is >= 3.7.0 (older binaries
+    /// have no pre-parse and hard-fail on the field itself).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_version: Option<u32>,
     #[serde(default = "default_tool")]
     pub default_tool: String,
     // Defaults to empty so a fresh `muxr init` config (no repos yet) parses;
@@ -828,9 +837,8 @@ pub fn interpolate_raw(template: &str, key: &str, value: &str) -> String {
 fn read_and_join(paths: &[String], bin: &str) -> Result<String> {
     let mut parts = Vec::with_capacity(paths.len());
     for path in paths {
-        let content = std::fs::read_to_string(path).with_context(|| {
-            format!("failed to read system-prompt file at {path} for tool {bin}")
-        })?;
+        let content = crate::primitives::read_text(std::path::Path::new(path))
+            .with_context(|| format!("system-prompt file for tool {bin}"))?;
         parts.push(content);
     }
     Ok(parts.join("\n\n"))
@@ -904,6 +912,46 @@ impl Remote {
     }
 }
 
+/// The highest config `schema_version` THIS binary understands. A config or
+/// fragment declaring a higher version is from a newer muxr and this binary
+/// cannot parse it safely, so we fail loud (see `check_schema_version`) rather
+/// than let the strict parse surface a cryptic unknown-field error. Bump this
+/// in lockstep with any BREAKING schema change (Phase 3 / v4.0.0 will be the
+/// first bump, to 2). Absent `schema_version` in a config is treated as this
+/// value -- the current baseline -- so existing unversioned configs are fine.
+pub const MAX_SCHEMA_VERSION: u32 = 1;
+
+/// Lenient pre-parse probe: extracts ONLY `schema_version`, ignoring every
+/// other (possibly newer, unknown) field. Deliberately NOT `deny_unknown_fields`
+/// so a v4 fragment full of fields this binary has never heard of still yields
+/// its version number.
+#[derive(Deserialize)]
+struct SchemaProbe {
+    #[serde(default)]
+    schema_version: Option<u32>,
+}
+
+/// Fail loud, BEFORE the strict parse, if `content` declares a `schema_version`
+/// newer than this binary supports. This must run first: otherwise the strict
+/// `deny_unknown_fields` parse trips on the newer schema's fields and reports a
+/// baffling "unknown field" instead of the actionable "upgrade muxr". A probe
+/// that cannot even parse the TOML is ignored here so the strict parse owns that
+/// error. No-op for unversioned or <= MAX configs (the whole existing population).
+fn check_schema_version(content: &str, source: &str) -> Result<()> {
+    if let Ok(probe) = toml::from_str::<SchemaProbe>(content)
+        && let Some(v) = probe.schema_version
+        && v > MAX_SCHEMA_VERSION
+    {
+        anyhow::bail!(
+            "{source} declares schema_version {v}, but this muxr ({}) supports up to \
+             schema_version {MAX_SCHEMA_VERSION}.\nUpgrade muxr and retry \
+             (the config uses a newer schema than this binary understands).",
+            env!("CARGO_PKG_VERSION"),
+        );
+    }
+    Ok(())
+}
+
 impl Config {
     pub fn load() -> Result<Self> {
         let path = Self::path()?;
@@ -913,8 +961,7 @@ impl Config {
                 path.display()
             );
         }
-        let content = std::fs::read_to_string(&path)
-            .with_context(|| format!("Failed to read {}", path.display()))?;
+        let content = crate::primitives::read_text(&path)?;
         let mut config = Self::parse(&content, &path.display().to_string())?;
         config.discover_and_merge()?;
         Ok(config)
@@ -930,6 +977,7 @@ impl Config {
     /// "unknown repo"). On parse failure we enrich the serde error with a rename
     /// hint when the raw TOML still uses a known-old key.
     pub fn parse(content: &str, source: &str) -> Result<Self> {
+        check_schema_version(content, source)?;
         let config: Config = toml::from_str(content).map_err(|e| {
             let base = format!("Failed to parse {source}:\n{e}");
             match rename_hint(content) {
@@ -970,6 +1018,7 @@ impl Config {
     /// validated only after the full merge (`check_collisions` at the end of
     /// `discover_and_merge`), since collisions are a whole-config property.
     fn parse_fragment(content: &str, source: &str) -> Result<Self> {
+        check_schema_version(content, source)?;
         toml::from_str(content).map_err(|e| {
             let base = format!("Failed to parse fragment {source}:\n{e}");
             match rename_hint(content) {
@@ -1034,9 +1083,24 @@ impl Config {
 
         for fragment in &fragments {
             let source = fragment.display().to_string();
-            let content = std::fs::read_to_string(fragment)
-                .with_context(|| format!("Failed to read fragment {source}"))?;
+            let content = crate::primitives::read_text(fragment)?;
             let parsed = Self::parse_fragment(&content, &source)?;
+            // A fragment carries ONLY repos/remotes across the discovery
+            // boundary. Any OTHER top-level key parsed fine (it's a known Config
+            // field) but is silently INEFFECTIVE here -- WARN so a mistakenly
+            // repo-scoped hooks/tools/extensions block is visible instead of
+            // silently dropped. (Phase 3 / v4.0.0 will hard-error this; warning
+            // first is the additive, non-breaking step.)
+            if let Ok(table) = toml::from_str::<toml::Table>(&content) {
+                for key in table.keys() {
+                    if !matches!(key.as_str(), "repos" | "remotes" | "schema_version") {
+                        crate::ui::warn(&format!(
+                            "fragment {source}: top-level `{key}` is ignored -- discovery \
+                             merges only [repos.*] and [remotes.*] from a fragment"
+                        ));
+                    }
+                }
+            }
             // Only repos and remotes cross the fragment boundary.
             for (name, repo) in parsed.repos {
                 if self.repos.contains_key(&name) {
@@ -1490,6 +1554,54 @@ session_discovery = { type = "none" }
         let config: Config = toml::from_str("[repos]").unwrap();
         assert_eq!(config.default_tool, "claude");
         assert!(config.tools.is_empty());
+    }
+
+    #[test]
+    fn schema_version_absent_or_current_parses() {
+        // The whole existing population is unversioned -> must parse.
+        assert!(Config::parse("[repos]\n", "<test>").is_ok());
+        // An explicit current version parses too.
+        let c = Config::parse(
+            &format!("schema_version = {MAX_SCHEMA_VERSION}\n[repos]\n"),
+            "<test>",
+        )
+        .unwrap();
+        assert_eq!(c.schema_version, Some(MAX_SCHEMA_VERSION));
+    }
+
+    #[test]
+    fn schema_version_too_new_fails_loud_with_upgrade_hint() {
+        let too_new = MAX_SCHEMA_VERSION + 1;
+        // A newer schema WITH a field this binary has never heard of: the schema
+        // check must win over deny_unknown_fields so the operator is told to
+        // upgrade muxr, not handed a cryptic "unknown field" error.
+        let err = Config::parse(
+            &format!("schema_version = {too_new}\nsome_v_next_field = true\n[repos]\n"),
+            "<cfg>",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("schema_version"), "names the cause: {err}");
+        assert!(err.contains("muxr"), "tells them to upgrade muxr: {err}");
+        assert!(
+            !err.contains("unknown field"),
+            "not the cryptic serde error: {err}"
+        );
+    }
+
+    #[test]
+    fn fragment_too_new_schema_fails_loud() {
+        let too_new = MAX_SCHEMA_VERSION + 1;
+        let err = Config::parse_fragment(
+            &format!("schema_version = {too_new}\n[repos.x]\ndir = \"~/x\"\ncolor = \"#111\"\n"),
+            "frag.toml",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("schema_version") && err.contains("muxr"),
+            "{err}"
+        );
     }
 
     #[test]

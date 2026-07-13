@@ -100,7 +100,7 @@ pub(crate) fn cmd_open(
     let resume_id = if fresh {
         None
     } else {
-        state::SavedState::session_id_for(&session_name)
+        state::SavedState::session_id_for(&session_name)?
     };
 
     // Build the launch command through the single composer (the one place that
@@ -419,11 +419,19 @@ pub(crate) fn cmd_recycle(
         }
     }
 
+    // Compose the relaunch BEFORE the destructive kill (issue #11 class). The
+    // harness prompt files are read inside compose_launch_command, and since
+    // 3.7.0 a missing/unreadable one FAILS LOUD -- doing that AFTER kill_session
+    // would destroy the session and then fail to relaunch it. The log is already
+    // flushed above, so composing here uses the updated pointer; a compose
+    // failure now leaves the exited-but-unkilled session recoverable, matching
+    // `upgrade`'s compose-before-exit invariant.
+    let (tool_cmd, session_dir) = compose_launch_command(&config, &session, None, None, false)?;
+
     // Clean slate, then recreate fresh from the (now-updated) pointer.
     if tmux.session_exists(&session) {
         tmux.kill_session(&session)?;
     }
-    let (tool_cmd, session_dir) = compose_launch_command(&config, &session, None, None, false)?;
     config.run_pre_create_hooks(&session_dir);
     tmux.create_session(
         &session,
@@ -866,12 +874,16 @@ pub(crate) fn compose_launch_command(
         } else {
             repo_dir.join(&expanded)
         };
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            if !harness_md_content.is_empty() {
-                harness_md_content.push_str("\n\n");
-            }
-            harness_md_content.push_str(text.trim_end());
+        // Fail LOUD if a CONFIGURED prompt file (append_system_prompt_file[s])
+        // is missing or unreadable: silently skipping it composes a live session
+        // with a truncated system prompt (no HARNESS rules), the exact silent
+        // degrade #11 was about. A prompt file the operator named must exist.
+        let text = primitives::read_text(&path)
+            .with_context(|| format!("configured harness prompt file {file:?}"))?;
+        if !harness_md_content.is_empty() {
+            harness_md_content.push_str("\n\n");
         }
+        harness_md_content.push_str(text.trim_end());
     }
 
     let full_prompt = if harness_md_content.trim().is_empty() {

@@ -37,3 +37,15 @@ check-symlinks:
     - apk add --no-cache bash git
   script:
     - bash scripts/check-symlinks.sh
+
+# Enforce the single file-read invariant: every production file read routes
+# through src/primitives.rs (read_text / load_optional / load_campaign /
+# load_log), so a new ad-hoc `fs::read_to_string().ok()` (the silent-degrade
+# class behind #10/#11) fails the pipeline. Test code reads freely.
+lint-reads:
+  stage: lint
+  image: alpine:3.24
+  before_script:
+    - apk add --no-cache bash
+  script:
+    - bash scripts/lint-reads.sh

@@ -78,9 +78,20 @@ impl crate::config::Layout {
 }
 
 
+/// The SOLE raw file-read primitive. Every production file read routes through
+/// here (directly, or via `load_optional` / `load_campaign` / `load_log`), so
+/// `fs::read_to_string` appears nowhere else in the crate outside tests -- the
+/// dev lint `scripts/lint-reads.sh` enforces it. Centralizing the read is what
+/// lets each call site state its fail-loud-vs-degrade intent EXPLICITLY (`?` to
+/// fail loud, a deliberate `.ok()` for a best-effort probe, `load_optional` to
+/// split absent from present-but-broken) instead of the ad-hoc
+/// `read_to_string(..).ok()` sites that silently swallowed real errors (#10/#11).
+pub fn read_text(path: &Path) -> Result<String> {
+    fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))
+}
+
 pub fn load_campaign(path: &Path) -> Result<(Campaign, String)> {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("Failed to read campaign file: {}", path.display()))?;
+    let content = read_text(path)?;
     let (fm, body) = split_frontmatter(&content)
         .with_context(|| format!("No YAML frontmatter in {}", path.display()))?;
     let campaign: Campaign = serde_yaml_ng::from_str(fm)
@@ -89,8 +100,7 @@ pub fn load_campaign(path: &Path) -> Result<(Campaign, String)> {
 }
 
 pub fn load_log(path: &Path) -> Result<(Log, String)> {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("Failed to read log file: {}", path.display()))?;
+    let content = read_text(path)?;
     let (fm, body) = split_frontmatter(&content)
         .with_context(|| format!("No YAML frontmatter in {}", path.display()))?;
     let log: Log = serde_yaml_ng::from_str(fm)
@@ -175,16 +185,20 @@ pub fn list_campaigns(layout: &Layout, repo_dir: &Path) -> Result<Vec<CampaignIn
             continue; // archived campaigns are hidden from the launcher
         }
         let md = layout.campaign_md_path(repo_dir, &name);
-        // Best-effort: a dir without a parseable campaign.md isn't a campaign
-        // we can launch, so skip it rather than failing the whole scan.
-        let Ok((campaign, _body)) = load_campaign(&md) else {
-            continue;
-        };
-        out.push(CampaignInfo {
-            name,
-            category: campaign.category,
-            sharded_from: campaign.sharded_from,
-        });
+        // Split absent from present-but-broken (load_optional's contract): a dir
+        // with NO campaign.md isn't an onboarded campaign -> skip silently. A
+        // campaign.md that EXISTS but won't parse is a broken onboarded campaign
+        // -> WARN loudly so it can't silently VANISH from the chooser, but don't
+        // abort the whole scan for one typo (the chooser stays usable).
+        match load_optional(&md, load_campaign) {
+            Ok(Some((campaign, _body))) => out.push(CampaignInfo {
+                name,
+                category: campaign.category,
+                sharded_from: campaign.sharded_from,
+            }),
+            Ok(None) => {} // no campaign.md here -- not an onboarded campaign
+            Err(e) => crate::ui::warn(&format!("skipping campaign '{name}': {e:#}")),
+        }
     }
 
     out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -843,6 +857,24 @@ mod tests {
         let campaigns = list_campaigns(repo_dir).unwrap();
         assert_eq!(campaigns.len(), 1);
         assert_eq!(campaigns[0].name, "real");
+    }
+
+    #[test]
+    fn list_campaigns_skips_unparseable_campaign_md_without_aborting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_dir = tmp.path();
+        scaffold_campaign_stub(repo_dir, "good").unwrap();
+        // A PRESENT campaign.md with no frontmatter is unparseable. It must not
+        // abort the whole scan (one typo can't break the chooser) and must not
+        // silently masquerade as a launchable campaign -- it is skipped (and
+        // warned about via ui::warn, to stderr, so it does not silently vanish).
+        fs::create_dir_all(campaign_dir(repo_dir, "broken")).unwrap();
+        fs::write(campaign_md_path(repo_dir, "broken"), "no frontmatter at all\n").unwrap();
+
+        let campaigns =
+            list_campaigns(repo_dir).expect("scan does not abort on one broken campaign");
+        let names: Vec<&str> = campaigns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["good"], "broken campaign skipped, good one still listed");
     }
 
     #[test]

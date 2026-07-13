@@ -2,6 +2,52 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.7.0] (unreleased)
+
+Additive, non-breaking guardrails against the silent-degrade and config-skew
+pain classes (muxr v4 program, Phase 2). Safe to roll to every machine via the
+`mise.toml` pin; no config change required.
+
+### Added
+- **`schema_version` forward-compat floor.** A config or fragment may declare
+  `schema_version = N`; a lenient pre-parse runs BEFORE the strict
+  `deny_unknown_fields` parse, so a config from a newer muxr fails loud with an
+  actionable "upgrade muxr" message naming the file, instead of a cryptic
+  "unknown field" on whatever new key it carries. This binary supports up to
+  `MAX_SCHEMA_VERSION = 1`; absent/`1` configs (the entire existing population)
+  are unaffected. Only coherent from 3.7.0 forward -- older binaries have no
+  pre-parse -- so it is the floor a future breaking schema (v4) gates on.
+- **Read-path lint (`scripts/lint-reads.sh`, CI `lint-reads`).** Enforces that
+  every production file read routes through `primitives` so a new ad-hoc
+  `fs::read_to_string(..).ok()` (the silent-degrade class behind #10/#11) fails
+  the pipeline. Test code reads freely.
+- **Discovery warns on ignored fragment keys.** A per-repo `muxr.toml` that
+  declares anything beyond `[repos.*]`/`[remotes.*]` (e.g. a mistakenly
+  repo-scoped `[hooks]`) now warns that the key is ignored, instead of silently
+  dropping it. (v4 will hard-error it; warning first is non-breaking.)
+
+### Fixed
+- **`primitives::read_text` is the single file-read path.** Every production
+  read (config, fragments, state.json, campaign/log, harness prompt files, the
+  remote IP cache) routes through it, so the fail-loud-vs-degrade decision is
+  explicit at each call site rather than smeared across ad-hoc
+  `read_to_string(..).ok()` that swallowed real errors.
+- **Corrupt `state.json` no longer silently cold-launches (`session_id_for`).**
+  It was swallowed as "no resume id", relaunching a live session COLD (losing
+  the conversation) exactly when `--resume` recovery matters. A corrupt state
+  file now fails loud; a genuinely absent one still cold-starts normally.
+- **A missing/unreadable CONFIGURED harness prompt file now fails loud.** The
+  compose path silently skipped an unreadable `append_system_prompt_file[s]`
+  entry, composing a live session with a truncated system prompt (no HARNESS
+  rules) -- the #11 degrade. It now errors, naming the file. Crucially,
+  `recycle` composes the relaunch BEFORE it kills the old session, so a
+  compose failure leaves the exited session recoverable instead of destroying
+  it (matching `upgrade`'s compose-before-exit invariant).
+- **An unparseable `campaign.md` no longer silently vanishes from the chooser.**
+  `list_campaigns` warns loudly and skips a present-but-broken campaign (naming
+  it) rather than dropping it silently, without aborting the whole scan for one
+  typo.
+
 ## [3.6.3] (2026-07-07)
 
 ### Fixed

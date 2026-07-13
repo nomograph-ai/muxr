@@ -69,7 +69,10 @@ fn read_session_id_from_file(pid: u32, pattern: &str, id_key: &str) -> Option<St
     let expanded = shellexpand::tilde(pattern).to_string();
     let path = expanded.replace("{pid}", &pid.to_string());
 
-    let content = std::fs::read_to_string(&path).ok()?;
+    // Deliberate best-effort probe: this is tried against EVERY descendant PID,
+    // most of which have no session file (absent) or an unrelated one -- a read
+    // error here means "not this PID", so `.ok()` degrades to skip, by design.
+    let content = crate::primitives::read_text(std::path::Path::new(&path)).ok()?;
     let v: serde_json::Value = serde_json::from_str(&content).ok()?;
     v.get(id_key)
         .and_then(|s| s.as_str())
@@ -161,9 +164,9 @@ pub fn classify_state_file(
     stale_busy_secs: u64,
 ) -> Readiness {
     let expanded = shellexpand::tilde(path).to_string();
-    let content = match std::fs::read_to_string(&expanded) {
+    let content = match crate::primitives::read_text(std::path::Path::new(&expanded)) {
         Ok(c) => c,
-        Err(e) => return Readiness::Unknown(format!("cannot read {expanded}: {e}")),
+        Err(e) => return Readiness::Unknown(format!("cannot read {expanded}: {e:#}")),
     };
     let v: serde_json::Value = match serde_json::from_str(&content) {
         Ok(v) => v,
@@ -427,7 +430,7 @@ impl SavedState {
                 sessions: Vec::new(),
             });
         }
-        let content = std::fs::read_to_string(&path)?;
+        let content = crate::primitives::read_text(&path)?;
         let state: SavedState = serde_json::from_str(&content)
             .with_context(|| format!("Failed to parse {}", path.display()))?;
         Ok(state)
@@ -437,13 +440,17 @@ impl SavedState {
     /// This is what makes a dormant campaign resumable: `muxr save` records
     /// each running session's id here, and `open` consults it to relaunch
     /// with `--resume` instead of starting a cold conversation.
-    pub fn session_id_for(name: &str) -> Option<String> {
-        Self::load()
-            .ok()?
+    /// A CORRUPT `state.json` is propagated as `Err`, NOT swallowed as "no id":
+    /// silently returning `None` would relaunch a live session COLD (losing the
+    /// conversation) exactly when `--resume` is the recovery that matters. A
+    /// genuinely ABSENT state file is `Ok(None)` (a legitimate cold start), since
+    /// `load()` returns an empty state when the file does not exist.
+    pub fn session_id_for(name: &str) -> Result<Option<String>> {
+        Ok(Self::load()?
             .sessions
             .into_iter()
             .find(|s| s.name == name)
-            .and_then(|s| s.session_id)
+            .and_then(|s| s.session_id))
     }
 
     /// Snapshot all current tmux sessions to the state file.
@@ -523,7 +530,7 @@ impl SavedState {
             );
         }
 
-        let content = std::fs::read_to_string(&path)?;
+        let content = crate::primitives::read_text(&path)?;
         let state: SavedState = serde_json::from_str(&content)?;
 
         let mut count = 0;

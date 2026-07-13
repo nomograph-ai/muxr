@@ -13,7 +13,7 @@ pub fn resolve_ip(remote: &Remote, instance: &str) -> Result<String> {
         && let Ok(modified) = metadata.modified()
         && let Ok(age) = modified.elapsed()
         && age.as_secs() < 300
-        && let Ok(ip) = std::fs::read_to_string(&cache_path)
+        && let Ok(ip) = crate::primitives::read_text(std::path::Path::new(&cache_path))
     {
         let ip = ip.trim().to_string();
         if !ip.is_empty() {
