@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [3.7.0] (unreleased)
+## [3.7.0] (2026-07-13)
 
 Additive, non-breaking guardrails against the silent-degrade and config-skew
 pain classes (muxr v4 program, Phase 2). Safe to roll to every machine via the
