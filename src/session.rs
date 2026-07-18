@@ -274,6 +274,12 @@ pub(crate) fn cmd_reorient(tmux: &Tmux, name: Option<&str>) -> Result<()> {
 /// take a long time -- then reopens the session FRESH (no resume) so it
 /// rehydrates from that pointer. The prior conversation persists on disk and is
 /// recoverable via --resume, so recycling never destroys context.
+/// How long recycle waits for the tool pane to return to its shell after `/exit`
+/// before reopening anyway. Generous: a `/recycle` fired mid-turn queues the exit
+/// keystroke until the turn ends, so the return-to-shell can lag well past the
+/// (already-completed) flush.
+const RECYCLE_EXIT_TIMEOUT_SECS: u64 = 600;
+
 pub(crate) fn cmd_recycle(tmux: &Tmux, name: Option<&str>) -> Result<()> {
     let config = Config::load()?;
 
@@ -310,18 +316,8 @@ pub(crate) fn cmd_recycle(tmux: &Tmux, name: Option<&str>) -> Result<()> {
         )
     })?;
 
-    // Locate the harness process so we can wait for the agent's own exit.
     let tool = config.resolve_tool(&repo_name, None);
     let tool_def = config.tool_for(&tool);
-    let bin = tool_def
-        .as_ref()
-        .map(|t| t.bin.clone())
-        .unwrap_or_else(|| "claude".to_string());
-    let harness_pid = tmux.pane_pid(&session).ok().flatten().and_then(|sp| {
-        state::descendant_pids(sp)
-            .into_iter()
-            .find(|pid| state::pid_runs_bin(*pid, &bin))
-    });
 
     // muxr no longer flushes the session itself. The `/recycle` skill (or the
     // operator) flushes working state to the durable pointer BEFORE recycle:
@@ -336,9 +332,14 @@ pub(crate) fn cmd_recycle(tmux: &Tmux, name: Option<&str>) -> Result<()> {
     // muxr drives the exit keystroke -- the CLI input loop receives it, unlike
     // asking the agent to self-`/exit` (which cannot work and hung recycle, #8).
     tmux.send_text(&session, &exit_cmd)?;
-    match harness_pid {
-        Some(pid) => tool::wait_for_exit(pid, 20),
-        None => std::thread::sleep(std::time::Duration::from_secs(3)),
+    // Wait for the tool pane to return to its shell (the tool exited). This is
+    // the pane-current-command signal, robust across platforms and the pi `nono`
+    // wrapper -- not the fragile process-tree PID match of pre-4.0 (ADR 0008).
+    // Generous cap: when /recycle is fired mid-turn the `/exit` keystroke queues
+    // until the turn ends, so the return-to-shell can lag; it usually returns in
+    // seconds since the skill already flushed.
+    if !tool::wait_for_return_to_shell(tmux, &session, RECYCLE_EXIT_TIMEOUT_SECS) {
+        ui::note("recycle: tool did not return to a shell in time; reopening anyway");
     }
 
     // Compose the relaunch BEFORE the destructive kill (issue #11 class). The

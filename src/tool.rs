@@ -265,6 +265,34 @@ pub fn model_switch(
     Ok(())
 }
 
+/// Interactive shells a pane returns to once its foreground tool exits.
+const SHELLS: &[&str] = &["zsh", "bash", "sh", "fish", "dash", "ksh"];
+
+/// Poll the tool pane's foreground command until it is a known shell (the tool
+/// exited and control returned to the launch shell) or `timeout_secs` elapses.
+/// Returns true if the pane returned to a shell.
+///
+/// muxr launches the tool via `send-keys` INTO a persistent shell, so the tool
+/// exiting returns the pane to that shell rather than closing it -- there is no
+/// pane-death event to wait on (ADR 0008). This is more robust than matching the
+/// tool PID by process-tree pattern (the pre-4.0 approach, fragile across
+/// platforms + the pi `nono` wrapper): we watch for the shell coming BACK, not
+/// for a specific tool name going away.
+pub(crate) fn wait_for_return_to_shell(tmux: &Tmux, session: &str, timeout_secs: u64) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    loop {
+        if let Some(cmd) = tmux.pane_current_command(session)
+            && SHELLS.contains(&cmd.as_str())
+        {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+}
+
 /// Wait for a process to exit, escalating to SIGKILL after timeout.
 pub(crate) fn wait_for_exit(pid: u32, timeout_secs: u32) {
     for _ in 0..timeout_secs.saturating_mul(10) {

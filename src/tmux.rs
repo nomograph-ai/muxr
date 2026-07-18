@@ -314,6 +314,38 @@ impl Tmux {
         Ok(pid)
     }
 
+    /// The foreground command in a session's tool pane (pane 0), e.g. `claude`,
+    /// `node`, `nono`, or a shell name (`zsh`/`bash`) once the tool has exited.
+    ///
+    /// muxr launches the tool via `send-keys` INTO a persistent shell, so the
+    /// tool exiting returns the pane to its shell rather than firing a
+    /// pane-exited event -- there is no pane-death signal to wait on. Polling
+    /// this for a return-to-shell is how recycle detects the tool is gone (ADR
+    /// 0008), and it is robust to the pi `nono` wrapper (we look for the shell
+    /// coming back, not for a specific tool name going away). `None` on tmux
+    /// error / no pane.
+    pub fn pane_current_command(&self, session: &str) -> Option<String> {
+        let output = self
+            .command()
+            .args([
+                "list-panes",
+                "-t",
+                &Self::target(session),
+                "-F",
+                "#{pane_current_command}",
+            ])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .next()
+            .map(|l| l.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
     /// Get a tmux variable via display-message.
     pub fn display_message(&self, fmt: &str) -> Result<String> {
         let output = self
