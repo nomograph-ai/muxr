@@ -166,6 +166,18 @@ impl SavedState {
     pub fn load() -> Result<SavedState> {
         let path = Config::state_path()?;
         if !path.exists() {
+            // Transparent one-time migration from the pre-4.0.0 location
+            // (~/.config/muxr/state.json) so an upgrading machine keeps its
+            // saved sessions. `save()` then writes the new path. Default mode
+            // only (see Config::legacy_state_path).
+            if let Some(legacy) = Config::legacy_state_path()
+                && legacy.exists()
+            {
+                let content = crate::primitives::read_text(&legacy)?;
+                let state: SavedState = serde_json::from_str(&content)
+                    .with_context(|| format!("Failed to parse {}", legacy.display()))?;
+                return Ok(state);
+            }
             return Ok(SavedState {
                 sessions: Vec::new(),
             });

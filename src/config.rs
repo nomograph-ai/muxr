@@ -792,6 +792,32 @@ fn resolve_config_path(env_override: Option<String>, home: &std::path::Path) -> 
     }
 }
 
+/// Resolve the state path from the `MUXR_STATE` / `MUXR_CONFIG` overrides and the
+/// home dir. Pure (env read by the caller) so it is testable without mutating
+/// process env, mirroring `resolve_config_path`. See `Config::state_path` for
+/// the precedence rationale.
+fn resolve_state_path(
+    state_override: Option<String>,
+    config_override: Option<String>,
+    home: &std::path::Path,
+) -> PathBuf {
+    // 1. Explicit MUXR_STATE wins.
+    if let Some(p) = state_override.filter(|p| !p.is_empty()) {
+        return PathBuf::from(shellexpand::tilde(&p).to_string());
+    }
+    // 2. When MUXR_CONFIG isolates the config (tests/jig), keep state its
+    //    sibling so a fixture never clobbers live ~/.local/state/muxr/state.json.
+    if config_override.as_deref().is_some_and(|c| !c.is_empty()) {
+        return resolve_config_path(config_override, home)
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("state.json");
+    }
+    // 3. Default: machine STATE under XDG state, not config.
+    home.join(".local").join("state").join("muxr").join("state.json")
+}
+
 fn default_connect() -> String {
     "mosh".to_string()
 }
@@ -1031,15 +1057,33 @@ impl Config {
         ))
     }
 
-    /// State lives beside the config, so `MUXR_CONFIG` isolates both with a
-    /// single override: `state.json` is always the config file's sibling.
+    /// Resolve the state file path. `state.json` is machine STATE, not config,
+    /// so since 4.0.0 it lives under `~/.local/state/muxr/`, not beside the
+    /// config. Precedence (see `resolve_state_path`):
+    ///   1. `MUXR_STATE` (non-empty) -- explicit override.
+    ///   2. `MUXR_CONFIG` (non-empty) -- test/jig isolation: state stays the
+    ///      config file's sibling so a fixture never clobbers live state.
+    ///   3. Default -- `~/.local/state/muxr/state.json`.
     pub fn state_path() -> Result<PathBuf> {
-        let cfg = Self::path()?;
-        let dir = cfg
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("."));
-        Ok(dir.join("state.json"))
+        let home = dirs::home_dir().context("Could not determine home directory")?;
+        Ok(resolve_state_path(
+            std::env::var("MUXR_STATE").ok(),
+            std::env::var("MUXR_CONFIG").ok(),
+            &home,
+        ))
+    }
+
+    /// The pre-4.0.0 state location (`~/.config/muxr/state.json`), for a
+    /// transparent one-time read-migration on upgrade. `Some` ONLY in default
+    /// mode (no `MUXR_STATE`/`MUXR_CONFIG` override), so isolated fixtures never
+    /// reach for live legacy state.
+    pub fn legacy_state_path() -> Option<PathBuf> {
+        let overridden = std::env::var("MUXR_STATE").is_ok_and(|p| !p.is_empty())
+            || std::env::var("MUXR_CONFIG").is_ok_and(|c| !c.is_empty());
+        if overridden {
+            return None;
+        }
+        Some(dirs::home_dir()?.join(".config").join("muxr").join("state.json"))
     }
 
     pub fn resolve_dir(&self, repo: &str) -> Result<PathBuf> {
@@ -1666,6 +1710,35 @@ session_discovery = { type = "none" }
         assert_eq!(
             resolve_config_path(Some("/tmp/fix/config.toml".to_string()), home),
             PathBuf::from("/tmp/fix/config.toml")
+        );
+    }
+
+    #[test]
+    fn state_path_precedence() {
+        let home = std::path::Path::new("/home/u");
+        // Default: XDG state, not beside the config.
+        assert_eq!(
+            resolve_state_path(None, None, home),
+            home.join(".local/state/muxr/state.json")
+        );
+        // MUXR_CONFIG isolates -> state stays the config file's sibling.
+        assert_eq!(
+            resolve_state_path(None, Some("/tmp/fix/config.toml".to_string()), home),
+            PathBuf::from("/tmp/fix/state.json")
+        );
+        // MUXR_STATE wins over everything, verbatim.
+        assert_eq!(
+            resolve_state_path(
+                Some("/tmp/s/state.json".to_string()),
+                Some("/tmp/fix/config.toml".to_string()),
+                home
+            ),
+            PathBuf::from("/tmp/s/state.json")
+        );
+        // Empty overrides are ignored (fall through to default).
+        assert_eq!(
+            resolve_state_path(Some(String::new()), Some(String::new()), home),
+            home.join(".local/state/muxr/state.json")
         );
     }
 
