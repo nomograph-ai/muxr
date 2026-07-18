@@ -68,45 +68,6 @@ pub struct Config {
     /// not discovered -- zero cross-machine knowledge. See `discover_and_merge`.
     #[serde(default)]
     pub discovery: Discovery,
-    /// Readiness-gate thresholds for `muxr upgrade`/`recycle`. Absent
-    /// `[readiness]` -> the built-in defaults, byte-identical to pre-3.6
-    /// behavior. Currently exposes `stale_busy_secs` so an operator can reclaim
-    /// interrupted-but-quiet sessions sooner without a rebuild.
-    #[serde(default)]
-    pub readiness: ReadinessConfig,
-}
-
-/// Thresholds for the upgrade/recycle readiness gate. Defaults reproduce the
-/// built-in behavior exactly (`stale_busy_secs` = [`state::STALE_BUSY_SECS`]);
-/// an operator lowers `stale_busy_secs` to reclaim a session whose agent turn
-/// was interrupted (a `busy` state file that never got its `idle`) sooner. This
-/// stays conservative: a stale-busy file resolves to `Unknown` and falls
-/// through to the tmux-activity floor, which only returns `Safe` once the pane
-/// has actually been quiet for `min_idle`.
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ReadinessConfig {
-    /// A `busy` state file older than this (seconds) is treated as stale (a
-    /// likely crashed/interrupted session that fired `busy` but never wrote
-    /// `idle`) and falls through to the activity floor instead of blocking
-    /// upgrade. Default 3600 (1 hour), the pre-3.6 hardcoded value.
-    #[serde(default = "default_stale_busy_secs")]
-    pub stale_busy_secs: u64,
-}
-
-fn default_stale_busy_secs() -> u64 {
-    crate::state::STALE_BUSY_SECS
-}
-
-impl Default for ReadinessConfig {
-    // Manual (not derived) so `Default::default()` yields 3600, NOT 0 -- a 0
-    // threshold would make every `busy` file instantly stale. Reuses the same
-    // default fn as serde so there is a single source for the default.
-    fn default() -> Self {
-        Self {
-            stale_busy_secs: default_stale_busy_secs(),
-        }
-    }
 }
 
 /// Per-repo config discovery. `roots` are namespace directories walked (bounded
@@ -159,12 +120,6 @@ pub struct Extensions {
     /// built-in `[layout]` computation. Absent -> the 2.1 config-drive layout.
     #[serde(default)]
     pub resolver: Option<String>,
-    /// MAKE-DURABLE: fired before a session is recycled or closed. Receives
-    /// `{session, repo, campaign, dir, campaign_md, log_path}` and supplies
-    /// the agent-facing flush message (JSON `{message}`) -- or an empty
-    /// message to skip. Absent -> the built-in recycle-flush prompt.
-    #[serde(default)]
-    pub make_durable: Option<String>,
 }
 
 /// Filesystem layout of muxr-managed repos. Defaults reproduce the built-in
@@ -400,9 +355,6 @@ pub struct Tool {
     /// bin name, so adding a runtime stays pure config.
     #[serde(default)]
     pub supports_add_dirs: Option<bool>,
-    /// How to probe session readiness before upgrade.
-    #[serde(default = "default_readiness_none")]
-    pub readiness: ReadinessProbe,
 }
 
 impl Tool {
@@ -426,55 +378,6 @@ pub enum PromptMode {
 
 fn default_discovery_none() -> SessionDiscovery {
     SessionDiscovery::None
-}
-
-/// File readiness-probe payload. Standalone `deny_unknown_fields` struct so a
-/// typo inside `[tools.*.readiness]` (e.g. `idle_valeu` for `idle_value`, which
-/// would silently disable the quiet-period guard and let muxr upgrade a busy
-/// session) is rejected, not dropped. See `FileDiscovery` for why the payload
-/// can't live as inline enum-variant fields.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct FileProbe {
-    /// Path pattern with `{session_id}` (preferred) or `{pid}` placeholder.
-    pub pattern: String,
-    /// JSON key containing the state string.
-    pub state_key: String,
-    /// Value meaning "safe to upgrade", e.g. `"idle"`.
-    pub idle_value: String,
-    /// Optional epoch-seconds key for quiet-period enforcement.
-    #[serde(default)]
-    pub since_key: Option<String>,
-}
-
-/// Command readiness-probe payload. Standalone `deny_unknown_fields` struct
-/// (same rationale as `FileProbe`).
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct CommandProbe {
-    /// Command + args; `{session_id}` and `{pid}` are interpolated.
-    pub argv: Vec<String>,
-}
-
-/// How to probe a session for upgrade readiness.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(tag = "type", rename_all = "lowercase")]
-pub enum ReadinessProbe {
-    /// Read a normalized state file the runtime's hooks maintain.
-    File(FileProbe),
-    /// Escape hatch: a runtime that exposes readiness via a CLI. Exit 0 = safe.
-    Command(CommandProbe),
-    /// No runtime probe — core uses the universal tmux-activity floor only.
-    /// This is the type default; in a user `[tools.<name>]` block it means
-    /// "inherit the builtin probe" (see `merge_tool_with_builtin`).
-    None,
-    /// Explicit opt-out: floor only, and do NOT inherit the builtin probe.
-    /// Resolved to `None` during merge, so the classifier never sees it.
-    Disabled,
-}
-
-fn default_readiness_none() -> ReadinessProbe {
-    ReadinessProbe::None
 }
 
 /// Overlay user-supplied fields on top of a built-in tool definition.
@@ -523,13 +426,6 @@ fn merge_tool_with_builtin(user: Tool, builtin: Tool) -> Tool {
         },
         session_discovery: match user.session_discovery {
             SessionDiscovery::None => builtin.session_discovery,
-            other => other,
-        },
-        readiness: match user.readiness {
-            // Unset (the type default) inherits the builtin probe...
-            ReadinessProbe::None => builtin.readiness,
-            // ...but an explicit `type = "disabled"` opts out without inheriting.
-            ReadinessProbe::Disabled => ReadinessProbe::None,
             other => other,
         },
         wrapper: user.wrapper.or(builtin.wrapper),
@@ -1403,7 +1299,6 @@ default_tool = "claude"
 #
 # [extensions]
 # resolver = "my-resolver"        # layout decision; default = the [layout] above
-# make_durable = "my-flush"       # recycle-flush message; default = built-in prompt
 
 # Per-session tmux env (new-session -e). Templated with {session} {repo}
 # {campaign} {session_slug}. Couples a session to an external tool generically.
@@ -1425,14 +1320,6 @@ default_tool = "claude"
 # cmd = "my-previewer {dir}"
 # side = "h"   # "h" side-by-side, "v" stacked
 # size = 40    # companion pane size, percent
-
-# Upgrade/recycle readiness gate. Absent -> built-in defaults (unchanged).
-# Lower stale_busy_secs to reclaim a session whose agent turn was interrupted
-# (a `busy` state file that never got its `idle`) sooner; still corroborated
-# against pane quiet (min_idle) via the activity floor.
-#
-# [readiness]
-# stale_busy_secs = 600   # default 3600 (1h)
 "##
         .to_string()
     }
@@ -1805,7 +1692,6 @@ session_discovery = { type = "none" }
         assert_eq!(cfg.default_tool, "claude");
         // No extensions/env/chooser configured by default -> bare launcher.
         assert!(cfg.extensions.resolver.is_none());
-        assert!(cfg.extensions.make_durable.is_none());
         assert!(cfg.session_env.is_empty());
         assert!(cfg.chooser.command.is_none());
         assert!(cfg.companion.is_none());
@@ -2099,7 +1985,6 @@ session_discovery = { type = "none" }
             wrapper: Some("nono run --profile X --".to_string()),
             prompt_mode: PromptMode::String,
             supports_add_dirs: Some(false),
-            readiness: ReadinessProbe::None,
         };
 
         let settings = LaunchSettings {
@@ -2291,70 +2176,6 @@ append_system_prompt_files = ["base.md", "overlay.md"]
         let tmp = std::env::temp_dir().join("muxr-composed-system-prompt.md");
         let written = std::fs::read_to_string(&tmp).unwrap();
         assert_eq!(written, "base\n\noverlay");
-    }
-
-    #[test]
-    fn readiness_probe_inherits_from_builtin_when_user_omits_it() {
-        // A partial [tools.claude] block without [readiness] must inherit the
-        // builtin Claude probe (File), not collapse to None.
-        let toml_str = r##"
-[repos]
-
-[tools.claude]
-bin = "claude"
-args = ["--name", "{name}", "--verbose"]
-"##;
-        let config: Config = toml::from_str(toml_str).unwrap();
-        let h = config.tool_for("claude").unwrap();
-        assert!(
-            matches!(h.readiness, ReadinessProbe::File(_)),
-            "readiness should fall back to builtin File probe; got {:?}",
-            h.readiness
-        );
-    }
-
-    #[test]
-    fn readiness_probe_user_override_wins() {
-        // A [tools.claude] block with an explicit [readiness] overrides the builtin.
-        let toml_str = r##"
-[repos]
-
-[tools.claude]
-bin = "claude"
-
-[tools.claude.readiness]
-type = "command"
-argv = ["my-probe", "--session", "{session_id}"]
-"##;
-        let config: Config = toml::from_str(toml_str).unwrap();
-        let h = config.tool_for("claude").unwrap();
-        assert!(
-            matches!(h.readiness, ReadinessProbe::Command(_)),
-            "user readiness override should win; got {:?}",
-            h.readiness
-        );
-    }
-
-    #[test]
-    fn readiness_probe_disabled_opts_out_without_inheriting() {
-        // `type = "disabled"` is an explicit opt-out: it resolves to None
-        // (floor only) and must NOT inherit the builtin File probe.
-        let toml_str = r##"
-[repos]
-
-[tools.claude]
-bin = "claude"
-
-[tools.claude.readiness]
-type = "disabled"
-"##;
-        let config: Config = toml::from_str(toml_str).unwrap();
-        let h = config.tool_for("claude").unwrap();
-        assert!(
-            matches!(h.readiness, ReadinessProbe::None),
-            "disabled must resolve to None (no builtin inherit); got {:?}",
-            h.readiness
-        );
     }
 
     #[test]
@@ -2583,32 +2404,6 @@ prompt_mode = "string"
     }
 
     #[test]
-    fn readiness_file_probe_rejects_unknown_key() {
-        // The internally-tagged ReadinessProbe can't carry deny_unknown_fields,
-        // so its payload is a FileProbe struct that does. A typo'd sibling
-        // (here `idle_valeu`) -- which would otherwise silently disable the
-        // quiet-period guard -- must be rejected, not dropped.
-        let toml_str = r##"
-[repos]
-
-[tools.claude]
-bin = "claude"
-
-[tools.claude.readiness]
-type = "file"
-pattern = "~/r/{session_id}.json"
-state_key = "state"
-idle_value = "idle"
-idle_valeu = "idle"
-"##;
-        let err = toml::from_str::<Config>(toml_str).unwrap_err().to_string();
-        assert!(
-            err.contains("idle_valeu") || err.contains("unknown field"),
-            "expected the typo'd probe key to be rejected; got: {err}"
-        );
-    }
-
-    #[test]
     fn session_discovery_rejects_unknown_key() {
         let toml_str = r##"
 [repos]
@@ -2626,25 +2421,6 @@ bogus = "x"
         assert!(
             err.contains("bogus") || err.contains("unknown field"),
             "expected the typo'd discovery key to be rejected; got: {err}"
-        );
-    }
-
-    #[test]
-    fn readiness_probe_unknown_type_still_rejected() {
-        // The tag itself stays validated: an unknown `type` is a loud error.
-        let toml_str = r##"
-[repos]
-
-[tools.claude]
-bin = "claude"
-
-[tools.claude.readiness]
-type = "bogus"
-"##;
-        let err = toml::from_str::<Config>(toml_str).unwrap_err().to_string();
-        assert!(
-            err.contains("bogus") || err.contains("unknown variant"),
-            "expected unknown-variant rejection; got: {err}"
         );
     }
 }

@@ -105,10 +105,6 @@ mirrors the `pre_create` hooks), not a plugin ABI.
 # {dir,campaign_md,log_path,runtime,add_dirs,resume_id} out. Any omitted field
 # falls back to the built-in [layout]. Absent -> the built-in config-drive layout.
 resolver = "my-resolver"
-# MAKE-DURABLE: fired before a session is recycled/closed. Context in ->
-# {message} out (the agent-facing flush prompt). Empty message -> just exit.
-# Absent -> muxr's built-in recycle-flush prompt.
-make_durable = "my-flush"
 
 # Per-session tmux env (new-session -e, tmux 3.2+). Values templated with
 # {session} {repo} {campaign} {session_slug}. This is how you couple a session

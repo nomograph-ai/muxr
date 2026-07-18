@@ -274,18 +274,7 @@ pub(crate) fn cmd_reorient(tmux: &Tmux, name: Option<&str>) -> Result<()> {
 /// take a long time -- then reopens the session FRESH (no resume) so it
 /// rehydrates from that pointer. The prior conversation persists on disk and is
 /// recoverable via --resume, so recycling never destroys context.
-/// How long a recycling session must read idle -- via the readiness probe, or
-/// the tmux-activity floor -- before muxr sends the exit. Long enough not to
-/// trip on a mid-flush pause, short enough that recycle stays snappy (unlike the
-/// relaunch-safety cooldown `upgrade` uses).
-const RECYCLE_IDLE_SECS: u64 = 5;
-
-pub(crate) fn cmd_recycle(
-    tmux: &Tmux,
-    name: Option<&str>,
-    no_serialize: bool,
-    wait: u64,
-) -> Result<()> {
+pub(crate) fn cmd_recycle(tmux: &Tmux, name: Option<&str>) -> Result<()> {
     let config = Config::load()?;
 
     let session = session_or_current(tmux, name)?;
@@ -303,19 +292,16 @@ pub(crate) fn cmd_recycle(
     // the recycle rather than kill the live session and relaunch it stripped of
     // its composed prompt and --add-dir paths. An ABSENT file is fine (an
     // archived-but-running session), so this only trips on genuine corruption.
-    // The `locales` load below also carries the campaign's declared work
-    // surface -- the project repos this session touches -- so the flush reaches
-    // all of them, not just log.md, or in-flight project work is stranded.
-    let locales = primitives::load_optional(&campaign_md, primitives::load_campaign)
-        .with_context(|| {
-            format!(
-                "refusing to recycle {session}: campaign file present but unparseable: {} \
-                 (fix the frontmatter or remove the file)",
-                campaign_md.display()
-            )
-        })?
-        .map(|(c, _)| c.paths)
-        .unwrap_or_default();
+    // The value is discarded: muxr no longer composes a flush from the campaign
+    // paths (the `/recycle` skill owns the flush, ADR 0008); this load is kept
+    // purely for its fail-loud side effect.
+    primitives::load_optional(&campaign_md, primitives::load_campaign).with_context(|| {
+        format!(
+            "refusing to recycle {session}: campaign file present but unparseable: {} \
+             (fix the frontmatter or remove the file)",
+            campaign_md.display()
+        )
+    })?;
     primitives::load_optional(&log_md, primitives::load_log).with_context(|| {
         format!(
             "refusing to recycle {session}: log file present but unparseable: {} \
@@ -324,8 +310,7 @@ pub(crate) fn cmd_recycle(
         )
     })?;
 
-    // Locate the harness process so we can wait for the agent's own exit as
-    // the "flush complete" signal, rather than guessing a wall-clock delay.
+    // Locate the harness process so we can wait for the agent's own exit.
     let tool = config.resolve_tool(&repo_name, None);
     let tool_def = config.tool_for(&tool);
     let bin = tool_def
@@ -338,85 +323,22 @@ pub(crate) fn cmd_recycle(
             .find(|pid| state::pid_runs_bin(*pid, &bin))
     });
 
-    if no_serialize {
-        // Skip the flush; just exit (caller asserts state is already on disk).
-        let exit_cmd = tool_def
-            .as_ref()
-            .and_then(|t| t.exit_command.clone())
-            .unwrap_or_else(|| "/exit".to_string());
-        ui::action(&format!("recycle {session}: exiting (no flush)"));
-        tmux.send_text(&session, &exit_cmd)?;
-        if let Some(pid) = harness_pid {
-            tool::wait_for_exit(pid, 20);
-        }
-    } else {
-        // The MAKE-DURABLE event: muxr fires it before recycling so the
-        // agent serializes its state. A configured `[extensions].make_durable`
-        // supplies the flush message (so "what to serialize" is the harness's
-        // concern, not muxr's); absent -> the built-in self-contained prompt.
-        // An empty message means "nothing to flush" -> just exit.
-        let msg =
-            make_durable_message(&config, &session, &repo_name, &campaign, &log_md, &locales)?;
-        let exit_cmd = tool_def
-            .as_ref()
-            .and_then(|t| t.exit_command.clone())
-            .unwrap_or_else(|| "/exit".to_string());
-
-        if msg.trim().is_empty() {
-            ui::action(&format!("recycle {session}: nothing to flush -> exiting"));
-        } else {
-            // Send ONLY the flush instructions. muxr drives the exit itself (below)
-            // once the agent goes idle -- an interactive agent CANNOT self-`/exit`
-            // (the CLI input loop owns that command; the model can't invoke it), so
-            // baking "run /exit" into the message is what hung recycle 600s -> SIGKILL.
-            ui::action(&format!(
-                "recycle {session}: asked the agent to flush -> {}",
-                log_md.display()
-            ));
-            tmux.send_text(&session, &compose_recycle_message(&msg))?;
-
-            // Wait for the flush to COMPLETE by gating on the readiness idle signal
-            // (Stop hook, or the tmux-activity floor), NOT process-exit -- mirrors
-            // `tool::upgrade`. Bounded by `wait`; on timeout muxr exits anyway.
-            ui::note("waiting for the agent to finish flushing (agent-paced)…");
-            if let Some(td) = tool_def.as_ref()
-                && let Some(sid) = state::discover_session_id(tmux, &session, Some(td))
-            {
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait);
-                // Brief grace so the agent registers "busy" before we poll for idle.
-                std::thread::sleep(std::time::Duration::from_secs(2));
-                loop {
-                    let ready = state::session_readiness(
-                        tmux,
-                        &session,
-                        td,
-                        &sid,
-                        RECYCLE_IDLE_SECS,
-                        config.readiness.stale_busy_secs,
-                        tmux.output_activity(&session),
-                    );
-                    if matches!(ready, state::Readiness::Safe) {
-                        break;
-                    }
-                    if std::time::Instant::now() >= deadline {
-                        ui::note("flush wait timed out; exiting anyway");
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_secs(1));
-                }
-            } else {
-                // No session id / tool def: can't gate on readiness -> short grace.
-                std::thread::sleep(std::time::Duration::from_secs(5));
-            }
-        }
-
-        // muxr drives the exit itself. This WORKS -- it is the CLI input loop
-        // receiving the keystroke, unlike asking the agent to self-exit.
-        tmux.send_text(&session, &exit_cmd)?;
-        match harness_pid {
-            Some(pid) => tool::wait_for_exit(pid, 10),
-            None => std::thread::sleep(std::time::Duration::from_secs(3)),
-        }
+    // muxr no longer flushes the session itself. The `/recycle` skill (or the
+    // operator) flushes working state to the durable pointer BEFORE recycle:
+    // muxr cannot observe "flush complete" from outside the runtime, so it does
+    // NOT infer it (ADR 0008 -- inference is what stranded/killed sessions across
+    // the 3.6.x saga). muxr's job is the clean exit + reopen-fresh below.
+    let exit_cmd = tool_def
+        .as_ref()
+        .and_then(|t| t.exit_command.clone())
+        .unwrap_or_else(|| "/exit".to_string());
+    ui::action(&format!("recycle {session}: exiting"));
+    // muxr drives the exit keystroke -- the CLI input loop receives it, unlike
+    // asking the agent to self-`/exit` (which cannot work and hung recycle, #8).
+    tmux.send_text(&session, &exit_cmd)?;
+    match harness_pid {
+        Some(pid) => tool::wait_for_exit(pid, 20),
+        None => std::thread::sleep(std::time::Duration::from_secs(3)),
     }
 
     // Compose the relaunch BEFORE the destructive kill (issue #11 class). The
@@ -532,103 +454,6 @@ pub(crate) fn parse_session(name: &str) -> Option<(String, String)> {
         return None;
     }
     Some((repo.to_string(), campaign.to_string()))
-}
-
-/// Materialise the full launch command for a session: the single source of
-/// truth shared by `open`, `restore`, and `upgrade`.
-///
-/// Reconstructs the repo's launch settings, the composed HARNESS + campaign +
-/// log system prompt (written to a temp file), and the campaign's `--add-dir`
-/// paths, then asks the tool to assemble the command. The binary name is
-/// resolved fresh from config each call, so a relaunch picks up a newly
-/// installed harness version.
-///
-/// `resume_id` resumes a specific conversation; when it is `None` and
-/// `continue_fallback` is set, the tool's `--continue` args are appended so a
-/// restored session without a discovered id still re-attaches to its most
-/// recent conversation. Returns the command and the session directory.
-///
-/// The campaign and log files are loaded best-effort; callers that might not
-/// have them (restore/upgrade of an archived session) get a degraded
-/// composition rather than a failure.
-/// Context for a make-durable extension: the session about to be recycled and
-/// the locales (project repos) it touches.
-#[derive(serde::Serialize)]
-struct MakeDurableInput<'a> {
-    session: &'a str,
-    repo: &'a str,
-    campaign: &'a str,
-    log_path: &'a str,
-    /// Project repos declared by the campaign (its `paths:`).
-    locales: &'a [String],
-}
-
-/// A make-durable extension's answer: the agent-facing flush message. An empty
-/// message means "nothing to flush" -- muxr just exits.
-#[derive(serde::Deserialize, Default)]
-struct MakeDurableOutput {
-    #[serde(default)]
-    message: String,
-}
-
-/// Resolve the flush message for a recycle. A configured
-/// `[extensions].make_durable` is invoked with the session context and
-/// supplies the message; absent -> muxr's built-in self-contained prompt
-/// (names the exact log.md path, so it never depends on a `/serialize` skill).
-/// Compose the agent-facing recycle FLUSH message. muxr drives the exit itself
-/// (via `tmux.send_text` once the agent goes idle), because an interactive agent
-/// cannot self-`/exit` -- so this asks ONLY for the flush and must NOT tell the
-/// agent to exit (baking that in is what hung recycle 600s -> SIGKILL, #8).
-pub(crate) fn compose_recycle_message(flush: &str) -> String {
-    format!(
-        "{}\n\nFlush your state to the pointer now -- muxr is waiting and will \
-         reopen this session FRESH once you're idle. Take as long as you need.",
-        flush.trim_end()
-    )
-}
-
-fn make_durable_message(
-    config: &Config,
-    session: &str,
-    repo: &str,
-    campaign: &str,
-    log_md: &std::path::Path,
-    locales: &[String],
-) -> Result<String> {
-    if let Some(cmd) = config.extensions.make_durable.as_deref() {
-        let input = MakeDurableInput {
-            session,
-            repo,
-            campaign,
-            log_path: &log_md.to_string_lossy(),
-            locales,
-        };
-        let out: MakeDurableOutput = crate::extension::invoke(cmd, "make-durable", &input)
-            .with_context(|| format!("make-durable extension for '{session}'"))?;
-        return Ok(out.message);
-    }
-
-    let locale_clause = if locales.is_empty() {
-        String::new()
-    } else {
-        format!(
-            " (2) For each project repo you've touched ({}): make sure in-flight work is \
-             captured -- commit it, or record the branch + uncommitted changes + next step \
-             (in the log entry) so nothing is stranded there.",
-            locales.join(", ")
-        )
-    };
-    // NB: no exit/wait/reopen mechanics here -- the recycle caller appends a
-    // uniform exit directive to whatever message is sent (built-in or from a
-    // make_durable extension), so the agent is always told how to exit.
-    Ok(format!(
-        "[muxr recycle] Before this session is recycled, flush your state to ALL the locales \
-         you've been working in so a fresh session resumes cleanly. (1) Update {} -- set the \
-         `entrypoint:` frontmatter to a tight \"where we are / what's next\" line and append a \
-         dated entry under `## Log` with current state and open threads.{}",
-        log_md.display(),
-        locale_clause
-    ))
 }
 
 /// Skip-serializing predicate for a borrowed, possibly-empty extension table:
@@ -771,6 +596,23 @@ fn resolve_layout(
     })
 }
 
+/// Materialise the full launch command for a session: the single source of
+/// truth shared by `open`, `restore`, and `upgrade`.
+///
+/// Reconstructs the repo's launch settings, the composed HARNESS + campaign +
+/// log system prompt (written to a temp file), and the campaign's `--add-dir`
+/// paths, then asks the tool to assemble the command. The binary name is
+/// resolved fresh from config each call, so a relaunch picks up a newly
+/// installed harness version.
+///
+/// `resume_id` resumes a specific conversation; when it is `None` and
+/// `continue_fallback` is set, the tool's `--continue` args are appended so a
+/// restored session without a discovered id still re-attaches to its most
+/// recent conversation. Returns the command and the session directory.
+///
+/// The campaign and log files are loaded best-effort; callers that might not
+/// have them (restore/upgrade of an archived session) get a degraded
+/// composition rather than a failure.
 pub(crate) fn compose_launch_command(
     config: &Config,
     session_name: &str,

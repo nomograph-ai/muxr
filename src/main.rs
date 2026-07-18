@@ -115,24 +115,10 @@ enum Commands {
         /// Print what would be upgraded without touching any session.
         #[arg(long)]
         dry_run: bool,
-        /// Bypass readiness gate and upgrade unconditionally (today's behavior).
+        /// Skip the interactive confirmation and upgrade every matched session
+        /// (scripting/CI). Without it, muxr lists the sessions and asks first.
         #[arg(long)]
         force: bool,
-        /// Poll readiness for up to this many seconds before skipping.
-        #[arg(long)]
-        wait: Option<u64>,
-        /// Minimum seconds of tmux inactivity to consider a session safe.
-        #[arg(long, default_value_t = state::DEFAULT_MIN_IDLE_SECS)]
-        min_idle: u64,
-    },
-    /// Show readiness status for all sessions.
-    ///
-    /// For every tmux session (except `muxr`), resolves the tool, discovers
-    /// the session id, runs the readiness classifier, and prints a summary table.
-    Status {
-        /// Minimum seconds of inactivity to consider a session safe.
-        #[arg(long, default_value_t = state::DEFAULT_MIN_IDLE_SECS)]
-        min_idle: u64,
     },
     /// Interactive session switcher (TUI)
     Switch,
@@ -211,24 +197,18 @@ enum Commands {
         /// Session to reorient (e.g. storr/deploy). Omit to use the current one.
         name: Option<String>,
     },
-    /// Recycle a session: serialize, then reopen it FRESH from the pointer.
+    /// Recycle a session: exit, then reopen it FRESH from the pointer.
     ///
-    /// The deliberate alternative to compacting a long session. Sends
-    /// `/serialize` (so log.md is current), gracefully exits, then reopens a
-    /// FRESH conversation that rehydrates from campaign.md + log.md -- no
-    /// accumulated compaction drift. The previous conversation stays on disk,
-    /// recoverable via --resume. No NAME uses the current session.
+    /// The deliberate alternative to compacting a long session, and the primary
+    /// token-burn lever. muxr gracefully exits the runtime and reopens a FRESH
+    /// conversation that rehydrates from campaign.md + log.md -- no accumulated
+    /// compaction drift. The FLUSH is the agent's job (the `/recycle` skill), not
+    /// muxr's: muxr cannot observe "flush done" from outside the runtime, so it
+    /// does not try (ADR 0008). Flush BEFORE recycling. The previous conversation
+    /// stays on disk, recoverable via --resume. No NAME uses the current session.
     Recycle {
         /// Session to recycle (e.g. storr/deploy). Omit to use the current one.
         name: Option<String>,
-        /// Skip the flush-to-disk step; just exit and reopen fresh (use only
-        /// if the pointer/log.md is already current).
-        #[arg(long)]
-        no_serialize: bool,
-        /// Max seconds to wait for the agent to flush + exit before forcing it.
-        /// muxr returns as soon as the agent exits; this is just the safety cap.
-        #[arg(long, default_value = "600")]
-        wait: u64,
     },
     /// Migrate a repo's campaigns/ tree from the old 3-level layout
     /// (campaigns/<category>/sessions/<topic>.md) to the 2-level repo/campaign
@@ -281,8 +261,6 @@ fn main() -> Result<()> {
             model,
             dry_run,
             force,
-            wait,
-            min_idle,
         }) => {
             let config = Config::load()?;
             let harness = config
@@ -298,12 +276,9 @@ fn main() -> Result<()> {
                     name_filter: name.as_deref(),
                     dry_run,
                     force,
-                    wait,
-                    min_idle,
                 },
             )
         }
-        Some(Commands::Status { min_idle }) => cmd_status(&tmux, min_idle),
         Some(Commands::Switch) => cmd_switch(&tmux),
         Some(Commands::Broadcast {
             cmd,
@@ -325,11 +300,7 @@ fn main() -> Result<()> {
             from,
         }) => cmd_shard(&tmux, &campaign, repo.as_deref(), from.as_deref()),
         Some(Commands::Reorient { name }) => cmd_reorient(&tmux, name.as_deref()),
-        Some(Commands::Recycle {
-            name,
-            no_serialize,
-            wait,
-        }) => cmd_recycle(&tmux, name.as_deref(), no_serialize, wait),
+        Some(Commands::Recycle { name }) => cmd_recycle(&tmux, name.as_deref()),
         Some(Commands::Archive { campaign, repo }) => {
             cmd_archive(&tmux, &campaign, repo.as_deref())
         }
@@ -774,7 +745,7 @@ fn cmd_switch(tmux: &Tmux) -> Result<()> {
             cmd_switch(tmux)
         }
         switcher::Action::Recycle(session) => {
-            if let Err(e) = cmd_recycle(tmux, Some(&session), false, 600) {
+            if let Err(e) = cmd_recycle(tmux, Some(&session)) {
                 eprintln!("recycle failed: {e}");
             }
             cmd_switch(tmux)
@@ -811,10 +782,6 @@ fn cmd_harness_dispatch(tmux: &Tmux, config: &Config, args: &[String]) -> Result
             let name = find_flag_value(&args[2..], "--name");
             let dry_run = args[2..].iter().any(|a| a == "--dry-run");
             let force = args[2..].iter().any(|a| a == "--force");
-            let wait = find_flag_value(&args[2..], "--wait").and_then(|v| v.parse().ok());
-            let min_idle = find_flag_value(&args[2..], "--min-idle")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(state::DEFAULT_MIN_IDLE_SECS);
             tool::upgrade(
                 tmux,
                 config,
@@ -825,8 +792,6 @@ fn cmd_harness_dispatch(tmux: &Tmux, config: &Config, args: &[String]) -> Result
                     name_filter: name.as_deref(),
                     dry_run,
                     force,
-                    wait,
-                    min_idle,
                 },
             )
         }
@@ -849,7 +814,7 @@ fn find_flag_value(args: &[String], flag: &str) -> Option<String> {
 }
 
 /// Format a seconds duration compactly, e.g. `12s`, `4m`, `2h3m`.
-fn fmt_age(secs: u64) -> String {
+pub(crate) fn fmt_age(secs: u64) -> String {
     if secs >= 3600 {
         format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
     } else if secs >= 60 {
@@ -857,72 +822,6 @@ fn fmt_age(secs: u64) -> String {
     } else {
         format!("{secs}s")
     }
-}
-
-/// Print readiness status for every session. `min_idle` is the quiet period
-/// (seconds) used by the classifier; the AGE column shows seconds since the
-/// session's last tmux activity (a freshness cue independent of the verdict).
-fn cmd_status(tmux: &Tmux, min_idle: u64) -> Result<()> {
-    let config = Config::load()?;
-    let sessions = tmux.list_sessions()?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    // One tmux round-trip for activity timestamps, reused for every row.
-    // Readiness uses window_activity (pane output), not session_activity
-    // (client interaction) -- see Tmux::output_activity (#12).
-    let activity: std::collections::HashMap<String, u64> = tmux
-        .list_sessions_detailed()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|s| (s.name, s.window_activity))
-        .collect();
-
-    let mut any = false;
-    for (name, _) in &sessions {
-        if name == "muxr" {
-            continue;
-        }
-        any = true;
-        let harness = name.split('/').next().unwrap_or(name);
-        let tool_name = config.resolve_tool(harness, None);
-        let tool = config.tool_for(&tool_name);
-
-        let session_id = state::discover_session_id(tmux, name, tool.as_ref())
-            .unwrap_or_else(|| "-".to_string());
-
-        let readiness_str = if let Some(ref t) = tool {
-            let r = state::session_readiness(
-                tmux,
-                name,
-                t,
-                &session_id,
-                min_idle,
-                config.readiness.stale_busy_secs,
-                activity.get(name).copied(),
-            );
-            match r {
-                state::Readiness::Safe => "SAFE".to_string(),
-                state::Readiness::Busy(reason) => format!("BUSY({reason})"),
-                state::Readiness::Unknown(reason) => format!("UNKNOWN({reason})"),
-            }
-        } else {
-            "UNKNOWN(no tool configured)".to_string()
-        };
-
-        let age = activity
-            .get(name)
-            .map(|a| fmt_age(now.saturating_sub(*a)))
-            .unwrap_or_else(|| "-".to_string());
-
-        println!("{name}  {tool_name}  {readiness_str}  quiet {age}");
-    }
-
-    if !any {
-        eprintln!("No active sessions.");
-    }
-    Ok(())
 }
 
 /// Generate tmux status-left format string from config harnesses.
@@ -968,20 +867,7 @@ fn cmd_tmux_status(tmux: &Tmux) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::{compose_launch_command, compose_recycle_message};
-
-    #[test]
-    fn recycle_message_flushes_without_asking_to_exit() {
-        // muxr drives the exit itself once the agent is idle (an interactive agent
-        // cannot self-`/exit`), so the flush message must ask ONLY for the flush --
-        // baking in an exit directive is what hung recycle to SIGKILL (#8).
-        let m = compose_recycle_message("flush your state");
-        assert!(m.starts_with("flush your state"), "flush content kept: {m}");
-        assert!(
-            !m.contains("/exit") && !m.contains("/quit"),
-            "must NOT ask the agent to exit: {m}"
-        );
-    }
+    use crate::session::compose_launch_command;
 
     #[test]
     fn resolve_tool_uses_override() {

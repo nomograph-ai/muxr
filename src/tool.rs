@@ -15,26 +15,24 @@ pub struct UpgradeOpts<'a> {
     pub model: Option<&'a str>,
     pub name_filter: Option<&'a str>,
     pub dry_run: bool,
-    /// Bypass readiness gate and upgrade unconditionally.
+    /// Skip the interactive confirmation and upgrade every matched session.
     pub force: bool,
-    /// Poll readiness for up to this many seconds before skipping.
-    pub wait: Option<u64>,
-    /// Minimum seconds of tmux inactivity to consider a session safe.
-    pub min_idle: u64,
 }
 
-/// Upgrade running harness sessions onto the freshly resolved binary,
-/// resuming each conversation in place.
+/// Upgrade running harness sessions onto the freshly resolved binary, resuming
+/// each conversation in place.
 ///
-/// For each matching session:
-/// 1. Discover the session ID
-/// 2. Compose the full relaunch command (prompt + add-dirs + resume)
-/// 3. Send /exit to the harness (graceful exit), wait for it to quit
-/// 4. Wait for the shell prompt, then send the relaunch command
+/// For each matching session: discover the session id, compose the full
+/// relaunch (prompt + add-dirs + resume), send `/exit`, wait for it to quit,
+/// then send the relaunch at the shell prompt.
 ///
-/// `opts.name_filter` limits the run to a single session name; `None` upgrades
-/// every session running `harness_name`. `opts.dry_run` composes and prints the
-/// relaunch command for each target without touching the session.
+/// muxr does NOT infer whether a session is "safe" to relaunch -- readiness
+/// inference was removed in 4.0.0 (ADR 0008) because the signal is unobservable
+/// from outside the runtime. Instead muxr LISTS the sessions it will relaunch
+/// with a display-only quiet-age column (seconds since the pane last emitted
+/// output) and the human confirms. `--force` skips the confirmation
+/// (scripting/CI); `--dry-run` prints the listing + composed relaunch and
+/// touches nothing. `name_filter` limits the run to a single session.
 pub fn upgrade(
     tmux: &Tmux,
     config: &Config,
@@ -47,182 +45,130 @@ pub fn upgrade(
         name_filter,
         dry_run,
         force,
-        wait,
-        min_idle,
     } = opts;
     let sessions = tmux.list_sessions()?;
-    let mut upgraded = 0;
-    let mut skipped = 0;
 
-    // Fetch tmux activity ONCE for the whole sweep (the gate's floor uses it);
-    // the --wait poll re-reads a single session live. Avoids an O(n^2) of
-    // list-sessions calls across the loop.
+    // Pane-output activity for the display-only quiet-age column: window_activity
+    // (pane output), NOT session_activity (client interaction, which is frozen
+    // for an unattended working session). One tmux round-trip, reused per row.
+    let now = now_epoch();
     let activity_map: std::collections::HashMap<String, u64> = tmux
         .list_sessions_detailed()
         .unwrap_or_default()
         .into_iter()
-        // Readiness reads window_activity (pane output), not session_activity
-        // (client interaction) -- the latter is frozen for an unattended
-        // working session, which would mis-reclaim it (#12).
         .map(|s| (s.name, s.window_activity))
         .collect();
 
+    // One planned upgrade: the session, its discovered id, the composed relaunch
+    // command, and the display-only quiet-age.
+    struct Planned {
+        name: String,
+        session_id: String,
+        cmd: String,
+        quiet_age: Option<u64>,
+    }
+    let mut planned: Vec<Planned> = Vec::new();
+    let mut skipped = 0;
+
     for (name, _path) in &sessions {
-        // Skip the muxr control plane
         if name == "muxr" {
             continue;
         }
-
-        // Limit to a single named session when requested.
         if let Some(filter) = name_filter
             && name != filter
         {
             continue;
         }
-
-        // Check if this session runs the right tool
+        // Only sessions running the requested tool.
         let harness = name.split('/').next().unwrap_or(name);
-        let tool = config.resolve_tool(harness, None);
-        if tool != harness_name {
+        if config.resolve_tool(harness, None) != harness_name {
             continue;
         }
-
-        // Check if the harness process is actually running
         if !state::has_harness_process(tmux, name, &tool_def.bin) {
             eprintln!("  {name}: no {harness_name} process, skipping");
             skipped += 1;
             continue;
         }
-
-        // Discover session ID before killing
-        let session_id = state::discover_session_id(tmux, name, Some(tool_def));
-        if session_id.is_none() {
+        let Some(session_id) = state::discover_session_id(tmux, name, Some(tool_def)) else {
             eprintln!("  {name}: could not discover session ID, skipping");
             skipped += 1;
             continue;
-        }
-        let session_id = session_id.unwrap();
-
-        // Self-upgrade guard: never send the exit command to the session we are
-        // invoked from -- it would kill the in-flight `upgrade` run.
+        };
+        // Self-upgrade guard: never relaunch the session running `upgrade`.
         if tmux.current_session().as_deref() == Some(name.as_str()) {
-            eprintln!("  {name}: skipping — this is the session running `upgrade`");
+            eprintln!("  {name}: skipping -- this is the session running `upgrade`");
             skipped += 1;
             continue;
         }
-
-        // Compute readiness ONCE (--force skips the probe entirely). The floor
-        // uses the pre-fetched activity (no per-session list-sessions call).
-        let readiness = if force {
-            None
-        } else {
-            Some(state::session_readiness(
-                tmux,
-                name,
-                tool_def,
-                &session_id,
-                min_idle,
-                config.readiness.stale_busy_secs,
-                activity_map.get(name).copied(),
-            ))
-        };
-        let verdict = match &readiness {
-            None => "FORCED".to_string(),
-            Some(state::Readiness::Safe) => "SAFE".to_string(),
-            Some(state::Readiness::Busy(r)) => format!("BUSY({r})"),
-            Some(state::Readiness::Unknown(r)) => format!("UNKNOWN({r})"),
-        };
-        let is_safe = matches!(readiness, None | Some(state::Readiness::Safe));
-
-        // Compose the FULL relaunch (system prompt + campaign add-dirs + resume).
-        // A MISSING campaign/log file degrades cleanly inside compose (an
-        // archived-but-running session keeps its repo prompt + resume); a file
-        // that EXISTS but is unparseable returns Err and we SKIP the session
-        // loud rather than exit + relaunch it stripped of its rules (issue #11).
-        // Deferred behind a closure so a dry-run that would skip never composes.
-        let compose = || {
-            crate::session::compose_launch_command(config, name, Some(&session_id), model, false)
-                .map(|(cmd, _)| cmd)
-        };
-
-        if dry_run {
-            // Never poll/sleep in a dry run; report the live verdict + decision.
-            if is_safe {
-                match compose() {
-                    Ok(cmd) => {
-                        eprintln!("  {name}: would upgrade (session {session_id}) [{verdict}]");
-                        eprintln!("    -> {cmd}");
-                        upgraded += 1;
-                    }
-                    Err(e) => {
-                        eprintln!("  {name}: would skip — compose failed: {e:#}");
-                        skipped += 1;
-                    }
-                }
-            } else {
-                eprintln!("  {name}: would skip [{verdict}]");
-                skipped += 1;
-            }
-            continue;
-        }
-
-        // Live readiness gate: wait or skip unless already safe (or forced).
-        // The --wait poll re-reads this session's activity live each tick.
-        if !is_safe {
-            if let Some(wait_secs) = wait {
-                let deadline =
-                    std::time::Instant::now() + std::time::Duration::from_secs(wait_secs);
-                let mut current = state::session_readiness(
-                    tmux,
-                    name,
-                    tool_def,
-                    &session_id,
-                    min_idle,
-                    config.readiness.stale_busy_secs,
-                    tmux.output_activity(name),
-                );
-                while !matches!(current, state::Readiness::Safe)
-                    && std::time::Instant::now() < deadline
-                {
-                    std::thread::sleep(std::time::Duration::from_secs(1));
-                    current = state::session_readiness(
-                        tmux,
-                        name,
-                        tool_def,
-                        &session_id,
-                        min_idle,
-                        config.readiness.stale_busy_secs,
-                        tmux.output_activity(name),
-                    );
-                }
-                if !matches!(current, state::Readiness::Safe) {
-                    eprintln!("  {name}: skipping — timed out waiting for readiness [{verdict}]");
-                    skipped += 1;
-                    continue;
-                }
-            } else {
-                eprintln!("  {name}: skipping — {verdict}");
-                skipped += 1;
-                continue;
-            }
-        }
-
-        // CONFIRMED SAFE. Compose the relaunch FIRST: a present-but-unparseable
-        // campaign/log must SKIP this session loud -- never exit it and relaunch
-        // stripped of its composed prompt (issue #11). We accept the small extra
-        // latency before the exit (a marginally wider readiness->exit TOCTOU
-        // window) as the correct trade against silently de-fanging a live
-        // session; the exit still precedes the slow wait-for-exit + relaunch.
-        let cmd = match compose() {
-            Ok(cmd) => cmd,
+        // Compose the FULL relaunch up front, BEFORE any exit. A missing
+        // campaign/log degrades cleanly inside compose (an archived-but-running
+        // session keeps its repo prompt + resume); a present-but-unparseable one
+        // returns Err and we SKIP loud rather than exit + relaunch it stripped of
+        // its rules (#11). Composing before the exit also means a bad compose can
+        // never destroy a session.
+        let cmd = match crate::session::compose_launch_command(
+            config,
+            name,
+            Some(&session_id),
+            model,
+            false,
+        ) {
+            Ok((cmd, _)) => cmd,
             Err(e) => {
-                eprintln!("  {name}: skipping — compose failed: {e:#}");
+                eprintln!("  {name}: skipping -- compose failed: {e:#}");
                 skipped += 1;
                 continue;
             }
         };
+        let quiet_age = activity_map.get(name).map(|a| now.saturating_sub(*a));
+        planned.push(Planned {
+            name: name.clone(),
+            session_id,
+            cmd,
+            quiet_age,
+        });
+    }
 
-        eprintln!("  {name}: upgrading (session {session_id})");
+    if planned.is_empty() {
+        eprintln!("No sessions to upgrade ({skipped} skipped).");
+        return Ok(());
+    }
+
+    // Listing with the display-only quiet-age column -- the cue the human uses to
+    // decide. muxr does not judge readiness for them.
+    eprintln!("Sessions to upgrade:");
+    for p in &planned {
+        let age = p
+            .quiet_age
+            .map(crate::fmt_age)
+            .unwrap_or_else(|| "?".to_string());
+        eprintln!("  {}  (session {})  quiet {age}", p.name, p.session_id);
+        if dry_run {
+            eprintln!("    -> {}", p.cmd);
+        }
+    }
+
+    if dry_run {
+        eprintln!(
+            "\n{} session(s) would be upgraded, {skipped} skipped (dry run).",
+            planned.len()
+        );
+        if let Some(m) = model {
+            eprintln!("Model: {m}");
+        }
+        return Ok(());
+    }
+
+    // Human checkpoint (unless --force). Ambiguous / non-tty input aborts.
+    if !force && !confirm(&format!("Upgrade {} session(s)?", planned.len()))? {
+        eprintln!("Aborted; no sessions touched.");
+        return Ok(());
+    }
+
+    let mut upgraded = 0;
+    for p in &planned {
+        let name = &p.name;
+        eprintln!("  {name}: upgrading (session {})", p.session_id);
         let shell_pid = tmux.pane_pid(name).ok().flatten();
         let harness_pid = shell_pid.and_then(|sp| {
             state::descendant_pids(sp)
@@ -235,33 +181,49 @@ pub fn upgrade(
                 tool_def.bin
             );
         }
-
-        // Graceful-exit command (runtime-specific: Pi = /quit), sent at once.
+        // Graceful-exit command (runtime-specific: Pi = /quit).
         let exit_cmd = tool_def.exit_command.as_deref().unwrap_or("/exit");
         let target = Tmux::target(name);
         tmux.send_keys(&target, exit_cmd);
-
         // Wait for exit (up to 10s, then SIGKILL), then the shell prompt.
         if let Some(pid) = harness_pid {
             wait_for_exit(pid, 10);
         }
         wait_for_prompt(tmux, name, 5);
-
-        tmux.send_keys(&target, &cmd);
-
+        tmux.send_keys(&target, &p.cmd);
         upgraded += 1;
     }
 
-    if dry_run {
-        eprintln!("\n{upgraded} session(s) would be upgraded, {skipped} skipped (dry run).");
-    } else {
-        eprintln!("\nUpgraded {upgraded} session(s), skipped {skipped}.");
-    }
+    eprintln!("\nUpgraded {upgraded} session(s), skipped {skipped}.");
     if let Some(m) = model {
         eprintln!("Model: {m}");
     }
-
     Ok(())
+}
+
+/// Epoch seconds now (0 on the impossible platform error).
+fn now_epoch() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Prompt on stderr and read yes/no from stdin. Returns true only on an explicit
+/// `y`/`yes`. A non-tty / EOF / read error returns false, so a non-interactive
+/// `upgrade` without `--force` aborts safely instead of relaunching everything.
+fn confirm(question: &str) -> Result<bool> {
+    use std::io::Write;
+    eprint!("{question} [y/N] ");
+    std::io::stderr().flush().ok();
+    let mut line = String::new();
+    match std::io::stdin().read_line(&mut line) {
+        Ok(0) | Err(_) => Ok(false),
+        Ok(_) => {
+            let a = line.trim().to_ascii_lowercase();
+            Ok(a == "y" || a == "yes")
+        }
+    }
 }
 
 /// Show harness status across all sessions.

@@ -50,19 +50,6 @@ impl Tmux {
         Some(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
-    /// Last PANE-OUTPUT epoch (`window_activity`) for a single session (None if
-    /// not found / tmux error). This is the readiness signal: it advances while
-    /// an agent produces output, unlike `session_activity` (client interaction),
-    /// which is frozen for an unattended working session. For a fresh per-poll
-    /// read; for a sweep, fetch `list_sessions_detailed` once and index it.
-    pub fn output_activity(&self, name: &str) -> Option<u64> {
-        self.list_sessions_detailed()
-            .ok()?
-            .into_iter()
-            .find(|s| s.name == name)
-            .map(|s| s.window_activity)
-    }
-
     /// Format a session name as a tmux target.
     /// Session names with `/` conflict with tmux's session/window target
     /// syntax. The trailing `:` tells tmux to treat the entire string as
@@ -363,12 +350,13 @@ pub struct SessionInfo {
     /// `#{session_activity}`: time of last CLIENT interaction with the session
     /// (keystroke / attach / switch). Used by the switcher for recency sort.
     /// NOT a signal of agent work -- it stays frozen while an unattended agent
-    /// streams output (see `output_activity` / readiness).
+    /// streams output.
     pub activity: u64,
     /// `#{window_activity}`: time of last PANE OUTPUT in the session's active
     /// window. This DOES advance while an agent is producing output (even
-    /// detached/headless), so it is the signal the readiness gate uses to tell
-    /// a working turn from an interrupted/idle one.
+    /// detached/headless). DISPLAY-ONLY since 4.0.0 (ADR 0008 removed readiness
+    /// inference): `upgrade`'s quiet-age column reports `now - window_activity`;
+    /// it is never a gate.
     pub window_activity: u64,
 }
 

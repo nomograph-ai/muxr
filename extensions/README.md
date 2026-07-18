@@ -42,24 +42,14 @@ built-in default when absent. The subprocess points today:
   fall back to muxr's built-in `[layout]`. Repo-scope it by branching on the
   intent's `repo` (emit `{}` to defer to defaults) -- no per-repo config field
   needed.
-- [`examples/make-durable.sh`](examples/make-durable.sh) -- `[extensions].make_durable`.
-  Supplies the pre-recycle flush message; muxr always appends its own exit
-  directive after it.
-- [`examples/readiness.sh`](examples/readiness.sh) -- a `Command` readiness
-  probe, wired via a runtime adapter's `[tools.<name>.readiness] type = "command"`
-  (not `[extensions]`). exit 0 = safe to relaunch, non-zero = busy. Corroborates
-  a `busy` state file against tmux pane activity so an interrupted-but-idle
-  session is reclaimed instead of stranded for up to an hour.
 
 These are templates to copy, not drop-in installs -- they encode *your*
 workflow. In practice they live in your own estate repo (e.g. a `configs/`
 dir), referenced from your muxr config. Prefer a `~/`-relative path so the
 config stays portable across machines and usernames: `[extensions]` commands
-run via `sh -c`, so a leading `~/` expands. (A `Command` readiness probe is the
-exception -- its `argv[0]` is executed directly, without a shell, so give it an
-absolute path or a bare name on `PATH`.) They are deliberately **not** something
-muxr distributes for you; that is the whole point of the subprocess contract
-(any language, any logic).
+run via `sh -c`, so a leading `~/` expands. They are deliberately **not**
+something muxr distributes for you; that is the whole point of the subprocess
+contract (any language, any logic).
 
 ## Using an adapter
 
@@ -72,8 +62,7 @@ lands (tracked for 3.1), wire one of two ways:
 
    ```toml
    [extensions]
-   resolver     = "~/<your-estate>/configs/resolver.sh"
-   make_durable = "~/<your-estate>/configs/make-durable.sh"
+   resolver = "~/<your-estate>/configs/resolver.sh"
    ```
 
 ## Distribution
