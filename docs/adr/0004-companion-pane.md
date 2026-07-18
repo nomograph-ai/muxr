@@ -127,3 +127,25 @@ the `deny_unknown_fields` coverage.
   path.
 - **A post-create hook.** No post-create hook exists, and restore bypasses hooks
   entirely; the chokepoint is `create_session`.
+
+## Update (v4.0.0): renamed `companion` -> `viewer`; yazi viewer engine
+
+The core decision above (an opt-in auxiliary pane created at the
+`create_session` chokepoint, restore-faithful, config-driven, per-repo
+overridable) is unchanged. Two things evolved and are recorded here rather than
+in a new ADR, because the mechanism did not change:
+
+- **Config key `companion` -> `viewer`.** The name `companion` under-describes
+  what the pane is for; v4 renames the config key to `viewer` (with
+  `companion` in `KNOWN_RENAMES` + a `muxr config migrate` arm, so old fragments
+  still load during the cross-machine transition). `Companion`/`companion_for`
+  internals may keep their names or follow suit; the CONFIG surface is `viewer`.
+- **Viewer engine = the chromium-free yazi bundle.** The v1 previewer sketch
+  (`muxr-preview`, markdown via a pager, mermaid via `mmdc`, SVG via `chafa`) is
+  superseded by the operator-owned `muxr-viewer` bundle: yazi + glow (markdown) +
+  mermaid-ascii (mermaid, no chromium) + resvg (crisp SVG via kitty-graphics),
+  referenced by the bare PATH name `muxr-viewer` (operator-layer, not a leaf
+  path). Still fully operator-owned per ADR 0001 -- muxr only splits the pane and
+  runs the configured command. This is also why recycle no longer needs to infer
+  a safe reset moment ([ADR 0008](0008-remove-readiness-inference-recycle-sentinel.md)):
+  the viewer makes glancing at work first-class.

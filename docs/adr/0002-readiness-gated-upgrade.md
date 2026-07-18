@@ -1,6 +1,6 @@
 # ADR 0002: Readiness-gated upgrade
 
-- Status: Accepted (implemented)
+- Status: Superseded by [ADR 0008](0008-remove-readiness-inference-recycle-sentinel.md)
 - Date: 2026-07-01 (recorded; the design predates this and was captured as prose)
 - Implemented in: `src/state.rs` (probe classifier + gate), `muxr upgrade` / `muxr migrate`, `muxr status`
 - Relates to: [ADR 0001](0001-extension-architecture.md) -- the extensions-first posture this instantiates

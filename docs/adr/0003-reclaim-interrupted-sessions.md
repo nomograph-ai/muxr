@@ -1,6 +1,6 @@
 # ADR 0003: Reclaim interrupted-but-idle sessions via a Command probe
 
-- Status: Accepted
+- Status: Superseded by [ADR 0008](0008-remove-readiness-inference-recycle-sentinel.md)
 - Date: 2026-07-01
 - Relates to: [ADR 0001](0001-extension-architecture.md), [ADR 0002](0002-readiness-gated-upgrade.md), nomograph/muxr#6
 - Realized in: `extensions/examples/readiness.sh` (reference implementation)

@@ -1,6 +1,6 @@
 # ADR 0007: Interrupt-reclaim in the core File probe (corroborate busy against pane activity)
 
-- Status: Accepted
+- Status: Superseded by [ADR 0008](0008-remove-readiness-inference-recycle-sentinel.md)
 - Date: 2026-07-07
 - Relates to: [ADR 0001](0001-extension-architecture.md), [ADR 0002](0002-readiness-gated-upgrade.md), [ADR 0003](0003-reclaim-interrupted-sessions.md), nomograph/muxr#12
 - Implemented in: 3.6.2; **corroboration signal corrected in 3.6.3** (see "The signal" below)

@@ -46,18 +46,24 @@ Extensions take two shapes:
   embedded defaults (`include_str!`); `opencode` is a config-only third-party
   port (a worked example, not a default).
 - **Imperative subprocess points** -- `resolver` (the single launch chokepoint:
-  intent in, layout facts out), `make_durable` (pre-recycle flush message),
-  `session_env`, `chooser`, `pre_create` hooks, and adapter-declared `Command`
-  probes (`session_discovery`, `readiness`). Any language, any logic; they live
-  in the operator's estate repo, referenced from the muxr config.
+  intent in, layout facts out), `session_env`, `chooser`, `pre_create` hooks, and
+  adapter-declared `Command` probes (`session_discovery`). Any language, any
+  logic; they live in the operator's estate repo, referenced from the muxr
+  config. (`make_durable` and the `readiness` probe were removed in 4.0.0 -- see
+  [ADR 0008](0008-remove-readiness-inference-recycle-sentinel.md): recycle's
+  flush moved into the estate `/recycle` skill, and readiness inference was
+  deleted rather than re-patched.)
 
 ## Consequences
 
 - **Most change ships without a muxr release** -- as an edit to a script or a
-  TOML adapter in the operator's estate. [ADR 0002](0002-readiness-gated-upgrade.md)
-  (readiness) is an adapter-declared probe; [ADR 0003](0003-reclaim-interrupted-sessions.md)
-  (interrupt reclaim) is a `Command` probe with zero core change. That is the
-  posture working as intended.
+  TOML adapter in the operator's estate. `session_discovery` (adapter TOML) and
+  the `resolver` / `session_env` / `chooser` subprocess points are all
+  operator-owned and change without a binary rev. (The readiness probe of
+  [ADR 0002](0002-readiness-gated-upgrade.md) / [ADR 0003](0003-reclaim-interrupted-sessions.md)
+  was one such example until 4.0.0 removed readiness inference entirely --
+  [ADR 0008](0008-remove-readiness-inference-recycle-sentinel.md); its removal was
+  about an unobservable signal, not a failure of the extension posture.)
 - Bare muxr (no `[extensions]` / `[session_env]` / `[chooser]`) stays a fully
   usable launcher -- the bare-launcher test.
 - The cost is one indirection per chokepoint (a subprocess) and the discipline
