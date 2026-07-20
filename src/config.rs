@@ -947,10 +947,12 @@ impl Remote {
 /// fragment declaring a higher version is from a newer muxr and this binary
 /// cannot parse it safely, so we fail loud (see `check_schema_version`) rather
 /// than let the strict parse surface a cryptic unknown-field error. Bump this
-/// in lockstep with any BREAKING schema change (Phase 3 / v4.0.0 will be the
-/// first bump, to 2). Absent `schema_version` in a config is treated as this
-/// value -- the current baseline -- so existing unversioned configs are fine.
-pub const MAX_SCHEMA_VERSION: u32 = 1;
+/// in lockstep with any BREAKING schema change. Bumped to 2 in v4.0.0 (the
+/// breaking release: readiness removed, per-repo scoping, `companion` -> `viewer`),
+/// so a v4 fragment may declare `schema_version = 2`. Absent `schema_version` in a
+/// config is treated as this value -- the current baseline -- so existing
+/// unversioned configs are fine.
+pub const MAX_SCHEMA_VERSION: u32 = 2;
 
 /// Lenient pre-parse probe: extracts ONLY `schema_version`, ignoring every
 /// other (possibly newer, unknown) field. Deliberately NOT `deny_unknown_fields`
@@ -1089,8 +1091,8 @@ impl Config {
     /// redeclaring `muxr-setup` never runs it twice); resolver/session_env/tools
     /// are first-wins (machine-global config, then sorted-first fragment) --
     /// fragments are expected to declare identical bootstrap singletons. Any
-    /// OTHER top-level key is ineffective across the boundary and WARNs (P3-8
-    /// will hard-error it).
+    /// OTHER top-level key is ineffective across the boundary and is a HARD
+    /// ERROR (v4.0.0; P2 only warned).
     fn discover_and_merge(&mut self) -> Result<()> {
         if self.discovery.roots.is_empty() {
             return Ok(());
@@ -1137,28 +1139,37 @@ impl Config {
             // A fragment contributes repos/remotes PLUS the per-repo scoping
             // fields (hooks/extensions/session_env/tools). Any OTHER top-level
             // key parsed fine (it's a known Config field) but is INEFFECTIVE
-            // across the discovery boundary -- WARN so a mistakenly-placed
-            // [layout]/[chooser]/... block is visible instead of silently
-            // dropped. (P3-8 will hard-error this; warning first is the additive
-            // step from P2.)
+            // across the discovery boundary -- so it is a HARD ERROR (v4.0.0;
+            // P2 warned first, this is the breaking flip). Fail loud on
+            // present-but-ineffective rather than silently dropping a
+            // mistakenly-placed [layout]/[chooser]/... block.
             if let Ok(table) = toml::from_str::<toml::Table>(&content) {
-                for key in table.keys() {
-                    if !matches!(
-                        key.as_str(),
-                        "repos"
-                            | "remotes"
-                            | "schema_version"
-                            | "hooks"
-                            | "extensions"
-                            | "session_env"
-                            | "tools"
-                    ) {
-                        crate::ui::warn(&format!(
-                            "fragment {source}: top-level `{key}` is ignored -- a fragment \
-                             contributes only [repos.*], [remotes.*], [hooks], [extensions], \
-                             [session_env] and [tools.*]"
-                        ));
-                    }
+                let offenders: Vec<&String> = table
+                    .keys()
+                    .filter(|key| {
+                        !matches!(
+                            key.as_str(),
+                            "repos"
+                                | "remotes"
+                                | "schema_version"
+                                | "hooks"
+                                | "extensions"
+                                | "session_env"
+                                | "tools"
+                        )
+                    })
+                    .collect();
+                if !offenders.is_empty() {
+                    let keys = offenders
+                        .iter()
+                        .map(|k| format!("`{k}`"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    anyhow::bail!(
+                        "fragment {source}: top-level {keys} not allowed in a fragment -- \
+                         a fragment contributes only [repos.*], [remotes.*], [hooks], \
+                         [extensions], [session_env] and [tools.*]"
+                    );
                 }
             }
             // repos + remotes: identity is per-repo, so a duplicate name across
@@ -2850,6 +2861,28 @@ prompt_mode = "string"
             config.session_env.get("FOO").map(String::as_str),
             Some("from-global"),
             "global session_env key wins (first-wins)"
+        );
+    }
+
+    #[test]
+    fn discovery_rejects_disallowed_fragment_key() {
+        // A fragment top-level key that is a valid Config field but ineffective
+        // across the discovery boundary (e.g. [layout]) is a HARD ERROR in
+        // v4.0.0 (P2 only warned).
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("ns").join("repoA");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(
+            repo.join("muxr.toml"),
+            "[repos.alpha]\ndir = \"~/a\"\ncolor = \"#123456\"\n\n[layout]\ncampaigns_dir = \"x\"\n",
+        )
+        .unwrap();
+        let mut config = Config::parse("[repos]\n", "<test>").unwrap();
+        config.discovery.roots = vec![root.path().to_string_lossy().into_owned()];
+        let err = config.discover_and_merge().unwrap_err().to_string();
+        assert!(
+            err.contains("`layout`") && err.contains("not allowed"),
+            "got: {err}"
         );
     }
 
