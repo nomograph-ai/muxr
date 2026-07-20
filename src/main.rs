@@ -869,6 +869,21 @@ fn cmd_config() -> Result<()> {
     Ok(())
 }
 
+/// Write `content` to `path` atomically: write a sibling `<path>.tmp` then rename
+/// it over the target (rename within a dir is atomic on POSIX), so a crash or
+/// power loss mid-write can never leave a truncated fragment. The rename also
+/// replaces a symlink target with a real file rather than writing THROUGH the
+/// symlink to an arbitrary destination.
+fn write_atomic(path: &std::path::Path, content: &str) -> Result<()> {
+    let mut tmp = path.as_os_str().to_os_string();
+    tmp.push(".tmp");
+    let tmp = std::path::PathBuf::from(tmp);
+    std::fs::write(&tmp, content).with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::rename(&tmp, path)
+        .with_context(|| format!("replacing {}", path.display()))?;
+    Ok(())
+}
+
 /// The git top-level of the current directory, via `git rev-parse`. Used to
 /// locate the current repo's `muxr.toml` fragment for `config migrate`.
 fn git_toplevel() -> Result<std::path::PathBuf> {
@@ -903,8 +918,7 @@ fn cmd_config_migrate(write: bool) -> Result<()> {
         return Ok(());
     }
     if write {
-        std::fs::write(&fragment, &new_content)
-            .with_context(|| format!("writing {}", fragment.display()))?;
+        write_atomic(&fragment, &new_content)?;
         ui::ok(&format!("migrated {where_} ({} change(s))", changes.len()));
     } else {
         ui::note(&format!(

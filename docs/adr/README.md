@@ -37,3 +37,4 @@ place. No separate RFC and ADR trees, no re-filing.
 | [0008](0008-remove-readiness-inference-recycle-sentinel.md) | Remove readiness inference; recycle via a positive sentinel handshake | Accepted (mechanism refined by [0010](0010-recycle-flush-muxr-owned.md)) |
 | [0009](0009-defer-campaign-worklog-rename.md) | Defer the campaign -> worklog vernacular rename | Accepted |
 | [0010](0010-recycle-flush-muxr-owned.md) | Recycle flush is muxr-owned (generic flush prompt + agent sentinel) | Accepted |
+| [0011](0011-fragments-carry-only-identity.md) | Discovered fragments carry only repos/remotes (no auto-exec config) | Accepted |
