@@ -352,7 +352,7 @@ pub struct FileDiscovery {
     pub id_key: String,
 }
 
-/// How to discover harness session IDs from running processes.
+/// How to discover tool session IDs from running processes.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum SessionDiscovery {
@@ -362,7 +362,7 @@ pub enum SessionDiscovery {
     None,
 }
 
-/// Configuration for a harness (AI coding tool).
+/// Configuration for an AI coding tool (the runtime muxr launches).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Tool {
@@ -383,7 +383,7 @@ pub struct Tool {
     /// Command to send for live model switch. Supports `{model}` interpolation.
     #[serde(default)]
     pub model_switch_command: Option<String>,
-    /// Command to exit the harness gracefully.
+    /// Command to exit the tool gracefully.
     #[serde(default)]
     pub exit_command: Option<String>,
     /// Args to pass when session ID is missing (fallback resume).
@@ -720,7 +720,7 @@ impl Tool {
         parts.join(" ")
     }
 
-    /// Build the launch command with harness-specific settings from the harness.
+    /// Build the launch command with tool-specific settings from the tool.
     ///
     /// If the tool has a `wrapper` set, the final command is
     /// `<wrapper> <launch_command> <settings flags...>`.
@@ -860,8 +860,8 @@ pub fn interpolate(template: &str, key: &str, value: &str) -> String {
 }
 
 /// Interpolate a `{key}` placeholder with the raw value (no escaping).
-/// Use for slash commands sent as keystrokes to a running harness --
-/// the harness reads the literal characters, not a shell.
+/// Use for slash commands sent as keystrokes to a running tool --
+/// the tool reads the literal characters, not a shell.
 pub fn interpolate_raw(template: &str, key: &str, value: &str) -> String {
     let placeholder = format!("{{{key}}}");
     template.replace(&placeholder, value)
@@ -1519,7 +1519,7 @@ impl Config {
         })
     }
 
-    /// Get the harness config for a tool name.
+    /// Get the tool config for a tool name.
     ///
     /// User config in `[tools.<name>]` is treated as a PARTIAL override over
     /// the built-in definition for known tools (claude, pi). Fields the user
@@ -1544,7 +1544,7 @@ impl Config {
         }
     }
 
-    /// All configured harness names (explicit user tools + shipped adapters).
+    /// All configured tool names (explicit user tools + shipped adapters).
     pub fn tool_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self.tools.keys().cloned().collect();
         for name in builtin_adapters().keys() {

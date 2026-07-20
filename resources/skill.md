@@ -9,7 +9,7 @@ allowed-tools: Bash(muxr *) Bash(muxr) Read
 *This skill is emitted by `muxr skill` (compiled into the binary), so it
 never drifts from the installed version.*
 
-muxr manages tmux sessions for AI coding harnesses. A session name is always
+muxr manages tmux sessions for AI coding tools. A session name is always
 two levels: **`<repo>/<campaign>`** (or `<repo>/switchboard` for the
 per-repo dispatcher). One session per campaign.
 
@@ -38,7 +38,7 @@ muxr owns tmux session lifecycle. For any of these, run the muxr verb
 | re-anchor after a `/compact` | `muxr reorient` |
 | spin a topic off | `muxr shard <new>` |
 | declutter a stale campaign | `muxr archive <campaign>` |
-| move a new harness binary | `muxr upgrade` |
+| move sessions onto a new tool binary | `muxr upgrade` |
 
 ## The one thing to get right: the first arg is a repo *key*
 
@@ -180,7 +180,7 @@ harness overrides it via `[recycle].flush_prompt` in its config -- tokens
 
 | Command | What it does |
 |---|---|
-| `muxr ls` / `muxr ls --active` | List sessions (all / only those with a running harness) |
+| `muxr ls` / `muxr ls --active` | List sessions (all / only those with a running tool) |
 | `muxr switch` | Interactive chooser: switch / open dormant / create |
 | `muxr shard <new>` | Spin a topic out of the current campaign into a sibling |
 | `muxr reorient [name]` | Nudge a session to re-read its campaign.md + log.md (use after `/compact`) |
@@ -191,8 +191,9 @@ harness overrides it via `[recycle].flush_prompt` in its config -- tokens
 | `muxr upgrade [name]` (alias `migrate`) | Move running sessions onto the freshly installed binary, in place. `--dry-run`, `--tool`, `--model`. Omit name for all |
 | `muxr retire <name>\|all` | Graceful `/exit` + kill; **drops** the session from saved state (won't return on restore) |
 | `muxr kill <name>\|all` | Kill the tmux session; leaves saved state intact |
-| `muxr broadcast [/cmd]` | Send a slash command (default `/reload`) to every harness session |
+| `muxr broadcast [/cmd]` | Send a slash command (default `/reload`) to every tool session |
 | `muxr rename <new>` | Rename current session: tmux + on-disk + runtime relink |
+| `muxr config migrate` | Rewrite this repo's `muxr.toml` fragment to the current schema (`--write` applies; dry-run by default) |
 | `muxr migrate-layout <repo>` | Migrate a repo's `campaigns/` tree to the 2-level model (`--dry-run` first) |
 | `muxr completions <shell>` | Shell completions (zsh, bash, fish) |
 | `muxr skill` | Emit this skill file |
@@ -205,9 +206,9 @@ Notes:
   kill when you want the pane gone but intend to bring it back. `upgrade`
   relaunches live work onto a new binary -- it is not kill+open.
 
-## Upgrading running sessions onto a new harness version
+## Upgrading running sessions onto a new tool version
 
-When a new harness binary (e.g. a new Claude Code) lands and you want your
+When a new tool binary (e.g. a new Claude Code) lands and you want your
 long-running sessions on it without losing their conversations, use
 `muxr upgrade` (alias `muxr migrate`) -- NOT raw `tmux`, and don't hand-roll
 session discovery:

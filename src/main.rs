@@ -47,7 +47,7 @@ pub(crate) struct Cli {
     #[arg(long)]
     fresh: bool,
 
-    /// Harness name (e.g., work, personal, oss)
+    /// Repo name (e.g., work, personal, oss)
     #[arg(num_args = 0..)]
     args: Vec<String>,
 }
@@ -58,8 +58,8 @@ enum Commands {
     Init,
     /// List active tmux sessions
     Ls {
-        /// Show only sessions with a running harness (claude) process. Hides
-        /// panes sitting at a shell prompt with no harness attached.
+        /// Show only sessions with a running tool (claude) process. Hides
+        /// panes sitting at a shell prompt with no tool attached.
         #[arg(long)]
         active: bool,
     },
@@ -67,7 +67,7 @@ enum Commands {
     Save,
     /// Restore sessions after reboot
     Restore,
-    /// Generate tmux status-left config from harnesses
+    /// Generate tmux status-left config from configured repos
     #[command(name = "tmux-status")]
     TmuxStatus,
     /// Print the merged config as JSON for extensions (statusline, glyph): each
@@ -89,7 +89,7 @@ enum Commands {
         /// Session name (e.g., work/default) or "all"
         name: String,
     },
-    /// Retire a session: gracefully /exit the harness, kill the tmux
+    /// Retire a session: gracefully /exit the tool, kill the tmux
     /// session. Drops the session from the saved state so future
     /// `muxr restore` won't recreate it.
     Retire {
@@ -97,11 +97,11 @@ enum Commands {
         /// tmux session.
         name: String,
     },
-    /// Move running sessions onto a newly installed harness binary, in place.
+    /// Move running sessions onto a newly installed tool binary, in place.
     ///
-    /// Use this after upgrading Claude Code (or any harness) to migrate your
+    /// Use this after upgrading Claude Code (or any tool) to migrate your
     /// long-running sessions onto the new version WITHOUT losing their
-    /// conversation, harness rules, or working dirs. For each target: graceful
+    /// conversation, HARNESS.md rules, or working dirs. For each target: graceful
     /// `/exit`, then relaunch with the full composed command (HARNESS prompt +
     /// campaign --add-dir paths + --resume) on the binary the tool now
     /// resolves to. Aliased as `migrate`.
@@ -126,13 +126,13 @@ enum Commands {
     },
     /// Interactive session switcher (TUI)
     Switch,
-    /// Broadcast a slash command to every harness session.
+    /// Broadcast a slash command to every tool session.
     ///
     /// Default command is `/reload` -- useful when you've shipped an
     /// extension change and want every running Pi session to pick it
     /// up without manually relaunching each one.
     ///
-    /// Filters: by default applies to every active harness session.
+    /// Filters: by default applies to every active tool session.
     /// Pass --tool to limit to one runtime (e.g. --tool pi),
     /// --repo to limit to one repo (e.g. --repo work).
     /// Pass --dry-run to print the targets without sending keys.
@@ -237,7 +237,7 @@ enum Commands {
         keep_archives: bool,
     },
 
-    /// Harness subcommands (dynamic, from config)
+    /// Tool subcommands (dynamic, from config): `muxr <tool> upgrade|model`
     #[command(external_subcommand)]
     External(Vec<String>),
 }
@@ -334,7 +334,7 @@ fn main() -> Result<()> {
         }) => cmd_migrate_layout(repo.as_deref(), dir.as_deref(), dry_run, keep_archives),
         Some(Commands::External(args)) => {
             let config = Config::load()?;
-            cmd_harness_dispatch(&tmux, &config, &args)
+            cmd_tool_dispatch(&tmux, &config, &args)
         }
         None => {
             if cli.args.is_empty() {
@@ -351,7 +351,7 @@ fn main() -> Result<()> {
 
                 if is_tool {
                     let config = config.unwrap();
-                    cmd_harness_dispatch(&tmux, &config, &cli.args)
+                    cmd_tool_dispatch(&tmux, &config, &cli.args)
                 } else {
                     cmd_open_dispatch(&tmux, &cli.args, cli.tool.as_deref(), cli.fresh)
                 }
@@ -375,13 +375,13 @@ fn cmd_control_plane(tmux: &Tmux) -> Result<()> {
     Ok(())
 }
 
-/// Rename the current tmux session and flow through to the harness.
+/// Rename the current tmux session and flow through to the tool.
 fn cmd_rename(tmux: &Tmux, name: &str, tool_override: Option<&str>) -> Result<()> {
     let old_name = tmux.current_session().unwrap_or_default();
     rename_session_by_name(tmux, &old_name, name, tool_override)
 }
 
-/// Rename a specific tmux session by name and flow through to its harness.
+/// Rename a specific tmux session by name and flow through to its tool.
 /// Shared between the CLI `muxr rename` and the TUI switcher.
 pub(crate) fn rename_session_by_name(
     tmux: &Tmux,
@@ -498,20 +498,20 @@ fn cmd_kill(tmux: &Tmux, name: &str) -> Result<()> {
 }
 
 /// Retire a session cleanly:
-/// 1. If a harness is running in the pane, send `/exit` and wait for the
+/// 1. If a tool is running in the pane, send `/exit` and wait for the
 ///    process to terminate (up to 10s, then SIGKILL).
 /// 2. Kill the tmux session.
 /// 3. Drop the session from `state.json` so `muxr restore` won't resurrect it.
 ///
 /// This is the counterpart to `new`: retire deletes everything new creates.
-/// Broadcast a slash command to every harness session.
+/// Broadcast a slash command to every tool session.
 ///
 /// Use case: ship an extension change in pi-stack, then
 /// `muxr broadcast` (defaults to /reload) to make every running Pi
 /// session pick it up without manually relaunching each one.
 ///
 /// Targets every tmux session whose first segment is a configured
-/// harness AND that has the harness binary running in the pane.
+/// repo AND that has the tool binary running in the pane.
 /// Skips the muxr control plane. Filters: --tool, --repo.
 fn cmd_broadcast(
     tmux: &Tmux,
@@ -788,13 +788,13 @@ fn cmd_switch(tmux: &Tmux) -> Result<()> {
     }
 }
 
-/// Dispatch harness subcommands: muxr claude upgrade --model X
-fn cmd_harness_dispatch(tmux: &Tmux, config: &Config, args: &[String]) -> Result<()> {
-    let harness_name = args.first().context("Missing harness name")?;
+/// Dispatch tool subcommands: muxr claude upgrade --model X
+fn cmd_tool_dispatch(tmux: &Tmux, config: &Config, args: &[String]) -> Result<()> {
+    let tool_name = args.first().context("Missing tool name")?;
 
-    let harness = config
-        .tool_for(harness_name)
-        .with_context(|| format!("Unknown harness: {harness_name}"))?;
+    let tool = config
+        .tool_for(tool_name)
+        .with_context(|| format!("Unknown tool: {tool_name}"))?;
 
     let sub = args.get(1).map(|s| s.as_str()).unwrap_or("status");
 
@@ -807,8 +807,8 @@ fn cmd_harness_dispatch(tmux: &Tmux, config: &Config, args: &[String]) -> Result
             tool::upgrade(
                 tmux,
                 config,
-                harness_name,
-                &harness,
+                tool_name,
+                &tool,
                 tool::UpgradeOpts {
                     model: model.as_deref(),
                     name_filter: name.as_deref(),
@@ -819,10 +819,10 @@ fn cmd_harness_dispatch(tmux: &Tmux, config: &Config, args: &[String]) -> Result
         }
         "model" => {
             let model = args.get(2).map(|s| s.as_str());
-            tool::model_switch(tmux, config, harness_name, &harness, model)
+            tool::model_switch(tmux, config, tool_name, &tool, model)
         }
         other => {
-            anyhow::bail!("Unknown {harness_name} subcommand: {other}\nAvailable: model, upgrade")
+            anyhow::bail!("Unknown {tool_name} subcommand: {other}\nAvailable: model, upgrade")
         }
     }
 }
@@ -846,7 +846,7 @@ pub(crate) fn fmt_age(secs: u64) -> String {
     }
 }
 
-/// Generate tmux status-left format string from config harnesses.
+/// Generate tmux status-left format string from configured repos.
 /// Used by tmux.conf: set -g status-left "#(muxr tmux-status)"
 /// Print the merged config as JSON for extensions to consume (statusline
 /// glyph/color, glyph builder): `{ "repos": { "<name>": { "color", "ext" } } }`.

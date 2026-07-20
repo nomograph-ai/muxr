@@ -7,7 +7,7 @@
 [![built with GitLab](https://img.shields.io/badge/built_with-GitLab-FC6D26?logo=gitlab)](https://gitlab.com/nomograph/muxr)
 [![crates.io](https://img.shields.io/crates/v/nomograph-muxr.svg)](https://crates.io/crates/nomograph-muxr)
 
-Harness session multiplexer for AI coding workflows. Owns the address
+Session multiplexer for AI coding workflows. Owns the address
 `<repo>/<campaign>` across tmux, the filesystem, and your AI runtime, so
 a rename or move stays coherent in all three.
 
@@ -227,10 +227,10 @@ muxr upgrade --model opus-4-8   # also switch model on relaunch
 ```
 
 For each target muxr discovers the session id, sends a graceful `/exit`,
-waits for the harness to quit, then relaunches it with the full composed
+waits for the tool to quit, then relaunches it with the full composed
 command and `--resume`. Because the binary name is resolved fresh, the
-relaunch picks up a newly installed harness version (e.g. a new Claude
-Code release) without losing the conversation, harness rules, or working
+relaunch picks up a newly installed tool version (e.g. a new Claude
+Code release) without losing the conversation, HARNESS.md rules, or working
 directories. Run it from the `muxr` control shell, not from inside an
 agent session.
 
@@ -252,8 +252,10 @@ agent session.
 | `muxr kill all` | Kill all sessions |
 | `muxr retire <name>\|all` | Graceful `/exit` + kill; drops from saved state |
 | `muxr upgrade [name]` | Relaunch sessions in place on the new binary (`--dry-run`, `--tool`, `--model`) |
-| `muxr broadcast [/cmd]` | Send a slash command to every harness session |
+| `muxr broadcast [/cmd]` | Send a slash command to every tool session |
 | `muxr rename <name>` | Rename: tmux + session file on disk + runtime relink |
+| `muxr config` | Print the merged config as JSON (for statusline/glyph extensions) |
+| `muxr config migrate` | Rewrite this repo's `muxr.toml` fragment to the current schema (`--write` applies; dry-run by default) |
 | `muxr migrate-layout <repo>` | Migrate a repo's `campaigns/` tree to the 2-level model (`--dry-run`, `--keep-archives`) |
 | `muxr init` | Create default config |
 | `muxr completions <shell>` | Shell completions (zsh, bash, fish) |
