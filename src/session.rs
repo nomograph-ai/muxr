@@ -164,7 +164,7 @@ pub(crate) fn cmd_open(
         &tool_cmd,
         &config.session_env_for(&session_name),
         config
-            .companion_for(&session_name, session_dir.to_str().unwrap_or(""))
+            .viewer_for(&session_name, session_dir.to_str().unwrap_or(""))
             .as_ref(),
     )?;
     tmux.attach(&session_name)?;
@@ -409,7 +409,7 @@ pub(crate) fn cmd_recycle(tmux: &Tmux, name: Option<&str>) -> Result<()> {
         &tool_cmd,
         &config.session_env_for(&session),
         config
-            .companion_for(&session, session_dir.to_str().unwrap_or(""))
+            .viewer_for(&session, session_dir.to_str().unwrap_or(""))
             .as_ref(),
     )?;
 

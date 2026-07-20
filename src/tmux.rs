@@ -86,7 +86,7 @@ impl Tmux {
     /// If `tool_cmd` is empty, creates a bare shell session.
     /// `env` sets session-scoped variables via `new-session -e KEY=VALUE`
     /// (tmux 3.2+); pass `&[]` for none.
-    /// `companion`, when set, splits an extra pane running its command (focus
+    /// `viewer`, when set, splits an extra pane running its command (focus
     /// stays on the tool pane). Recreated identically on restore. See ADR 0004.
     pub fn create_session(
         &self,
@@ -94,7 +94,7 @@ impl Tmux {
         dir: &Path,
         tool_cmd: &str,
         env: &[(String, String)],
-        companion: Option<&crate::config::ResolvedCompanion>,
+        viewer: Option<&crate::config::ResolvedViewer>,
     ) -> Result<()> {
         let dir_str = dir.to_str().context("Invalid directory path")?;
 
@@ -123,10 +123,10 @@ impl Tmux {
             }
         }
 
-        // Companion pane: split an auxiliary pane running the configured command
+        // Viewer pane: split an auxiliary pane running the configured command
         // (`-d` keeps focus on the tool pane). Runs on launch AND restore, so a
         // restored session comes back byte-identical. See ADR 0004.
-        if let Some(c) = companion {
+        if let Some(c) = viewer {
             let flag = if c.side == "v" { "-v" } else { "-h" };
             let size = format!("{}%", c.size);
             let status = self
@@ -144,9 +144,9 @@ impl Tmux {
                     &c.cmd,
                 ])
                 .status()
-                .context("Failed to split companion pane")?;
+                .context("Failed to split viewer pane")?;
             if !status.success() {
-                anyhow::bail!("tmux split-window (companion) failed for {name}");
+                anyhow::bail!("tmux split-window (viewer) failed for {name}");
             }
         }
 
@@ -403,16 +403,16 @@ mod tests {
     }
 
     // Behavioral: drives the real create_session against an ISOLATED tmux server
-    // and asserts the companion adds exactly one pane. Restore calls the SAME
-    // create_session with companion_for, so a faithful restore follows from this.
+    // and asserts the viewer adds exactly one pane. Restore calls the SAME
+    // create_session with viewer_for, so a faithful restore follows from this.
     // `#[ignore]`d because it spawns a tmux server; run: `cargo test -- --ignored`.
     #[test]
     #[ignore]
-    fn create_session_adds_companion_pane() {
-        use crate::config::ResolvedCompanion;
+    fn create_session_adds_viewer_pane() {
+        use crate::config::ResolvedViewer;
         use std::process::Command as Pc;
 
-        let srv = "muxr-companion-selftest";
+        let srv = "muxr-viewer-selftest";
         let kill = || {
             let _ = Pc::new("tmux").args(["-L", srv, "kill-server"]).status();
         };
@@ -420,16 +420,16 @@ mod tests {
 
         let tmux = Tmux::new(Some(srv.to_string()));
         let dir = std::env::temp_dir();
-        let companion = ResolvedCompanion {
+        let viewer = ResolvedViewer {
             cmd: "sleep 600".to_string(),
             side: "h".to_string(),
             size: 40,
         };
 
-        tmux.create_session("cp/with", &dir, "", &[], Some(&companion))
-            .expect("create session with companion");
+        tmux.create_session("cp/with", &dir, "", &[], Some(&viewer))
+            .expect("create session with viewer");
         tmux.create_session("cp/without", &dir, "", &[], None)
-            .expect("create session without companion");
+            .expect("create session without viewer");
 
         let panes = |name: &str| -> usize {
             let out = Pc::new("tmux")
@@ -451,7 +451,7 @@ mod tests {
         let without = panes("cp/without");
         kill();
 
-        assert_eq!(with, 2, "companion session must have a second pane");
-        assert_eq!(without, 1, "no-companion session stays single-pane");
+        assert_eq!(with, 2, "viewer session must have a second pane");
+        assert_eq!(without, 1, "no-viewer session stays single-pane");
     }
 }

@@ -73,8 +73,12 @@ enum Commands {
     /// Print the merged config as JSON for extensions (statusline, glyph): each
     /// repo's color + open `ext` namespace. Reflects discovered fragments, so a
     /// preference (chrome, glyph) lives in config, never compiled into muxr.
+    /// `config migrate` rewrites the current repo's fragment to the v4 schema.
     #[command(name = "config")]
-    Config,
+    Config {
+        #[command(subcommand)]
+        action: Option<ConfigAction>,
+    },
     /// Rename the current session
     Rename {
         /// New name for the current session
@@ -238,6 +242,21 @@ enum Commands {
     External(Vec<String>),
 }
 
+#[derive(Subcommand)]
+enum ConfigAction {
+    /// Rewrite the CURRENT repo's muxr.toml fragment to the v4 schema: rename
+    /// deprecated keys (`companion` -> `viewer`, `harnesses` -> `repos`) and
+    /// stamp `schema_version`. Dry-run by default (prints the diff); `--write`
+    /// applies. Scoped to the current repo only -- commit the change per-repo.
+    /// NOTE: a migrated fragment uses v4-only keys, so only `--write` once every
+    /// machine is on muxr >= 4.0.0 (the cross-machine rollout gate).
+    Migrate {
+        /// Apply the changes (default: print the diff and change nothing).
+        #[arg(long)]
+        write: bool,
+    },
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let tmux = Tmux::new(cli.server);
@@ -254,7 +273,10 @@ fn main() -> Result<()> {
             state::SavedState::restore(&tmux, &config)
         }
         Some(Commands::TmuxStatus) => cmd_tmux_status(&tmux),
-        Some(Commands::Config) => cmd_config(),
+        Some(Commands::Config { action }) => match action {
+            None => cmd_config(),
+            Some(ConfigAction::Migrate { write }) => cmd_config_migrate(write),
+        },
         Some(Commands::Upgrade {
             name,
             tool,
@@ -844,6 +866,55 @@ fn cmd_config() -> Result<()> {
     }
     let out = serde_json::json!({ "repos": serde_json::Value::Object(repos) });
     println!("{}", serde_json::to_string_pretty(&out)?);
+    Ok(())
+}
+
+/// The git top-level of the current directory, via `git rev-parse`. Used to
+/// locate the current repo's `muxr.toml` fragment for `config migrate`.
+fn git_toplevel() -> Result<std::path::PathBuf> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .context("running git rev-parse --show-toplevel")?;
+    if !out.status.success() {
+        anyhow::bail!("not inside a git repository -- run `muxr config migrate` from a repo");
+    }
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    Ok(std::path::PathBuf::from(path))
+}
+
+/// `muxr config migrate`: rewrite the CURRENT repo's `muxr.toml` fragment to the
+/// v4 schema (see `config::migrate_fragment`). Dry-run by default (prints the
+/// per-line diff); `--write` applies. Scoped to the current repo's fragment only
+/// -- the operator commits per-repo (no bulk multi-repo write).
+fn cmd_config_migrate(write: bool) -> Result<()> {
+    let fragment = git_toplevel()?.join("muxr.toml");
+    if !fragment.exists() {
+        anyhow::bail!(
+            "no muxr.toml fragment at {} -- run this from a repo that carries one",
+            fragment.display()
+        );
+    }
+    let content = primitives::read_text(&fragment)?;
+    let (new_content, changes) = config::migrate_fragment(&content);
+    let where_ = ui::abbreviate_home(&fragment.display().to_string());
+    if changes.is_empty() {
+        ui::ok(&format!("{where_} is already current"));
+        return Ok(());
+    }
+    if write {
+        std::fs::write(&fragment, &new_content)
+            .with_context(|| format!("writing {}", fragment.display()))?;
+        ui::ok(&format!("migrated {where_} ({} change(s))", changes.len()));
+    } else {
+        ui::note(&format!(
+            "dry run: {} change(s) for {where_} -- re-run with --write to apply",
+            changes.len()
+        ));
+        for c in &changes {
+            println!("{c}");
+        }
+    }
     Ok(())
 }
 

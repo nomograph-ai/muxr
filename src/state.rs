@@ -363,7 +363,7 @@ impl SavedState {
                     &tool_cmd,
                     &config.session_env_for(&s.name),
                     config
-                        .companion_for(&s.name, dir.to_str().unwrap_or(""))
+                        .viewer_for(&s.name, dir.to_str().unwrap_or(""))
                         .as_ref(),
                 )?;
                 eprintln!("  {} -> {}", s.name, s.dir);

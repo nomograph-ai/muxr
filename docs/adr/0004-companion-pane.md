@@ -3,7 +3,7 @@
 - Status: Accepted (implemented in v3.5.0)
 - Date: 2026-07-02
 - Relates to: [ADR 0001](0001-extension-architecture.md)
-- Implemented in: `src/config.rs` (`Companion` + `companion_for`) and `src/tmux.rs::create_session` (the split), threaded through the launch / recycle / local-restore call sites; remote + bare sessions pass `None`.
+- Implemented in: `src/config.rs` (`Viewer` + `viewer_for`; renamed from `Companion`/`companion_for` in v4.0.0 -- see the Update below) and `src/tmux.rs::create_session` (the split), threaded through the launch / recycle / local-restore call sites; remote + bare sessions pass `None`.
 
 ## Context
 
@@ -136,10 +136,16 @@ overridable) is unchanged. Two things evolved and are recorded here rather than
 in a new ADR, because the mechanism did not change:
 
 - **Config key `companion` -> `viewer`.** The name `companion` under-describes
-  what the pane is for; v4 renames the config key to `viewer` (with
-  `companion` in `KNOWN_RENAMES` + a `muxr config migrate` arm, so old fragments
-  still load during the cross-machine transition). `Companion`/`companion_for`
-  internals may keep their names or follow suit; the CONFIG surface is `viewer`.
+  what the pane is for; v4 renames the config key to `viewer`. So a v4 binary
+  still READS a v3-shaped fragment during the cross-machine transition, the
+  renamed `viewer` field carries `#[serde(alias = "companion")]` -- old fragments
+  load with zero broken-launch window (this, not `KNOWN_RENAMES`, is the
+  read-compat mechanism; `KNOWN_RENAMES`/`rename_hint` is reserved for keys that
+  are genuinely no longer accepted, like `harnesses`). `muxr config migrate`
+  canonicalizes a fragment to `viewer` (and stamps `schema_version = 2`) at the
+  operator's leisure; its rewrite map is `FRAGMENT_MIGRATIONS`. The internals
+  followed suit fully: `Companion` -> `Viewer`, `ResolvedCompanion` ->
+  `ResolvedViewer`, `companion_for` -> `viewer_for`.
 - **Viewer engine = the chromium-free yazi bundle.** The v1 previewer sketch
   (`muxr-preview`, markdown via a pager, mermaid via `mmdc`, SVG via `chafa`) is
   superseded by the operator-owned `muxr-viewer` bundle: yazi + glow (markdown) +

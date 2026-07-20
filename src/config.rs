@@ -55,12 +55,13 @@ pub struct Config {
     /// campaign lifecycle stays available via subcommands.
     #[serde(default)]
     pub chooser: Chooser,
-    /// Optional companion pane created beside the runtime at launch and
+    /// Optional viewer pane created beside the runtime at launch and
     /// recreated on restore. Global default; a per-repo
-    /// `[repos.<name>.companion]` overrides it. Absent -> no companion.
-    /// See ADR 0004.
-    #[serde(default)]
-    pub companion: Option<Companion>,
+    /// `[repos.<name>.viewer]` overrides it. Absent -> no viewer.
+    /// See ADR 0004. Renamed from `companion` in v4.0.0; the `companion` alias
+    /// keeps v3 fragments readable until `muxr config migrate` rewrites them.
+    #[serde(default, alias = "companion")]
+    pub viewer: Option<Viewer>,
     /// Namespace roots scanned for drop-in per-repo `muxr.toml` fragments, so a
     /// repo carries its own muxr entry with no central edit. Empty `roots` (the
     /// default, and any config with no `[discovery]`) means no discovery: the
@@ -251,9 +252,11 @@ pub struct Repo {
     /// Tool-launch settings. Passed through to the runtime at session start.
     #[serde(default)]
     pub launch: LaunchSettings,
-    /// Per-repo companion-pane override of the global `[companion]`.
-    #[serde(default)]
-    pub companion: Option<Companion>,
+    /// Per-repo viewer-pane override of the global `[viewer]`. Renamed from
+    /// `companion` in v4.0.0; the `companion` alias keeps v3 fragments readable
+    /// until `muxr config migrate` rewrites them.
+    #[serde(default, alias = "companion")]
+    pub viewer: Option<Viewer>,
     /// Open extension namespace: arbitrary TOML muxr carries but never
     /// interprets, handed to extensions verbatim (the resolver intent's `ext`
     /// field and the `muxr config` query). This is how a repo declares
@@ -297,39 +300,39 @@ pub struct LaunchSettings {
     pub wrapper: Option<String>,
 }
 
-/// An optional companion pane: a review/preview pane created beside the runtime
+/// An optional viewer pane: a review/preview pane created beside the runtime
 /// at launch and recreated on restore (config-driven, opt-in, per-repo
 /// overridable). muxr only splits the pane and runs `cmd`; what it renders is
 /// the operator's concern. See ADR 0004.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct Companion {
+pub struct Viewer {
     /// Off by default; must be true for the pane to be created.
     #[serde(default)]
     pub enabled: bool,
-    /// Command run in the companion pane. Templated with the same tokens as
+    /// Command run in the viewer pane. Templated with the same tokens as
     /// `[session_env]`: `{session}` `{repo}` `{campaign}` `{session_slug}` `{dir}`.
     pub cmd: String,
     /// Split direction: "h" (side-by-side) or "v" (stacked). Default "h".
-    #[serde(default = "default_companion_side")]
+    #[serde(default = "default_viewer_side")]
     pub side: String,
-    /// Companion pane size, as a percentage of the split. Default 40.
-    #[serde(default = "default_companion_size")]
+    /// Viewer pane size, as a percentage of the split. Default 40.
+    #[serde(default = "default_viewer_size")]
     pub size: u8,
 }
 
-fn default_companion_side() -> String {
+fn default_viewer_side() -> String {
     "h".to_string()
 }
 
-fn default_companion_size() -> u8 {
+fn default_viewer_size() -> u8 {
     40
 }
 
-/// A `[companion]` resolved for a concrete session: the literal command (tokens
-/// interpolated) plus its geometry. Returned by `Config::companion_for`.
+/// A `[viewer]` resolved for a concrete session: the literal command (tokens
+/// interpolated) plus its geometry. Returned by `Config::viewer_for`.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ResolvedCompanion {
+pub struct ResolvedViewer {
     pub cmd: String,
     pub side: String,
     pub size: u8,
@@ -547,6 +550,87 @@ fn rename_hint(content: &str) -> Option<String> {
          (the old names are no longer accepted).",
         hits.join("\n")
     ))
+}
+
+/// Deprecated fragment key segments and their v4 replacements, applied by
+/// `muxr config migrate` to canonicalize a per-repo fragment. `companion` is
+/// still ACCEPTED on read (a serde alias, so a v4 binary reads a v3 fragment);
+/// migrate rewrites it to the canonical `viewer`. `harnesses` -> `repos` is the
+/// older 3.x rename (no longer accepted on read -- see `KNOWN_RENAMES`).
+const FRAGMENT_MIGRATIONS: &[(&str, &str)] = &[("harnesses", "repos"), ("companion", "viewer")];
+
+/// Pure fragment migration for `muxr config migrate`: rewrite deprecated
+/// table-header key SEGMENTS to their v4 names and, if any rename happened and
+/// the fragment declares no `schema_version`, stamp `schema_version = 2` (so a
+/// stray < v4 binary reading the now-v4 fragment fails loud with "upgrade muxr"
+/// rather than an unknown-field error). Returns the new content and an ordered
+/// change list; an EMPTY list means the fragment is already current. Deliberately
+/// line-oriented (not a serde round-trip) so it preserves comments, blank lines,
+/// spacing, and key order. Quoted dotted keys (`["a.b"]`) are out of scope --
+/// estate fragments use bare names.
+pub fn migrate_fragment(content: &str) -> (String, Vec<String>) {
+    let mut changes = Vec::new();
+    let mut has_schema = false;
+    let mut out: Vec<String> = Vec::new();
+    for line in content.lines() {
+        if line.trim_start().starts_with("schema_version") {
+            has_schema = true;
+        }
+        if let Some(new_line) = migrate_header_line(line) {
+            changes.push(format!("- {line}\n+ {new_line}"));
+            out.push(new_line);
+        } else {
+            out.push(line.to_string());
+        }
+    }
+    let mut new_content = out.join("\n");
+    if content.ends_with('\n') {
+        new_content.push('\n');
+    }
+    // Stamp schema_version only when a rename actually introduced v4 keys.
+    if !changes.is_empty() && !has_schema {
+        new_content = format!("schema_version = 2\n{new_content}");
+        changes.push("+ schema_version = 2".to_string());
+    }
+    (new_content, changes)
+}
+
+/// If `line` is a TOML table header (`[path]` or `[[path]]`) whose dotted path
+/// contains a key segment in [`FRAGMENT_MIGRATIONS`], return the rewritten line
+/// (indentation and bracket style preserved); otherwise `None`. Segment-exact
+/// matching, so a repo literally named `companion` is untouched unless it is
+/// exactly that path segment.
+fn migrate_header_line(line: &str) -> Option<String> {
+    let indent_len = line.len() - line.trim_start().len();
+    let (indent, rest_full) = line.split_at(indent_len);
+    let rest = rest_full.trim_end();
+    let (open, close, inner) = if let Some(i) =
+        rest.strip_prefix("[[").and_then(|s| s.strip_suffix("]]"))
+    {
+        ("[[", "]]", i)
+    } else if let Some(i) = rest.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+        ("[", "]", i)
+    } else {
+        return None;
+    };
+    let mut changed = false;
+    let new_segments: Vec<String> = inner
+        .split('.')
+        .map(|seg| {
+            let key = seg.trim();
+            for (old, new) in FRAGMENT_MIGRATIONS {
+                if key == *old {
+                    changed = true;
+                    return (*new).to_string();
+                }
+            }
+            seg.to_string()
+        })
+        .collect();
+    if !changed {
+        return None;
+    }
+    Some(format!("{indent}{open}{}{close}", new_segments.join(".")))
 }
 
 /// One shipped adapter file: `extensions/adapters/<name>.toml` is a single
@@ -948,7 +1032,7 @@ impl Remote {
 /// cannot parse it safely, so we fail loud (see `check_schema_version`) rather
 /// than let the strict parse surface a cryptic unknown-field error. Bump this
 /// in lockstep with any BREAKING schema change. Bumped to 2 in v4.0.0 (the
-/// breaking release: readiness removed, per-repo scoping, `companion` -> `viewer`),
+/// breaking release: readiness removed, per-repo scoping, `viewer` -> `viewer`),
 /// so a v4 fragment may declare `schema_version = 2`. Absent `schema_version` in a
 /// config is treated as this value -- the current baseline -- so existing
 /// unversioned configs are fine.
@@ -1396,19 +1480,19 @@ impl Config {
             .collect()
     }
 
-    /// Resolve the companion pane for a concrete session, or `None` if none
-    /// applies. A repo-level `[repos.<repo>.companion]` wins over the global
-    /// `[companion]`; returns `None` when neither is set or the resolved one is
+    /// Resolve the viewer pane for a concrete session, or `None` if none
+    /// applies. A repo-level `[repos.<repo>.viewer]` wins over the global
+    /// `[viewer]`; returns `None` when neither is set or the resolved one is
     /// disabled. Tokens `{session}` `{repo}` `{campaign}` `{session_slug}`
     /// `{dir}` are interpolated into `cmd` (same slug rule as `session_env_for`).
-    pub fn companion_for(&self, session_name: &str, dir: &str) -> Option<ResolvedCompanion> {
+    pub fn viewer_for(&self, session_name: &str, dir: &str) -> Option<ResolvedViewer> {
         let (repo, campaign) = session_name.split_once('/').unwrap_or((session_name, ""));
-        let companion = self
+        let viewer = self
             .repos
             .get(repo)
-            .and_then(|r| r.companion.as_ref())
-            .or(self.companion.as_ref())?;
-        if !companion.enabled {
+            .and_then(|r| r.viewer.as_ref())
+            .or(self.viewer.as_ref())?;
+        if !viewer.enabled {
             return None;
         }
         let slug: String = session_name
@@ -1421,17 +1505,17 @@ impl Config {
                 }
             })
             .collect();
-        let cmd = companion
+        let cmd = viewer
             .cmd
             .replace("{session_slug}", &slug)
             .replace("{session}", session_name)
             .replace("{repo}", repo)
             .replace("{campaign}", campaign)
             .replace("{dir}", dir);
-        Some(ResolvedCompanion {
+        Some(ResolvedViewer {
             cmd,
-            side: companion.side.clone(),
-            size: companion.size,
+            side: viewer.side.clone(),
+            size: viewer.size,
         })
     }
 
@@ -1596,15 +1680,15 @@ default_tool = "claude"
 # [chooser]
 # command = "sesh connect \"$(sesh list | fzf)\""
 
-# Optional companion pane beside the runtime, recreated faithfully on restore.
-# Global default here, or per-repo via [repos.<name>.companion]. `cmd` is
+# Optional viewer pane beside the runtime, recreated faithfully on restore.
+# Global default here, or per-repo via [repos.<name>.viewer]. `cmd` is
 # templated with {session} {repo} {campaign} {session_slug} {dir}. See ADR 0004.
 #
-# [companion]
+# [viewer]
 # enabled = true
 # cmd = "my-previewer {dir}"
 # side = "h"   # "h" side-by-side, "v" stacked
-# size = 40    # companion pane size, percent
+# size = 40    # viewer pane size, percent
 "##
         .to_string()
     }
@@ -1642,47 +1726,47 @@ mod tests {
     }
 
     #[test]
-    fn companion_global_resolves_and_interpolates() {
+    fn viewer_global_resolves_and_interpolates() {
         let config: Config = toml::from_str(
-            "[repos]\n\n[companion]\nenabled = true\ncmd = \"prev {repo} {campaign} {session_slug} {dir}\"\n",
+            "[repos]\n\n[viewer]\nenabled = true\ncmd = \"prev {repo} {campaign} {session_slug} {dir}\"\n",
         )
         .unwrap();
         let c = config
-            .companion_for("work/in-place/fix", "/tmp/d")
-            .expect("global companion resolves");
+            .viewer_for("work/in-place/fix", "/tmp/d")
+            .expect("global viewer resolves");
         assert_eq!(c.cmd, "prev work in-place/fix work-in-place-fix /tmp/d");
         assert_eq!(c.side, "h"); // default
         assert_eq!(c.size, 40); // default
     }
 
     #[test]
-    fn companion_repo_override_wins_and_global_is_fallback() {
+    fn viewer_repo_override_wins_and_global_is_fallback() {
         let config: Config = toml::from_str(
             "[repos.work]\ndir = \"~/w\"\ncolor = \"#fff\"\n\n\
-             [repos.work.companion]\nenabled = true\ncmd = \"repo-prev\"\nside = \"v\"\nsize = 30\n\n\
-             [companion]\nenabled = true\ncmd = \"global-prev\"\n",
+             [repos.work.viewer]\nenabled = true\ncmd = \"repo-prev\"\nside = \"v\"\nsize = 30\n\n\
+             [viewer]\nenabled = true\ncmd = \"global-prev\"\n",
         )
         .unwrap();
-        let c = config.companion_for("work/x", "/d").expect("repo companion");
+        let c = config.viewer_for("work/x", "/d").expect("repo viewer");
         assert_eq!((c.cmd.as_str(), c.side.as_str(), c.size), ("repo-prev", "v", 30));
-        // a repo with no override falls back to the global companion
+        // a repo with no override falls back to the global viewer
         let g = config
-            .companion_for("other/y", "/d")
+            .viewer_for("other/y", "/d")
             .expect("global fallback");
         assert_eq!(g.cmd, "global-prev");
     }
 
     #[test]
-    fn companion_disabled_is_none() {
+    fn viewer_disabled_is_none() {
         let config: Config =
-            toml::from_str("[repos]\n\n[companion]\nenabled = false\ncmd = \"x\"\n").unwrap();
-        assert!(config.companion_for("work/x", "/d").is_none());
+            toml::from_str("[repos]\n\n[viewer]\nenabled = false\ncmd = \"x\"\n").unwrap();
+        assert!(config.viewer_for("work/x", "/d").is_none());
     }
 
     #[test]
-    fn companion_absent_is_none() {
+    fn viewer_absent_is_none() {
         let config: Config = toml::from_str("[repos]").unwrap();
-        assert!(config.companion_for("work/x", "/d").is_none());
+        assert!(config.viewer_for("work/x", "/d").is_none());
     }
 
     fn sample_config() -> Config {
@@ -2051,7 +2135,7 @@ session_discovery = { type = "none" }
         assert!(cfg.extensions.resolver.is_none());
         assert!(cfg.session_env.is_empty());
         assert!(cfg.chooser.command.is_none());
-        assert!(cfg.companion.is_none());
+        assert!(cfg.viewer.is_none());
     }
 
     // -- Harness config tests --
@@ -2883,6 +2967,65 @@ prompt_mode = "string"
         assert!(
             err.contains("`layout`") && err.contains("not allowed"),
             "got: {err}"
+        );
+    }
+
+    #[test]
+    fn viewer_reads_legacy_companion_alias() {
+        // v3 used `[repos.<name>.companion]` / `[companion]`; v4.0.0 renamed the
+        // key to `viewer` but keeps `companion` as a serde ALIAS so a v4 binary
+        // READS a v3-shaped fragment with no broken-launch window on rollout
+        // (`muxr config migrate` canonicalizes to `viewer` at leisure).
+        let cfg = Config::parse(
+            "[repos.work]\ndir = \"~/w\"\ncolor = \"#fff\"\n\n\
+             [repos.work.companion]\nenabled = true\ncmd = \"muxr-viewer\"\n\n\
+             [companion]\ncmd = \"global-viewer\"\n",
+            "<test>",
+        )
+        .expect("v3 companion key must still parse via the alias");
+        assert!(cfg.viewer.is_some(), "global [companion] read via alias");
+        assert!(
+            cfg.repos["work"].viewer.is_some(),
+            "[repos.work.companion] read via alias"
+        );
+    }
+
+    #[test]
+    fn migrate_fragment_renames_companion_and_stamps_schema() {
+        let src = "[repos.work]\ndir = \"~/w\"\ncolor = \"#fff\"\n\n\
+                   [repos.work.companion]\nenabled = true\ncmd = \"muxr-viewer\"\n";
+        let (out, changes) = migrate_fragment(src);
+        assert!(
+            out.contains("[repos.work.viewer]"),
+            "companion header renamed: {out}"
+        );
+        assert!(!out.contains("companion"), "no companion left: {out}");
+        assert!(
+            out.starts_with("schema_version = 2\n"),
+            "schema_version stamped: {out}"
+        );
+        assert!(!changes.is_empty());
+        // The migrated fragment must parse cleanly as v4.
+        Config::parse(&out, "<migrated>").expect("migrated fragment parses");
+    }
+
+    #[test]
+    fn migrate_fragment_noop_when_current() {
+        let src = "schema_version = 2\n[repos.work]\ndir = \"~/w\"\ncolor = \"#fff\"\n\n\
+                   [repos.work.viewer]\nenabled = true\ncmd = \"muxr-viewer\"\n";
+        let (out, changes) = migrate_fragment(src);
+        assert!(changes.is_empty(), "already current: {changes:?}");
+        assert_eq!(out, src, "content unchanged");
+    }
+
+    #[test]
+    fn migrate_fragment_global_companion_and_harnesses() {
+        let src = "[harnesses.old]\ndir = \"~/o\"\ncolor = \"#000\"\n\n[companion]\ncmd = \"v\"\n";
+        let (out, _) = migrate_fragment(src);
+        assert!(out.contains("[repos.old]"), "harnesses renamed: {out}");
+        assert!(
+            out.contains("[viewer]") && !out.contains("companion"),
+            "global companion renamed: {out}"
         );
     }
 
