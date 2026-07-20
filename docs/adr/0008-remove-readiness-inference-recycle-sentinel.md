@@ -7,6 +7,13 @@
 - Relates to: [ADR 0001](0001-extension-architecture.md), [ADR 0004](0004-companion-pane.md), nomograph/muxr#12
 - Implemented in: 4.0.0 (breaking)
 
+> **Amended 2026-07-19 (implementation):** the reopen watcher is a DETACHED
+> `muxr recycle` process, NOT a tmux `pane-exited` hook -- the hook cannot fire
+> under muxr's shell-wrapped launch model. The sentinel becomes a crash
+> breadcrumb rather than the reopen trigger. See "## Update" below; it revises
+> Decision 2/3 and the Design detail. The removal decisions (1, 4, 5) are
+> unchanged.
+
 ## Context
 
 muxr's two live-session operations -- `upgrade` (relaunch in place with
@@ -88,6 +95,44 @@ positive signal, and remove the inference machinery entirely.**
    `list_sessions_detailed` keep exposing "seconds since last pane output" for the
    switcher recency sort and the upgrade quiet-age column. It is never again a
    gate.
+
+## Update (2026-07-19): implemented as a detached watcher, not a pane-exited hook
+
+Implementing Decision 2 surfaced a hard constraint. `create_session` launches the
+tool via `send-keys "<tool_cmd>" Enter` INTO a persistent shell (`tmux.rs`), so
+the pane's process is the SHELL, and the tool's `/exit` returns the pane to that
+shell rather than ending the pane. A tmux `pane-exited`/`pane-died` hook therefore
+NEVER FIRES on a recycle -- the pane never dies. The pane-exited-hook watcher in
+Decision 2 and the Design-detail diagram is not buildable.
+
+What shipped instead is the "Detached reopen process" listed under Alternatives
+(promoted from rejected-fallback to primary):
+
+- The in-session `/recycle` skill spawns a DETACHED `setsid muxr recycle
+  <session>` that survives the agent's own `/exit`, then STOPS. That process IS
+  the watcher -- there is no hook and no muxr daemon.
+- `muxr recycle` (the detached process, or the operator's manual CLI/switcher
+  call -- decision [g]) does the whole handshake in one process: write the
+  sentinel -> send-keys `/exit` -> wait for the pane to return to a known shell
+  via `#{pane_current_command}` (the exit-detect from Decision's Design detail,
+  which is what the return-to-shell poll always was) -> `compose_launch_command`
+  BEFORE the kill -> kill -> `create_session` fresh -> clear the sentinel.
+
+The sentinel's ROLE shifts accordingly. It is no longer the reopen TRIGGER (the
+detached process reopens unconditionally, as its job); it is a crash BREADCRUMB.
+Written before the destructive exit and removed after a successful reopen, a
+leftover flag means the watcher died mid-flight (sleep, SIGKILL, orphan reaped);
+the next `muxr open` logs it and clears it. It is NEVER used to auto-reopen. This
+preserves Decision 3's intent exactly: without an explicit `muxr recycle` nothing
+reopens (a genuine `/exit`/crash has no watcher), and muxr never resurrects a
+session from a stale flag. `retire` needs no hook teardown -- there is no hook.
+
+Validated by a three-leg live-sim (2026-07-19, isolated tmux server + stub tool,
+recorded in the `/recycle` skill's `sims/`): (A) normal recycle writes the
+sentinel mid-flight, drives `/exit`, reopens fresh, clears the sentinel; (B) a
+hand-planted stale sentinel + dead session is logged + cleared at the next open,
+opening once with no reopen loop; (C) a direct `/exit` (muxr uninvolved) leaves
+the pane at its shell and never reopens, no sentinel written.
 
 ## Consequences
 

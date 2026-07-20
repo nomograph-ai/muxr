@@ -82,6 +82,19 @@ pub(crate) fn cmd_open(
 
     let session_name = format!("{repo_name}/{campaign}");
 
+    // A leftover recycle sentinel means the previous recycle of this session was
+    // interrupted before it could reopen (crash, sleep, a killed detached
+    // watcher). Log it once and clear it -- muxr never auto-resurrects from a
+    // sentinel (ADR 0008: an explicit recycle is required; a stale flag is a
+    // breadcrumb, not a trigger). Best-effort: a state-dir error here must not
+    // block opening the session.
+    if Config::clear_recycle_sentinel(&session_name).unwrap_or(false) {
+        ui::note(&format!(
+            "cleared a leftover recycle sentinel for {session_name} \
+             (a previous recycle was interrupted before it reopened)"
+        ));
+    }
+
     if tmux.session_exists(&session_name) {
         ui::action(&format!("attaching to {session_name}"));
         tmux.attach(&session_name)?;
@@ -316,6 +329,19 @@ pub(crate) fn cmd_recycle(tmux: &Tmux, name: Option<&str>) -> Result<()> {
         )
     })?;
 
+    // Write the recycle sentinel: a breadcrumb that a destructive recycle is in
+    // flight, cleared after the successful reopen below. If this process is
+    // killed between here and the reopen (machine sleep, SIGKILL, an orphaned
+    // detached watcher reaped), the leftover sentinel is logged + cleared at the
+    // next `muxr open` -- an honest "the recycle didn't finish" signal, never an
+    // auto-resurrect (ADR 0008). Best-effort: a state-dir write failure must not
+    // block a recycle the operator asked for.
+    if let Err(e) = Config::write_recycle_sentinel(&session) {
+        ui::note(&format!(
+            "recycle: could not write sentinel ({e:#}); continuing"
+        ));
+    }
+
     let tool = config.resolve_tool(&repo_name, None);
     let tool_def = config.tool_for(&tool);
 
@@ -365,6 +391,10 @@ pub(crate) fn cmd_recycle(tmux: &Tmux, name: Option<&str>) -> Result<()> {
             .companion_for(&session, session_dir.to_str().unwrap_or(""))
             .as_ref(),
     )?;
+
+    // Reopen succeeded: clear the sentinel so a subsequent `muxr open` doesn't
+    // mistake this completed recycle for an interrupted one.
+    let _ = Config::clear_recycle_sentinel(&session);
 
     ui::ok(&format!(
         "recycled {session} -- fresh conversation, rehydrated from the pointer"

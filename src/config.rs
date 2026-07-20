@@ -818,6 +818,24 @@ fn resolve_state_path(
     home.join(".local").join("state").join("muxr").join("state.json")
 }
 
+/// Slug a `<repo>/<campaign>` session name into a flat, filesystem-safe token
+/// for the recycle sentinel filename: any char that is not ASCII-alphanumeric
+/// or a hyphen (the slash included) becomes a hyphen. Session parts are
+/// validated kebab-case, so for real names this only maps the slash -- e.g.
+/// `keaton/muxr-config` -> `keaton-muxr-config`.
+fn sentinel_slug(session: &str) -> String {
+    session
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
 fn default_connect() -> String {
     "mosh".to_string()
 }
@@ -1084,6 +1102,52 @@ impl Config {
             return None;
         }
         Some(dirs::home_dir()?.join(".config").join("muxr").join("state.json"))
+    }
+
+    /// The state DIRECTORY -- the parent of `state_path()` (default
+    /// `~/.local/state/muxr/`). Home to `state.json` and the recycle sentinels;
+    /// honours the same `MUXR_STATE`/`MUXR_CONFIG` isolation as `state_path`.
+    pub fn state_dir() -> Result<PathBuf> {
+        Ok(Self::state_path()?
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from(".")))
+    }
+
+    /// Path to the recycle sentinel for `session`
+    /// (`<state_dir>/recycle-<slug>.flag`).
+    ///
+    /// The sentinel is a breadcrumb, not a trigger: a recycle writes it just
+    /// before its destructive `/exit`+kill and removes it after a successful
+    /// reopen. A leftover at the next `muxr open` means the recycle was
+    /// interrupted (crash, sleep, a killed detached watcher); it is logged and
+    /// cleared, NEVER used to auto-reopen -- ADR 0008 requires an explicit
+    /// recycle rather than resurrecting a session from an inferred signal.
+    pub fn recycle_sentinel_path(session: &str) -> Result<PathBuf> {
+        Ok(Self::state_dir()?.join(format!("recycle-{}.flag", sentinel_slug(session))))
+    }
+
+    /// Write the recycle sentinel for `session`, creating the state dir if
+    /// needed. Returns the path written (for logging).
+    pub fn write_recycle_sentinel(session: &str) -> Result<PathBuf> {
+        let path = Self::recycle_sentinel_path(session)?;
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(&path, b"recycle in progress\n")?;
+        Ok(path)
+    }
+
+    /// Remove the recycle sentinel for `session` if present; `Ok(true)` when one
+    /// existed (a leftover, at `open`) and `Ok(false)` when there was none.
+    pub fn clear_recycle_sentinel(session: &str) -> Result<bool> {
+        let path = Self::recycle_sentinel_path(session)?;
+        if path.exists() {
+            std::fs::remove_file(&path)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     pub fn resolve_dir(&self, repo: &str) -> Result<PathBuf> {
@@ -1740,6 +1804,18 @@ session_discovery = { type = "none" }
             resolve_state_path(Some(String::new()), Some(String::new()), home),
             home.join(".local/state/muxr/state.json")
         );
+    }
+
+    #[test]
+    fn sentinel_slug_flattens_session_name() {
+        // The slash in a `<repo>/<campaign>` name maps to a hyphen so the
+        // sentinel is a single flat filename.
+        assert_eq!(sentinel_slug("keaton/muxr-config"), "keaton-muxr-config");
+        // Multi-level slugs (defensive: real campaigns are kebab, no extra
+        // slashes) still flatten fully.
+        assert_eq!(sentinel_slug("work/in-place/fix"), "work-in-place-fix");
+        // Already-flat names pass through unchanged.
+        assert_eq!(sentinel_slug("muxr"), "muxr");
     }
 
     #[test]
