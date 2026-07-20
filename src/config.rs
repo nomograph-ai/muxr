@@ -68,7 +68,61 @@ pub struct Config {
     /// not discovered -- zero cross-machine knowledge. See `discover_and_merge`.
     #[serde(default)]
     pub discovery: Discovery,
+    /// Recycle behaviour. Absent -> the built-in generic flush prompt. Set
+    /// `[recycle].flush_prompt` to override the message muxr sends into the pane
+    /// on `recycle` (e.g. to compose an estate `durable` skill for richer push
+    /// discipline). See `recycle_flush_prompt`.
+    #[serde(default)]
+    pub recycle: Recycle,
 }
+
+/// `[recycle]` config: how muxr recycles a session. muxr sends the `flush_prompt`
+/// into the pane, then waits for the agent to positively write the recycle
+/// sentinel before exiting + reopening -- no idle inference (ADR 0008/0010).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Recycle {
+    /// Override the flush prompt muxr sends on `recycle`. Tokens `{session}`,
+    /// `{repo}`, `{campaign}`, `{log}` (absolute log.md path) and `{sentinel}`
+    /// (absolute done-signal path the agent must write) are interpolated. Absent
+    /// -> [`DEFAULT_FLUSH_PROMPT`]. The estate sets this to compose `durable`.
+    #[serde(default)]
+    pub flush_prompt: Option<String>,
+    /// Seconds muxr waits for the agent's flush-done sentinel before ABORTING the
+    /// recycle (leaving the session untouched -- fail-safe). Default 1200: a
+    /// flush can push several repos.
+    #[serde(default = "default_flush_timeout_secs")]
+    pub flush_timeout_secs: u64,
+}
+
+fn default_flush_timeout_secs() -> u64 {
+    1200
+}
+
+impl Default for Recycle {
+    fn default() -> Self {
+        // A manual impl (not derived) so an absent `[recycle]` still gets the
+        // real 1200s timeout, not u64's 0 (which would abort every recycle
+        // instantly). serde's field-level default only fires when the table is
+        // PRESENT but the key is omitted; this covers the table being absent.
+        Self {
+            flush_prompt: None,
+            flush_timeout_secs: default_flush_timeout_secs(),
+        }
+    }
+}
+
+/// The built-in, runtime-agnostic flush prompt muxr sends into the pane on
+/// `recycle` when `[recycle].flush_prompt` is unset. Self-contained (references
+/// muxr's own log.md procedure) and ends with the positive done-signal the
+/// exit+reopen waits on -- so recycle works out of the box with no estate skill.
+pub const DEFAULT_FLUSH_PROMPT: &str = "\
+[muxr recycle] Flush your working state so a fresh session can resume, then signal muxr.
+1. Edit {log}: set `entrypoint:` to a tight, current \"where we are / what's next\" line, and append a dated entry under `## Log` with state, decisions, and open threads.
+2. Make in-flight work in every repo you touched durable -- commit it, or record the branch + uncommitted changes + next step in the log entry so nothing is stranded.
+3. Verify the `entrypoint:` ALONE answers where-we-are / what's-next with zero conversation context (a fresh reopen keeps no summary, so the bar is higher than a normal flush).
+When the flush is complete and verified, run exactly:  echo done > {sentinel}
+Then STOP -- do NOT /exit yourself. muxr detects that signal, exits you, and reopens fresh from the pointer.";
 
 /// Per-repo config discovery. `roots` are namespace directories walked (bounded
 /// to 2 levels: `<root>/<namespace>/<repo>`) for a `fragment` file at a git
@@ -1127,15 +1181,35 @@ impl Config {
         Ok(Self::state_dir()?.join(format!("recycle-{}.flag", sentinel_slug(session))))
     }
 
-    /// Write the recycle sentinel for `session`, creating the state dir if
-    /// needed. Returns the path written (for logging).
-    pub fn write_recycle_sentinel(session: &str) -> Result<PathBuf> {
-        let path = Self::recycle_sentinel_path(session)?;
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(&path, b"recycle in progress\n")?;
-        Ok(path)
+    /// Ensure the state directory exists (so the agent's `echo done > {sentinel}`
+    /// in the flush prompt succeeds). Best-effort creation of the parent dir.
+    pub fn ensure_state_dir() -> Result<()> {
+        std::fs::create_dir_all(Self::state_dir()?)?;
+        Ok(())
+    }
+
+    /// The flush prompt muxr sends into the pane on `recycle`: the configured
+    /// `[recycle].flush_prompt` or [`DEFAULT_FLUSH_PROMPT`], with `{session}`,
+    /// `{repo}`, `{campaign}`, `{log}` and `{sentinel}` interpolated. muxr sends
+    /// this, then waits for the agent to write `{sentinel}` -- a POSITIVE
+    /// flush-done signal, never an inferred idle (ADR 0008/0010).
+    pub fn recycle_flush_prompt(
+        &self,
+        session: &str,
+        repo: &str,
+        campaign: &str,
+        log_path: &std::path::Path,
+        sentinel_path: &std::path::Path,
+    ) -> String {
+        self.recycle
+            .flush_prompt
+            .as_deref()
+            .unwrap_or(DEFAULT_FLUSH_PROMPT)
+            .replace("{session}", session)
+            .replace("{repo}", repo)
+            .replace("{campaign}", campaign)
+            .replace("{log}", &log_path.to_string_lossy())
+            .replace("{sentinel}", &sentinel_path.to_string_lossy())
     }
 
     /// Remove the recycle sentinel for `session` if present; `Ok(true)` when one
@@ -1816,6 +1890,37 @@ session_discovery = { type = "none" }
         assert_eq!(sentinel_slug("work/in-place/fix"), "work-in-place-fix");
         // Already-flat names pass through unchanged.
         assert_eq!(sentinel_slug("muxr"), "muxr");
+    }
+
+    #[test]
+    fn recycle_flush_prompt_interpolates_and_overrides() {
+        use std::path::Path;
+        // Default prompt: tokens substituted, and it tells the agent to write the
+        // done-signal at the exact sentinel path (the gate muxr waits on).
+        let cfg: Config = toml::from_str("[repos]").unwrap();
+        let out = cfg.recycle_flush_prompt(
+            "work/auth",
+            "work",
+            "auth",
+            Path::new("/r/campaigns/auth/log.md"),
+            Path::new("/s/recycle-work-auth.flag"),
+        );
+        assert!(out.contains("/r/campaigns/auth/log.md"));
+        assert!(out.contains("echo done > /s/recycle-work-auth.flag"));
+        assert!(!out.contains("{sentinel}") && !out.contains("{log}"));
+        // An override wins and its tokens interpolate the same way.
+        let cfg2: Config = toml::from_str(
+            "[repos]\n[recycle]\nflush_prompt = \"compose durable then: echo done > {sentinel} ({session})\"\n",
+        )
+        .unwrap();
+        let out2 = cfg2.recycle_flush_prompt(
+            "work/auth",
+            "work",
+            "auth",
+            Path::new("/r/log.md"),
+            Path::new("/s/f.flag"),
+        );
+        assert_eq!(out2, "compose durable then: echo done > /s/f.flag (work/auth)");
     }
 
     #[test]

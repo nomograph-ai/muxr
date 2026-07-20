@@ -293,6 +293,27 @@ pub(crate) fn wait_for_return_to_shell(tmux: &Tmux, session: &str, timeout_secs:
     }
 }
 
+/// Poll for `path` to exist -- the agent's POSITIVE flush-done signal on recycle
+/// -- until it appears (true) or `timeout_secs` elapses (false).
+///
+/// This is the ADR 0008/0010 core: muxr never INFERS that a flush finished from
+/// idle bytes (the pre-4.0 churn); it sends a flush prompt asking the agent to
+/// write this file when done and waits for the file. A timeout means the flush
+/// did not complete -- the caller aborts WITHOUT exiting the session (fail-safe:
+/// no signal, no destructive action).
+pub(crate) fn wait_for_sentinel(path: &std::path::Path, timeout_secs: u64) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    loop {
+        if path.exists() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+}
+
 /// Wait for a process to exit, escalating to SIGKILL after timeout.
 pub(crate) fn wait_for_exit(pid: u32, timeout_secs: u32) {
     for _ in 0..timeout_secs.saturating_mul(10) {

@@ -279,18 +279,21 @@ pub(crate) fn cmd_reorient(tmux: &Tmux, name: Option<&str>) -> Result<()> {
 
 /// Recycle a session: flush state to the pointer, then reopen FRESH.
 ///
-/// The deliberate alternative to compact-looping. Before killing the session,
-/// muxr asks the agent to flush its current state into `log.md` (set a tight
-/// `entrypoint:` + append a dated log entry -- the procedure lives in the muxr
-/// skill, so it never drifts from the layout), then `/exit`. muxr WAITS for the
-/// agent to actually exit -- agent-paced, no wall-clock guess, since a flush can
-/// take a long time -- then reopens the session FRESH (no resume) so it
-/// rehydrates from that pointer. The prior conversation persists on disk and is
-/// recoverable via --resume, so recycling never destroys context.
+/// The deliberate alternative to compact-looping, and self-contained in muxr (no
+/// external skill). muxr sends a FLUSH PROMPT into the pane asking the agent to
+/// flush its state into `log.md` (a tight `entrypoint:` + a dated entry) and,
+/// when done, write a sentinel file; muxr then WAITS for that sentinel -- the
+/// agent's positive "flush complete" signal, never an inferred idle (ADR
+/// 0008/0010) -- then drives `/exit`, waits for the pane to return to its shell,
+/// and reopens FRESH (no resume) so it rehydrates from the pointer. The prior
+/// conversation persists on disk (recoverable via --resume), so recycling never
+/// destroys context. The flush prompt is muxr-owned and generic;
+/// `[recycle].flush_prompt` overrides it (e.g. to compose an estate `durable`),
+/// and `[recycle].flush_timeout_secs` tunes the abort deadline.
+///
 /// How long recycle waits for the tool pane to return to its shell after `/exit`
-/// before reopening anyway. Generous: a `/recycle` fired mid-turn queues the exit
-/// keystroke until the turn ends, so the return-to-shell can lag well past the
-/// (already-completed) flush.
+/// before reopening anyway. Generous: the `/exit` sent right after the flush
+/// queues until any in-flight turn ends, so the return-to-shell can lag.
 const RECYCLE_EXIT_TIMEOUT_SECS: u64 = 600;
 
 pub(crate) fn cmd_recycle(tmux: &Tmux, name: Option<&str>) -> Result<()> {
@@ -311,9 +314,9 @@ pub(crate) fn cmd_recycle(tmux: &Tmux, name: Option<&str>) -> Result<()> {
     // the recycle rather than kill the live session and relaunch it stripped of
     // its composed prompt and --add-dir paths. An ABSENT file is fine (an
     // archived-but-running session), so this only trips on genuine corruption.
-    // The value is discarded: muxr no longer composes a flush from the campaign
-    // paths (the `/recycle` skill owns the flush, ADR 0008); this load is kept
-    // purely for its fail-loud side effect.
+    // The value is discarded: muxr does not compose a flush from the campaign
+    // paths (the agent flushes in-context from the flush prompt, ADR 0008/0010);
+    // this load is kept purely for its fail-loud side effect.
     primitives::load_optional(&campaign_md, primitives::load_campaign).with_context(|| {
         format!(
             "refusing to recycle {session}: campaign file present but unparseable: {} \
@@ -329,41 +332,59 @@ pub(crate) fn cmd_recycle(tmux: &Tmux, name: Option<&str>) -> Result<()> {
         )
     })?;
 
-    // Write the recycle sentinel: a breadcrumb that a destructive recycle is in
-    // flight, cleared after the successful reopen below. If this process is
-    // killed between here and the reopen (machine sleep, SIGKILL, an orphaned
-    // detached watcher reaped), the leftover sentinel is logged + cleared at the
-    // next `muxr open` -- an honest "the recycle didn't finish" signal, never an
-    // auto-resurrect (ADR 0008). Best-effort: a state-dir write failure must not
-    // block a recycle the operator asked for.
-    if let Err(e) = Config::write_recycle_sentinel(&session) {
-        ui::note(&format!(
-            "recycle: could not write sentinel ({e:#}); continuing"
-        ));
-    }
-
     let tool = config.resolve_tool(&repo_name, None);
     let tool_def = config.tool_for(&tool);
 
-    // muxr no longer flushes the session itself. The `/recycle` skill (or the
-    // operator) flushes working state to the durable pointer BEFORE recycle:
-    // muxr cannot observe "flush complete" from outside the runtime, so it does
-    // NOT infer it (ADR 0008 -- inference is what stranded/killed sessions across
-    // the 3.6.x saga). muxr's job is the clean exit + reopen-fresh below.
+    // Recycle is a positive-signal handshake, never idle inference (ADR
+    // 0008/0010 -- inference is what stranded/killed sessions across the 3.6.x
+    // saga). muxr sends a FLUSH PROMPT into the pane asking the agent to flush its
+    // working state to the durable pointer and, when done, write the sentinel
+    // file; muxr then WAITS for that file -- the agent's positive "flush complete"
+    // signal -- before it exits + reopens. The flush prompt is muxr-owned (a
+    // generic default; the estate overrides it via `[recycle].flush_prompt` to
+    // compose its `durable` skill), so recycle is self-contained and
+    // runtime-agnostic -- no external skill required.
+    let sentinel = Config::recycle_sentinel_path(&session)?;
+    // Clear any stale sentinel from a prior interrupted recycle so we wait for a
+    // FRESH signal, and make the state dir so the agent's `echo done > {sentinel}`
+    // succeeds.
+    let _ = Config::clear_recycle_sentinel(&session);
+    Config::ensure_state_dir()?;
+    let flush_prompt =
+        config.recycle_flush_prompt(&session, &repo_name, &campaign, &log_md, &sentinel);
+    ui::action(&format!(
+        "recycle {session}: flushing (waiting for the agent's done-signal)"
+    ));
+    tmux.send_text(&session, &flush_prompt)?;
+
+    // Wait for the agent's positive flush-done signal. Generous cap: a flush can
+    // push several repos. If it never arrives, ABORT without touching the session
+    // -- fail-safe: no signal, no exit, so a busy or unresponsive session is
+    // preserved rather than killed.
+    if !tool::wait_for_sentinel(&sentinel, config.recycle.flush_timeout_secs) {
+        anyhow::bail!(
+            "recycle {session}: the agent did not signal flush-complete within {}s \
+             (no {} written) -- session left untouched. Re-run when the flush can \
+             complete, or flush + `muxr <repo> <campaign> --fresh` manually.",
+            config.recycle.flush_timeout_secs,
+            sentinel.display()
+        );
+    }
+
+    // Flush signalled complete. Drive the exit keystroke -- the CLI input loop
+    // receives it, unlike asking the agent to self-`/exit` (which cannot work and
+    // hung recycle, #8).
     let exit_cmd = tool_def
         .as_ref()
         .and_then(|t| t.exit_command.clone())
         .unwrap_or_else(|| "/exit".to_string());
     ui::action(&format!("recycle {session}: exiting"));
-    // muxr drives the exit keystroke -- the CLI input loop receives it, unlike
-    // asking the agent to self-`/exit` (which cannot work and hung recycle, #8).
     tmux.send_text(&session, &exit_cmd)?;
     // Wait for the tool pane to return to its shell (the tool exited). This is
     // the pane-current-command signal, robust across platforms and the pi `nono`
     // wrapper -- not the fragile process-tree PID match of pre-4.0 (ADR 0008).
-    // Generous cap: when /recycle is fired mid-turn the `/exit` keystroke queues
-    // until the turn ends, so the return-to-shell can lag; it usually returns in
-    // seconds since the skill already flushed.
+    // Generous cap: the `/exit` sent right after the flush queues until any
+    // in-flight turn ends, so the return-to-shell can lag.
     if !tool::wait_for_return_to_shell(tmux, &session, RECYCLE_EXIT_TIMEOUT_SECS) {
         ui::note("recycle: tool did not return to a shell in time; reopening anyway");
     }

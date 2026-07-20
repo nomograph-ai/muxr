@@ -9,10 +9,15 @@
 
 > **Amended 2026-07-19 (implementation):** the reopen watcher is a DETACHED
 > `muxr recycle` process, NOT a tmux `pane-exited` hook -- the hook cannot fire
-> under muxr's shell-wrapped launch model. The sentinel becomes a crash
-> breadcrumb rather than the reopen trigger. See "## Update" below; it revises
+> under muxr's shell-wrapped launch model. See "## Update" below; it revises
 > Decision 2/3 and the Design detail. The removal decisions (1, 4, 5) are
 > unchanged.
+>
+> **[ADR 0010](0010-recycle-flush-muxr-owned.md) refines this further:** the
+> flush is muxr-owned (a generic flush prompt muxr sends + an agent-written
+> sentinel it waits on), so recycle is self-contained and runtime-agnostic and
+> the external `/recycle` skill is retired (reversing decision [g]). ADR 0010 is
+> the current recycle mechanism; read it alongside this record.
 
 ## Context
 

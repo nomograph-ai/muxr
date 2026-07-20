@@ -77,7 +77,7 @@ into one list, grouped by repo:
 
 Shards render indented under their hub. Keys: `j/k` move, `/` filter, `enter`
 switch/open/create, `a` show all/active, `n` new campaign, `c` recycle a live
-session (serialize → fresh), `x` archive a dormant campaign, `r` rename, `d`
+session (flush → fresh), `x` archive a dormant campaign, `r` rename, `d`
 kill, `q` quit.
 
 ## Sharding: many topics under one hub
@@ -144,16 +144,37 @@ feels drifted, **recycle** instead: flush state to the pointer, then reopen a
 FRESH conversation that rehydrates from it.
 
 ```bash
-muxr recycle                     # flush -> exit -> reopen fresh from the pointer
+muxr recycle <repo>/<campaign>   # or: muxr switch -> c
 muxr <repo> <campaign> --fresh   # open a new conversation (don't resume)
 ```
 
-`muxr recycle` asks the live session to flush its state to `log.md` (the
-procedure above), then **waits for the agent to exit** -- agent-paced, so a long
-flush is fine -- and reopens fresh. The previous conversation stays on disk
-(recoverable via `--resume`), so recycling never destroys context -- it trades a
-degrading summary for a clean read of the authoritative state. Default
-`muxr <repo> <campaign>` resumes; `--fresh` / `recycle` is the deliberate reset.
+`muxr recycle` is a positive-signal handshake, entirely muxr-owned (no external
+skill):
+
+1. muxr sends a **flush prompt** into the pane; the agent flushes its state to
+   `log.md` (the procedure above) and, when done, writes a small done-signal file
+   whose path the prompt hands it.
+2. muxr **waits for that signal** -- the agent's positive "flush complete," never
+   a guess from idle bytes -- then drives `/exit`, waits for the pane to return to
+   its shell, and reopens FRESH from the pointer.
+
+The previous conversation stays on disk (recoverable via `--resume`), so
+recycling never destroys context -- it trades a degrading summary for a clean
+read of the authoritative state. If the flush never signals, muxr aborts and
+leaves the session untouched (fail-safe: no signal, no exit).
+
+Run it from the control shell or `muxr switch` (`c`). To recycle the session you
+are **inside**, spawn it detached so it survives your own exit, then stop:
+
+```bash
+setsid muxr recycle "$(tmux display-message -p '#{session_name}')" </dev/null \
+  >/tmp/muxr-recycle.log 2>&1 &    # then STOP; muxr drives the flush + exit + reopen
+```
+
+The flush prompt is a muxr default (generic, references this log.md procedure); a
+harness overrides it via `[recycle].flush_prompt` in its config -- tokens
+`{session} {repo} {campaign} {log} {sentinel}` -- e.g. to compose a richer
+`durable`-style flush.
 
 ## Lifecycle verbs
 
@@ -163,7 +184,7 @@ degrading summary for a clean read of the authoritative state. Default
 | `muxr switch` | Interactive chooser: switch / open dormant / create |
 | `muxr shard <new>` | Spin a topic out of the current campaign into a sibling |
 | `muxr reorient [name]` | Nudge a session to re-read its campaign.md + log.md (use after `/compact`) |
-| `muxr recycle [name]` | Serialize → exit → reopen FRESH from the pointer (the alternative to compact-looping) |
+| `muxr recycle [name]` | Flush (via a prompt muxr sends) → exit → reopen FRESH from the pointer (the alternative to compact-looping) |
 | `muxr archive <campaign>` | Move a campaign to `campaigns/archive/` so it leaves the chooser (reversible); `x` in the chooser does the same |
 | `muxr save` | Snapshot all sessions (name, dir, tool, session id) |
 | `muxr restore` | Recreate snapshotted sessions after a reboot, resuming each in place |
