@@ -336,55 +336,76 @@ impl Tmux {
     }
 
     /// The foreground command of a tmux target, e.g. `claude`, `node`, `nono`, or
-    /// a shell name (`zsh`/`bash`) once the tool has exited. The target is a
-    /// `%pane_id` (returns that pane) or a session target (returns its first pane,
-    /// index 0 -- the tool pane).
+    /// a shell name (`zsh`/`bash`) once the tool has exited. Uses `display-message`
+    /// so a `%pane_id` target reads EXACTLY that pane -- a `list-panes -t %id`
+    /// would instead return the containing window's first pane. A session target
+    /// reads the session's active pane.
     ///
     /// muxr launches the tool via `send-keys` INTO a persistent shell, so the tool
     /// exiting returns the pane to its shell rather than firing a pane-exited event
     /// -- there is no pane-death signal to wait on. Polling this for a
     /// return-to-shell is how recycle detects the tool is gone (ADR 0008), robust
     /// to the pi `nono` wrapper (we watch for the shell coming back, not a specific
-    /// tool name going away). Recycle passes a `%pane_id` so the poll reads the
-    /// SAME pane it sends `/exit` to (see [`send_text_target`](Self::send_text_target)).
+    /// tool name going away). Recycle passes the tool pane's `%id` so the poll reads
+    /// the SAME pane it sends `/exit` to (see [`send_text_target`](Self::send_text_target)).
     /// `None` on tmux error / no pane.
     pub(crate) fn pane_command_at(&self, target: &str) -> Option<String> {
         let output = self
             .command()
-            .args(["list-panes", "-t", target, "-F", "#{pane_current_command}"])
+            .args(["display-message", "-p", "-t", target, "#{pane_current_command}"])
             .output()
             .ok()?;
         if !output.status.success() {
             return None;
         }
-        String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .next()
-            .map(|l| l.trim().to_string())
-            .filter(|s| !s.is_empty())
+        let cmd = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if cmd.is_empty() { None } else { Some(cmd) }
     }
 
-    /// The stable tmux pane id (`%N`) of a session's tool pane (index 0 -- muxr
-    /// always launches the tool there; the viewer is a later `-d` split, so focus
-    /// stays on pane 0). Recycle pins every pane op (shell check, flush send,
-    /// `/exit`, return-to-shell poll) to this id so a focused non-tool pane can
-    /// never diverge the read guards (which read pane 0) from the writes (which
-    /// otherwise target the ACTIVE pane via `=name:`). `None` on tmux error / no
-    /// pane.
+    /// The stable tmux pane id (`%N`) of a session's tool pane: the pane muxr
+    /// launched the tool into, i.e. the lowest `(window_index, pane_index)` across
+    /// the WHOLE session (`-s`). Recycle pins every pane op (shell check, flush
+    /// send, `/exit`, return-to-shell poll) to this id so a focused non-tool pane
+    /// can never diverge the read guards from the writes (which would otherwise
+    /// target the ACTIVE pane via `=name:`). Scanning the whole session -- not
+    /// `list-panes -t =name:`, which reads only the ACTIVE window -- and taking the
+    /// minimum makes it correct under a focused second window and any tmux
+    /// `base-index`. `None` on tmux error / no pane.
     pub fn tool_pane_id(&self, session: &str) -> Option<String> {
         let output = self
             .command()
-            .args(["list-panes", "-t", &Self::target(session), "-F", "#{pane_id}"])
+            .args([
+                "list-panes",
+                "-t",
+                &Self::target(session),
+                "-s",
+                "-F",
+                "#{window_index} #{pane_index} #{pane_id}",
+            ])
             .output()
             .ok()?;
         if !output.status.success() {
             return None;
         }
-        String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .next()
-            .map(|l| l.trim().to_string())
-            .filter(|s| !s.is_empty())
+        let text = String::from_utf8_lossy(&output.stdout);
+        let mut best: Option<(u32, u32, String)> = None;
+        for line in text.lines() {
+            let mut it = line.split_whitespace();
+            let (Some(w), Some(p), Some(id)) = (it.next(), it.next(), it.next()) else {
+                continue;
+            };
+            let (Ok(w), Ok(p)) = (w.parse::<u32>(), p.parse::<u32>()) else {
+                continue;
+            };
+            let better = match &best {
+                None => true,
+                Some((bw, bp, _)) => (w, p) < (*bw, *bp),
+            };
+            if better {
+                best = Some((w, p, id.to_string()));
+            }
+        }
+        best.map(|(_, _, id)| id)
     }
 
     /// Get a tmux variable via display-message.

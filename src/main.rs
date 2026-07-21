@@ -427,10 +427,9 @@ pub(crate) fn rename_session_by_name(
         if let Some(harness) = config.tool_for(&tool)
             && let Some(cmd) = harness.build_rename_command(new)
         {
-            let new_target = Tmux::target(new);
-            let _ = std::process::Command::new("tmux")
-                .args(["send-keys", "-t", &new_target, &cmd, "Enter"])
-                .status();
+            // send_text so it honors `-L` (a raw tmux would hit the default
+            // server under `--server`) and is fold-safe for a TUI agent.
+            let _ = tmux.send_text(new, &cmd);
             eprintln!("Sent rename to {tool}");
         }
     }
@@ -586,16 +585,12 @@ fn cmd_broadcast(
 
     let mut errors = 0;
     for (sname, _) in &targets {
-        let target = Tmux::target(sname);
-        let status = std::process::Command::new("tmux")
-            .args(["send-keys", "-t", &target, cmd, "Enter"])
-            .status();
-        match status {
-            Ok(s) if s.success() => {}
-            _ => {
-                eprintln!("  send-keys failed: {sname}");
-                errors += 1;
-            }
+        // send_text (not a raw `tmux`) so it honors `-L` -- a raw tmux under
+        // `--server` would send to the DEFAULT server, i.e. a production session
+        // -- and is fold-safe (settle + separate Enter) for a TUI agent.
+        if tmux.send_text(sname, cmd).is_err() {
+            eprintln!("  send failed: {sname}");
+            errors += 1;
         }
     }
 
@@ -918,9 +913,10 @@ pub(crate) fn write_atomic(path: &std::path::Path, content: &str) -> Result<()> 
         return Err(anyhow::Error::new(e).context(format!("writing {}", tmp.display())));
     }
     drop(f);
-    // Preserve the target's permissions: `create_new` made the temp `0600 & umask`,
-    // so without this a `chmod 600` fragment/state.json would come back `0644` after
-    // the rename. Best-effort -- a mode we can't read or set is non-fatal.
+    // Preserve the target's permissions: the temp was created with the default
+    // `0666 & umask` (typically 0644), so without this a `chmod 600` fragment /
+    // state.json would come back 0644 after the rename. Best-effort -- a mode we
+    // can't read or set is non-fatal.
     #[cfg(unix)]
     if let Ok(meta) = std::fs::metadata(path) {
         use std::os::unix::fs::PermissionsExt;

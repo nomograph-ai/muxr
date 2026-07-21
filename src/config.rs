@@ -503,17 +503,23 @@ fn merge_tool_with_builtin(user: Tool, builtin: Tool) -> Tool {
     }
 }
 
-/// Reserved command names that cannot be used as repo names.
+/// Reserved command names that cannot be used as repo (or tool) names -- a
+/// name here is shadowed by the built-in `muxr <name>` subcommand and would
+/// never open. Keep this in EXACT sync with the clap `Commands` enum and its
+/// `visible_alias`es in main.rs (`config` + `migrate` are the ones prior lists
+/// missed; `migrate` is `upgrade`'s alias; there is no `new` subcommand -- the
+/// fresh-open is the `--new` flag, not a subcommand).
 const RESERVED_NAMES: &[&str] = &[
     "init",
     "ls",
     "save",
     "restore",
-    "new",
+    "config",
     "rename",
     "kill",
     "switch",
     "upgrade",
+    "migrate",
     "retire",
     "broadcast",
     "skill",
@@ -2047,6 +2053,13 @@ session_discovery = { type = "none" }
         assert!(RESERVED_NAMES.contains(&"retire"));
         assert!(RESERVED_NAMES.contains(&"broadcast"));
         assert!(!RESERVED_NAMES.contains(&"claude"));
+        // `config` and `migrate` (upgrade's visible_alias) are real subcommands
+        // that shadow a repo/tool of that name -- must be reserved.
+        assert!(RESERVED_NAMES.contains(&"config"));
+        assert!(RESERVED_NAMES.contains(&"migrate"));
+        // `new` is the fresh-open FLAG (--new), not a subcommand -- must NOT be
+        // reserved (else a repo literally named `new` would be falsely rejected).
+        assert!(!RESERVED_NAMES.contains(&"new"));
     }
 
     #[test]
