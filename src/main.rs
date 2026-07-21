@@ -265,6 +265,18 @@ fn main() -> Result<()> {
         Some(Commands::Init) => init::init(),
         Some(Commands::Ls { active }) => cmd_ls(&tmux, active),
         Some(Commands::Save) => {
+            // Refuse to save when no tmux server is running: `list_sessions`
+            // reports an empty list for a dead server, so an accidental `save`
+            // (e.g. post-reboot, before `restore`) would atomically overwrite
+            // state.json with zero sessions and lose every resume id. `retire`'s
+            // internal state refresh calls `SavedState::save` directly and is
+            // unaffected -- its server is live (it just killed sessions on it).
+            if !tmux.server_running() {
+                anyhow::bail!(
+                    "no tmux server running -- nothing to save (refusing to overwrite the saved \
+                     state with an empty one). Did you mean `muxr restore`?"
+                );
+            }
             let config = Config::load()?;
             state::SavedState::save(&config, &tmux)
         }
@@ -605,10 +617,15 @@ fn cmd_retire(tmux: &Tmux, name: &str) -> Result<()> {
             if let Some(harness) = cfg.tool_for(&tool)
                 && state::has_harness_process(tmux, sname, &harness.bin)
             {
-                let target = Tmux::target(sname);
-                let _ = std::process::Command::new("tmux")
-                    .args(["send-keys", "-t", &target, "/exit", "Enter"])
-                    .status();
+                // Graceful exit via the fold-safe `send_text` (settle + separate
+                // Enter, and it honors `-L` -- a raw `tmux` would hit the default
+                // server under `--server`, i.e. a production session). Use the
+                // tool's own exit command (Pi's `/quit`), not a hardcoded `/exit`.
+                let exit_cmd = harness
+                    .exit_command
+                    .clone()
+                    .unwrap_or_else(|| "/exit".to_string());
+                let _ = tmux.send_text(sname, &exit_cmd);
 
                 // Wait briefly for the harness process to exit before we kill
                 // the tmux session out from under it. Claude persists state
@@ -901,6 +918,15 @@ pub(crate) fn write_atomic(path: &std::path::Path, content: &str) -> Result<()> 
         return Err(anyhow::Error::new(e).context(format!("writing {}", tmp.display())));
     }
     drop(f);
+    // Preserve the target's permissions: `create_new` made the temp `0600 & umask`,
+    // so without this a `chmod 600` fragment/state.json would come back `0644` after
+    // the rename. Best-effort -- a mode we can't read or set is non-fatal.
+    #[cfg(unix)]
+    if let Ok(meta) = std::fs::metadata(path) {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = meta.permissions().mode();
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode));
+    }
     if let Err(e) = std::fs::rename(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);
         return Err(anyhow::Error::new(e).context(format!("replacing {}", path.display())));
@@ -942,6 +968,17 @@ fn cmd_config_migrate(write: bool) -> Result<()> {
         return Ok(());
     }
     if write {
+        // Never write a migration that produced invalid TOML. The migrator is
+        // line-oriented and can, in pathological multi-line-string shapes, break
+        // structure; parse-validate first so a bad rewrite fails loud instead of
+        // landing a corrupt fragment. (Dry-run -- the default -- always prints the
+        // exact per-line diff, so any surprising rewrite is visible before this.)
+        toml::from_str::<toml::Table>(&new_content).with_context(|| {
+            format!(
+                "migration of {where_} produced invalid TOML -- refusing to write \
+                 (re-run without --write to inspect the diff)"
+            )
+        })?;
         write_atomic(&fragment, &new_content)?;
         ui::ok(&format!("migrated {where_} ({} change(s))", changes.len()));
     } else {

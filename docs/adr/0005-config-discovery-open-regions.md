@@ -1,8 +1,15 @@
 # ADR 0005: Config discovery + open extension regions (config, not a rebuild)
 
-- Status: Accepted
+- Status: Accepted (discovery mechanism amended by [ADR 0012](0012-discovery-trusts-explicit-harness-allowlist.md))
 - Date: 2026-07-07
 - Implemented in: 3.6.0
+
+> **Amendment (v4.0.0, ADR 0012):** the ambient `[discovery].roots` namespace
+> WALK described below is replaced by an explicit `[discovery].harnesses`
+> allowlist read directly (no directory walk). Trust is by explicit list, not by
+> location. The open extension regions (`ext`) and the fail-loud-on-present /
+> skip-on-absent posture in this ADR stand unchanged; only the discovery
+> mechanism changed. Read this ADR's discovery sections as historical.
 
 ## Context
 

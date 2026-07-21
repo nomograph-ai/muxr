@@ -307,11 +307,20 @@ pub(crate) fn cmd_recycle(tmux: &Tmux, name: Option<&str>) -> Result<()> {
     if !tmux.session_exists(&session) {
         anyhow::bail!("No live session named {session}.");
     }
+    // Pin EVERY pane op below (shell check, flush send, /exit, return-to-shell
+    // poll) to the tool pane's stable `%id`. The read guards read pane 0 while a
+    // bare send targets the ACTIVE pane; if the operator has focused a non-tool
+    // pane (a scratch shell, the viewer) those diverge -- the flush prompt could
+    // run in a shell and forge the sentinel, driving a kill of the live agent.
+    // One captured id keeps reads and writes on the same pane.
+    let pane = tmux
+        .tool_pane_id(&session)
+        .with_context(|| format!("recycle {session}: could not identify the tool pane"))?;
     // No live tool to flush? If the pane is at a shell the agent has exited/
     // crashed -- refuse rather than type the multi-line flush prompt into a shell
     // (it would run as commands, and a stray redirect could even forge the
     // sentinel, driving a kill+recreate of a session the operator thought intact).
-    if tool::session_at_shell(tmux, &session) {
+    if tool::pane_at_shell(tmux, &pane) {
         anyhow::bail!(
             "refusing to recycle {session}: its pane is at a shell, not a running tool \
              (the agent may have exited) -- reopen with `muxr {repo_name} {campaign}` instead."
@@ -323,7 +332,7 @@ pub(crate) fn cmd_recycle(tmux: &Tmux, name: Option<&str>) -> Result<()> {
     // is the pane's foreground process; a DETACHED self-recycle leaves the agent
     // foreground, so this does not fire on the normal `setsid muxr recycle` path.
     if tmux.current_session().as_deref() == Some(session.as_str())
-        && tmux.pane_current_command(&session).as_deref() == Some("muxr")
+        && tmux.pane_command_at(&pane).as_deref() == Some("muxr")
     {
         anyhow::bail!(
             "refusing to recycle {session}: this is the session running `muxr recycle` \
@@ -388,7 +397,7 @@ pub(crate) fn cmd_recycle(tmux: &Tmux, name: Option<&str>) -> Result<()> {
     ui::action(&format!(
         "recycle {session}: flushing (waiting for the agent's done-signal)"
     ));
-    tmux.send_text(&session, &flush_prompt)?;
+    tmux.send_text_target(&pane, &flush_prompt)?;
 
     // Wait for the agent's positive flush-done signal. Generous cap: a flush can
     // push several repos. If it never arrives, ABORT without touching the session
@@ -412,14 +421,27 @@ pub(crate) fn cmd_recycle(tmux: &Tmux, name: Option<&str>) -> Result<()> {
         .and_then(|t| t.exit_command.clone())
         .unwrap_or_else(|| "/exit".to_string());
     ui::action(&format!("recycle {session}: exiting"));
-    tmux.send_text(&session, &exit_cmd)?;
+    tmux.send_text_target(&pane, &exit_cmd)?;
     // Wait for the tool pane to return to its shell (the tool exited). This is
     // the pane-current-command signal, robust across platforms and the pi `nono`
     // wrapper -- not the fragile process-tree PID match of pre-4.0 (ADR 0008).
     // Generous cap: the `/exit` sent right after the flush queues until any
     // in-flight turn ends, so the return-to-shell can lag.
-    if !tool::wait_for_return_to_shell(tmux, &session, RECYCLE_EXIT_TIMEOUT_SECS) {
-        ui::note("recycle: tool did not return to a shell in time; reopening anyway");
+    //
+    // On timeout: ABORT, leaving the session RUNNING (never kill). The flush
+    // already completed (the agent wrote the sentinel), so nothing is lost by not
+    // reopening -- and killing a tool that received /exit but has not returned in
+    // 600s could sever an in-flight turn. This mirrors `upgrade`'s skip-not-kill
+    // shape. (Earlier this reopened-anyway; that was unsafe once we saw the
+    // sentinel could be forged from a shell -- now moot with pane pinning, but
+    // abort is still the correct posture: no clean exit, no destruction.)
+    if !tool::wait_for_return_to_shell_target(tmux, &pane, RECYCLE_EXIT_TIMEOUT_SECS) {
+        anyhow::bail!(
+            "recycle {session}: the tool did not return to a shell within \
+             {RECYCLE_EXIT_TIMEOUT_SECS}s of /exit -- session left running, NOT killed. The flush \
+             already completed (sentinel written), so nothing is lost; re-run recycle, or exit the \
+             tool and `muxr {repo_name} {campaign} --fresh` manually."
+        );
     }
 
     // Compose the relaunch BEFORE the destructive kill (issue #11 class). The

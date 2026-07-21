@@ -166,25 +166,34 @@ impl Tmux {
     ///      same-burst trailing Enter into the draft as a newline; a distinct,
     ///      later Enter submits cleanly.
     pub fn send_text(&self, name: &str, text: &str) -> Result<()> {
-        let target = Self::target(name);
+        self.send_text_target(&Self::target(name), text)
+    }
+
+    /// Like [`send_text`](Self::send_text) but to a pre-resolved tmux target
+    /// (typically a specific `%pane_id`). The `=name:` form resolves to the
+    /// session's ACTIVE pane, which need not be the tool pane; recycle pins its
+    /// flush and `/exit` sends to the tool pane's id so a focused non-tool pane
+    /// can never receive them (where a stray redirect could even forge the flush
+    /// sentinel and drive a kill of a session the operator thought intact).
+    pub(crate) fn send_text_target(&self, target: &str, text: &str) -> Result<()> {
         let body = self
             .command()
-            .args(["send-keys", "-t", &target, "-l", "--", text])
+            .args(["send-keys", "-t", target, "-l", "--", text])
             .status()
-            .context("Failed to send text to tmux session")?;
+            .context("Failed to send text to tmux target")?;
         if !body.success() {
-            anyhow::bail!("tmux send-keys (text) failed for {name}");
+            anyhow::bail!("tmux send-keys (text) failed for {target}");
         }
         // Let the TUI ingest the (possibly paste-buffered) input and close the
         // paste before we submit, so Enter is treated as submit, not newline.
         std::thread::sleep(std::time::Duration::from_millis(SEND_TEXT_SUBMIT_SETTLE_MS));
         let submit = self
             .command()
-            .args(["send-keys", "-t", &target, "Enter"])
+            .args(["send-keys", "-t", target, "Enter"])
             .status()
-            .context("Failed to submit text to tmux session")?;
+            .context("Failed to submit text to tmux target")?;
         if !submit.success() {
-            anyhow::bail!("tmux send-keys (submit) failed for {name}");
+            anyhow::bail!("tmux send-keys (submit) failed for {target}");
         }
         Ok(())
     }
@@ -239,6 +248,18 @@ impl Tmux {
             .collect();
 
         Ok(sessions)
+    }
+
+    /// True if a tmux server is running (it responds to `list-sessions`).
+    /// `list_sessions` maps BOTH "no server" and "server with zero sessions" to
+    /// an empty list, so `muxr save` guards on this to avoid clobbering the saved
+    /// state with an empty one after a reboot (before `restore`).
+    pub fn server_running(&self) -> bool {
+        self.command()
+            .args(["list-sessions"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
     }
 
     /// Session info with activity timestamp.
@@ -314,26 +335,46 @@ impl Tmux {
         Ok(pid)
     }
 
-    /// The foreground command in a session's tool pane (pane 0), e.g. `claude`,
-    /// `node`, `nono`, or a shell name (`zsh`/`bash`) once the tool has exited.
+    /// The foreground command of a tmux target, e.g. `claude`, `node`, `nono`, or
+    /// a shell name (`zsh`/`bash`) once the tool has exited. The target is a
+    /// `%pane_id` (returns that pane) or a session target (returns its first pane,
+    /// index 0 -- the tool pane).
     ///
-    /// muxr launches the tool via `send-keys` INTO a persistent shell, so the
-    /// tool exiting returns the pane to its shell rather than firing a
-    /// pane-exited event -- there is no pane-death signal to wait on. Polling
-    /// this for a return-to-shell is how recycle detects the tool is gone (ADR
-    /// 0008), and it is robust to the pi `nono` wrapper (we look for the shell
-    /// coming back, not for a specific tool name going away). `None` on tmux
-    /// error / no pane.
-    pub fn pane_current_command(&self, session: &str) -> Option<String> {
+    /// muxr launches the tool via `send-keys` INTO a persistent shell, so the tool
+    /// exiting returns the pane to its shell rather than firing a pane-exited event
+    /// -- there is no pane-death signal to wait on. Polling this for a
+    /// return-to-shell is how recycle detects the tool is gone (ADR 0008), robust
+    /// to the pi `nono` wrapper (we watch for the shell coming back, not a specific
+    /// tool name going away). Recycle passes a `%pane_id` so the poll reads the
+    /// SAME pane it sends `/exit` to (see [`send_text_target`](Self::send_text_target)).
+    /// `None` on tmux error / no pane.
+    pub(crate) fn pane_command_at(&self, target: &str) -> Option<String> {
         let output = self
             .command()
-            .args([
-                "list-panes",
-                "-t",
-                &Self::target(session),
-                "-F",
-                "#{pane_current_command}",
-            ])
+            .args(["list-panes", "-t", target, "-F", "#{pane_current_command}"])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .next()
+            .map(|l| l.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// The stable tmux pane id (`%N`) of a session's tool pane (index 0 -- muxr
+    /// always launches the tool there; the viewer is a later `-d` split, so focus
+    /// stays on pane 0). Recycle pins every pane op (shell check, flush send,
+    /// `/exit`, return-to-shell poll) to this id so a focused non-tool pane can
+    /// never diverge the read guards (which read pane 0) from the writes (which
+    /// otherwise target the ACTIVE pane via `=name:`). `None` on tmux error / no
+    /// pane.
+    pub fn tool_pane_id(&self, session: &str) -> Option<String> {
+        let output = self
+            .command()
+            .args(["list-panes", "-t", &Self::target(session), "-F", "#{pane_id}"])
             .output()
             .ok()?;
         if !output.status.success() {

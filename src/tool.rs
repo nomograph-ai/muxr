@@ -289,11 +289,14 @@ const SHELLS: &[&str] = &[
     "zsh", "bash", "sh", "fish", "dash", "ksh", "tcsh", "csh", "nu", "xonsh",
 ];
 
-/// True if the session's pane is sitting at a shell prompt (no tool running).
+/// True if a tmux pane target is sitting at a shell prompt (no tool running).
 /// Recycle uses this to refuse flushing into a bare shell (an exited/crashed
-/// agent), where the flush prompt would execute as shell commands.
-pub(crate) fn session_at_shell(tmux: &Tmux, session: &str) -> bool {
-    tmux.pane_current_command(session)
+/// agent), where the flush prompt would execute as shell commands. Takes a
+/// `%pane_id` so the check reads the SAME pane recycle sends to -- reading pane 0
+/// while sending to the active pane is how a focused non-tool pane could slip a
+/// forged sentinel past this guard.
+pub(crate) fn pane_at_shell(tmux: &Tmux, pane_target: &str) -> bool {
+    tmux.pane_command_at(pane_target)
         .is_some_and(|cmd| SHELLS.contains(&cmd.as_str()))
 }
 
@@ -308,9 +311,20 @@ pub(crate) fn session_at_shell(tmux: &Tmux, session: &str) -> bool {
 /// platforms + the pi `nono` wrapper): we watch for the shell coming BACK, not
 /// for a specific tool name going away.
 pub(crate) fn wait_for_return_to_shell(tmux: &Tmux, session: &str, timeout_secs: u64) -> bool {
+    wait_for_return_to_shell_target(tmux, &Tmux::target(session), timeout_secs)
+}
+
+/// Like [`wait_for_return_to_shell`] but polls a specific pane target (a
+/// `%pane_id`). Recycle uses this so the poll reads the SAME tool pane it sent
+/// `/exit` to, rather than pane 0 of whatever window happens to be active.
+pub(crate) fn wait_for_return_to_shell_target(
+    tmux: &Tmux,
+    pane_target: &str,
+    timeout_secs: u64,
+) -> bool {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     loop {
-        if let Some(cmd) = tmux.pane_current_command(session)
+        if let Some(cmd) = tmux.pane_command_at(pane_target)
             && SHELLS.contains(&cmd.as_str())
         {
             return true;

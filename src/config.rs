@@ -674,15 +674,34 @@ fn migrate_header_line(line: &str) -> Option<String> {
     let indent_len = line.len() - line.trim_start().len();
     let (indent, rest_full) = line.split_at(indent_len);
     let rest = rest_full.trim_end();
-    let (open, close, inner) = if let Some(i) =
-        rest.strip_prefix("[[").and_then(|s| s.strip_suffix("]]"))
-    {
-        ("[[", "]]", i)
-    } else if let Some(i) = rest.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
-        ("[", "]", i)
-    } else {
+    if !rest.starts_with('[') {
         return None;
+    }
+    let (open, close) = if rest.starts_with("[[") {
+        ("[[", "]]")
+    } else {
+        ("[", "]")
     };
+    // Find the matching close bracket, then require anything after it to be blank
+    // or a `# comment`. This migrates `[repos.x.companion] # note` (a trailing
+    // comment defeated the old suffix-strip -> false "already current") while a
+    // malformed `[a]b` line stays untouched.
+    let after_open = &rest[open.len()..];
+    let close_at = after_open.find(close)?;
+    let inner = &after_open[..close_at];
+    let tail = after_open[close_at + close.len()..].trim_start();
+    if !tail.is_empty() && !tail.starts_with('#') {
+        return None;
+    }
+    // Only rewrite a BARE-KEY table header. A quote anywhere in the bracket means
+    // a quoted dotted key (out of scope, documented) or data that merely LOOKS
+    // like a header -- e.g. an array element `["research.companion.notes"]` on its
+    // own line -- whose `companion`/`harnesses` segment must NOT be rewritten
+    // (valid-TOML-in, valid-TOML-out data corruption the parse-validate guard in
+    // `config migrate --write` cannot catch).
+    if inner.contains('"') || inner.contains('\'') {
+        return None;
+    }
     let mut changed = false;
     let new_segments: Vec<String> = inner
         .split('.')
@@ -700,7 +719,15 @@ fn migrate_header_line(line: &str) -> Option<String> {
     if !changed {
         return None;
     }
-    Some(format!("{indent}{open}{}{close}", new_segments.join(".")))
+    let comment = if tail.is_empty() {
+        String::new()
+    } else {
+        format!(" {tail}")
+    };
+    Some(format!(
+        "{indent}{open}{}{close}{comment}",
+        new_segments.join(".")
+    ))
 }
 
 /// One shipped adapter file: `extensions/adapters/<name>.toml` is a single
@@ -1027,21 +1054,24 @@ fn resolve_state_path(
 }
 
 /// Slug a `<repo>/<campaign>` session name into a flat, filesystem-safe token
-/// for the recycle sentinel filename: any char that is not ASCII-alphanumeric
-/// or a hyphen (the slash included) becomes a hyphen. Session parts are
-/// validated kebab-case, so for real names this only maps the slash -- e.g.
-/// `keaton/muxr-config` -> `keaton-muxr-config`.
+/// for the recycle sentinel filename. The `/` separator maps to `__` and every
+/// other non-`[A-Za-z0-9-]` char to `-`. Session parts are validated kebab-case
+/// (no `_`), so encoding the slash as `__` keeps distinct names distinct --
+/// `a/b-c` -> `a__b-c` vs `a-b/c` -> `a-b__c` -- where folding `/` into `-` (the
+/// old behavior) collided both onto `a-b-c` and made two recycles share one flag.
+/// E.g. `keaton/muxr-config` -> `keaton__muxr-config`.
 fn sentinel_slug(session: &str) -> String {
-    session
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect()
+    let mut out = String::with_capacity(session.len() + 2);
+    for c in session.chars() {
+        if c.is_ascii_alphanumeric() || c == '-' {
+            out.push(c);
+        } else if c == '/' {
+            out.push_str("__");
+        } else {
+            out.push('-');
+        }
+    }
+    out
 }
 
 fn default_connect() -> String {
@@ -1150,6 +1180,18 @@ impl Config {
                 anyhow::bail!("Name collision: '{name}' is defined as both a repo and a remote");
             }
         }
+        // A REPO name that matches a built-in command is silently shadowed by that
+        // subcommand (clap's named subcommands win over the `external_subcommand`
+        // open fallback), so `[repos.save]` would never open. Reject it -- this is
+        // the check the message always described but which only ran over tools.
+        for name in self.repos.keys() {
+            if RESERVED_NAMES.contains(&name.as_str()) {
+                anyhow::bail!(
+                    "Repo name '{name}' is reserved -- it would be shadowed by the built-in \
+                     `muxr {name}` command"
+                );
+            }
+        }
         for name in self.tools.keys() {
             if self.repos.contains_key(name) {
                 anyhow::bail!("Name collision: '{name}' is defined as both a tool and a repo");
@@ -1158,7 +1200,7 @@ impl Config {
                 anyhow::bail!("Name collision: '{name}' is defined as both a remote and a repo");
             }
             if RESERVED_NAMES.contains(&name.as_str()) {
-                anyhow::bail!("Repo name '{name}' is reserved (conflicts with built-in command)");
+                anyhow::bail!("Tool name '{name}' is reserved (conflicts with a built-in command)");
             }
         }
         Ok(())
@@ -2087,14 +2129,17 @@ session_discovery = { type = "none" }
 
     #[test]
     fn sentinel_slug_flattens_session_name() {
-        // The slash in a `<repo>/<campaign>` name maps to a hyphen so the
-        // sentinel is a single flat filename.
-        assert_eq!(sentinel_slug("keaton/muxr-config"), "keaton-muxr-config");
+        // The `/` separator encodes to `__` (not `-`) so the sentinel is a single
+        // flat filename that stays UNIQUE per session.
+        assert_eq!(sentinel_slug("keaton/muxr-config"), "keaton__muxr-config");
         // Multi-level slugs (defensive: real campaigns are kebab, no extra
-        // slashes) still flatten fully.
-        assert_eq!(sentinel_slug("work/in-place/fix"), "work-in-place-fix");
+        // slashes) encode every slash.
+        assert_eq!(sentinel_slug("work/in-place/fix"), "work__in-place__fix");
         // Already-flat names pass through unchanged.
         assert_eq!(sentinel_slug("muxr"), "muxr");
+        // The collision the encoding fixes: `a/b-c` and `a-b/c` must NOT slug to
+        // the same flag file (a plain `/`->`-` folded both onto `a-b-c`).
+        assert_ne!(sentinel_slug("a/b-c"), sentinel_slug("a-b/c"));
     }
 
     #[test]
@@ -3016,6 +3061,40 @@ prompt_mode = "string"
             out.contains("[viewer]") && !out.contains("companion"),
             "global companion renamed: {out}"
         );
+    }
+
+    #[test]
+    fn migrate_fragment_leaves_quoted_dotted_string_untouched() {
+        // A dotted string that LOOKS like a header when alone on a line -- e.g. an
+        // array element in an `ext` region -- must NOT have its `companion` segment
+        // rewritten (valid-TOML-in/out data corruption the parse-validate guard
+        // cannot catch). The bare-key guard skips any bracket-line carrying a quote.
+        let src = "[repos.work]\ndir = \"~/w\"\ncolor = \"#fff\"\n\n\
+                   [repos.work.ext]\nrelated = [\n  [\"research.companion.notes\"]\n]\n";
+        let (out, changes) = migrate_fragment(src);
+        assert!(
+            out.contains("research.companion.notes"),
+            "the quoted dotted string is preserved verbatim: {out}"
+        );
+        assert!(
+            changes.is_empty(),
+            "no rename inside a quoted dotted string: {changes:?}"
+        );
+    }
+
+    #[test]
+    fn migrate_fragment_migrates_header_with_trailing_comment() {
+        // A table header with a trailing comment must still migrate; the old
+        // suffix-strip required the line to END with `]` and so reported a false
+        // "already current".
+        let src = "[repos.work]\ndir = \"~/w\"\ncolor = \"#fff\"\n\n\
+                   [repos.work.companion] # the viewer pane\ncmd = \"v\"\n";
+        let (out, changes) = migrate_fragment(src);
+        assert!(
+            out.contains("[repos.work.viewer] # the viewer pane"),
+            "header migrated, trailing comment preserved: {out}"
+        );
+        assert!(!changes.is_empty(), "a change was recorded");
     }
 
     #[test]
