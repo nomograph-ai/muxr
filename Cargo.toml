@@ -42,7 +42,7 @@ anyhow = "1"
 dirs = "6"
 exec = "0.3"
 shellexpand = "3"
-ratatui = "0.29"
+ratatui = "0.30"
 crossterm = "0.29"
 sysinfo = { version = "0.32", default-features = false, features = ["system"] }
 
