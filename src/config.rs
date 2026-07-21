@@ -599,6 +599,10 @@ pub fn migrate_fragment(content: &str) -> (String, Vec<String>) {
     // `'''`), so a `[header]`-looking CONTENT line inside one is never rewritten
     // and a `schema_version = ...` inside one is not mistaken for the real key.
     let mut in_multiline = false;
+    // A real top-level `schema_version` precedes the first table header (TOML puts
+    // bare top-level keys before any `[table]`). Once past it, a `schema_version`
+    // line belongs to some table (e.g. `[repos.x.ext]`), not the document.
+    let mut past_top_level = false;
     let mut out: Vec<String> = Vec::new();
     for line in content.lines() {
         let starts_inside = in_multiline;
@@ -607,11 +611,13 @@ pub fn migrate_fragment(content: &str) -> (String, Vec<String>) {
             in_multiline = !in_multiline;
         }
         if !starts_inside {
-            if let Some(rest) = line.trim_start().strip_prefix("schema_version")
+            let is_header = line.trim_start().starts_with('[');
+            if !past_top_level
+                && let Some(rest) = line.trim_start().strip_prefix("schema_version")
                 && let Some(after_eq) = rest.trim_start().strip_prefix('=')
             {
-                // This line is not a header, so it falls through to the push below
-                // without a `continue` -- it lands at the current out.len().
+                // Not a header, so it falls through to the push below without a
+                // `continue` -- it lands at the current out.len().
                 let val: u32 = after_eq
                     .trim()
                     .split(|c: char| !c.is_ascii_digit())
@@ -619,6 +625,9 @@ pub fn migrate_fragment(content: &str) -> (String, Vec<String>) {
                     .and_then(|d| d.parse().ok())
                     .unwrap_or(0);
                 schema_line = Some((out.len(), val));
+            }
+            if is_header {
+                past_top_level = true; // subsequent schema_version lines are in a table
             }
             if let Some(new_line) = migrate_header_line(line) {
                 changes.push(format!("- {line}\n+ {new_line}"));
@@ -1226,10 +1235,21 @@ impl Config {
         }
 
         for dir in &harness_dirs {
-            // Absent dir -> the machine simply lacks this repo: skip (this is the
-            // cross-machine zero-drift story -- a listed repo not cloned here).
+            // Truly-absent path -> the machine simply lacks this repo: skip (the
+            // cross-machine zero-drift story). Distinguish that from a present-but-
+            // BROKEN entry: symlink_metadata succeeds for a dangling symlink (the
+            // link node exists) while exists() follows it and returns false, so a
+            // dangling-symlink harness fails loud rather than skipping silently
+            // (ADR 0006: present-but-broken).
+            if std::fs::symlink_metadata(dir).is_err() {
+                continue; // nothing at this path at all
+            }
             if !dir.exists() {
-                continue;
+                anyhow::bail!(
+                    "discovery: harness {} is a broken symlink (its target does not \
+                     exist) -- fix or remove the `[discovery].harnesses` entry",
+                    dir.display()
+                );
             }
             // Present but not a directory, or a directory with no fragment, is a
             // BROKEN list entry -- fail loud (ADR 0006: present-but-broken), rather
@@ -3025,6 +3045,38 @@ prompt_mode = "string"
             changes.iter().any(|c| c.contains("schema_version = 2")),
             "the schema upgrade is reported: {changes:?}"
         );
+    }
+
+    #[test]
+    fn migrate_fragment_ignores_nested_schema_version_key() {
+        // A `schema_version` key INSIDE a subtable is NOT the document schema:
+        // migrate must leave it untouched and still stamp a real top-level one
+        // (the companion rename fires the stamp).
+        let src = "[repos.work]\ndir = \"~/w\"\ncolor = \"#fff\"\n\n\
+                   [repos.work.ext]\nschema_version = 1\n\n\
+                   [repos.work.companion]\ncmd = \"v\"\n";
+        let (out, _) = migrate_fragment(src);
+        assert!(
+            out.contains("[repos.work.ext]\nschema_version = 1"),
+            "nested schema_version left untouched: {out}"
+        );
+        assert!(
+            out.starts_with("schema_version = 2\n"),
+            "a real top-level stamp is prepended, not the nested key rewritten: {out}"
+        );
+    }
+
+    #[test]
+    fn discovery_dangling_symlink_harness_fails_loud() {
+        // A listed harness that is a dangling symlink is present-but-broken (ADR
+        // 0006) -- fail loud, not the silent skip a truly-absent path gets.
+        let base = tempfile::tempdir().unwrap();
+        let link = base.path().join("link");
+        std::os::unix::fs::symlink(base.path().join("gone-target"), &link).unwrap();
+        let mut config = Config::parse("[repos]\n", "<test>").unwrap();
+        config.discovery.harnesses = vec![link.to_string_lossy().into_owned()];
+        let err = config.discover_and_merge().unwrap_err().to_string();
+        assert!(err.contains("broken symlink"), "got: {err}");
     }
 
     #[test]
