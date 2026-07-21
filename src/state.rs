@@ -176,6 +176,26 @@ impl SavedState {
                 let content = crate::primitives::read_text(&legacy)?;
                 let state: SavedState = serde_json::from_str(&content)
                     .with_context(|| format!("Failed to parse {}", legacy.display()))?;
+                // PERSIST the migration now: write the new path and rename the
+                // legacy file to a tombstone. A lazy read-only migration lets a
+                // v3-pinned straggler keep writing the old path behind v4's back
+                // (split-brain), and leaves a rollback reading stale sessions.
+                // Best-effort: a failure still returns the loaded state (the READ
+                // succeeded) -- it just isn't persisted this run.
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                match crate::write_atomic(&path, &content) {
+                    Ok(()) => {
+                        let tombstone = legacy.with_file_name("state.json.migrated-to-v4");
+                        let _ = std::fs::rename(&legacy, &tombstone);
+                    }
+                    Err(e) => eprintln!(
+                        "  warning: migrated state read from {} but could not write {}: {e}",
+                        legacy.display(),
+                        path.display()
+                    ),
+                }
                 return Ok(state);
             }
             return Ok(SavedState {
@@ -257,7 +277,11 @@ impl SavedState {
         }
 
         let json = serde_json::to_string_pretty(&state)?;
-        std::fs::write(&path, &json)
+        // Atomic (temp + rename): a crash/power-loss mid-write must not truncate
+        // state.json -- this is the command run right before a reboot, and a torn
+        // file fails restore AND every `muxr open` (session_id_for surfaces a
+        // corrupt state as Err).
+        crate::write_atomic(&path, &json)
             .with_context(|| format!("Failed to write state to {}", path.display()))?;
 
         eprintln!(
@@ -274,16 +298,21 @@ impl SavedState {
 
     /// Restore tmux sessions from the state file.
     pub fn restore(tmux: &Tmux, config: &Config) -> Result<()> {
-        let path = Config::state_path()?;
-        if !path.exists() {
+        // Bail only when there is NO state anywhere -- neither the current path nor
+        // the pre-4.0 legacy path. Otherwise go through load(), which applies (and
+        // now persists) the v3->v4 migration. restore is the post-reboot command
+        // migration exists for, so it must NOT read the new path directly and miss
+        // a legacy file -- that stranded every saved session on the v4 rollout.
+        let new_path = Config::state_path()?;
+        let has_legacy = Config::legacy_state_path().is_some_and(|p| p.exists());
+        if !new_path.exists() && !has_legacy {
             anyhow::bail!(
                 "No state file found at {}\nRun `muxr save` before rebooting.",
-                path.display()
+                new_path.display()
             );
         }
 
-        let content = crate::primitives::read_text(&path)?;
-        let state: SavedState = serde_json::from_str(&content)?;
+        let state = SavedState::load()?;
 
         let mut count = 0;
         for s in &state.sessions {
@@ -403,7 +432,7 @@ mod tests {
     fn pid_runs_bin_no_false_match_on_unrelated_bin() {
         // The match must be specific: a live process must NOT report as running
         // some other bin. Guards the false-positive direction (a wrong match
-        // feeds recycle's wait_for_exit, which SIGKILLs the matched pid).
+        // would mis-identify the tool process behind a session in upgrade's note).
         let mut child = std::process::Command::new("sleep")
             .arg("30")
             .spawn()

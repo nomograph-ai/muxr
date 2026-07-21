@@ -31,10 +31,11 @@ place. No separate RFC and ADR trees, no re-filing.
 | [0002](0002-readiness-gated-upgrade.md) | Readiness-gated upgrade | Superseded by [0008](0008-remove-readiness-inference-recycle-sentinel.md) |
 | [0003](0003-reclaim-interrupted-sessions.md) | Reclaim interrupted sessions via a Command probe | Superseded by [0008](0008-remove-readiness-inference-recycle-sentinel.md) |
 | [0004](0004-companion-pane.md) | Companion pane (auxiliary review/preview panes) | Accepted (renamed `viewer` in v4.0.0) |
-| [0005](0005-config-discovery-open-regions.md) | Config discovery + open extension regions | Accepted (implemented) |
+| [0005](0005-config-discovery-open-regions.md) | Config discovery + open extension regions | Accepted (discovery mechanism amended by [0012](0012-discovery-trusts-explicit-harness-allowlist.md); ext regions stand) |
 | [0006](0006-fail-loud-on-unparseable-session-files.md) | Fail loud on unparseable session files | Accepted (implemented) |
 | [0007](0007-interrupt-reclaim-in-core.md) | Interrupt-reclaim in the core File probe | Superseded by [0008](0008-remove-readiness-inference-recycle-sentinel.md) |
 | [0008](0008-remove-readiness-inference-recycle-sentinel.md) | Remove readiness inference; recycle via a positive sentinel handshake | Accepted (mechanism refined by [0010](0010-recycle-flush-muxr-owned.md)) |
 | [0009](0009-defer-campaign-worklog-rename.md) | Defer the campaign -> worklog vernacular rename | Accepted |
 | [0010](0010-recycle-flush-muxr-owned.md) | Recycle flush is muxr-owned (generic flush prompt + agent sentinel) | Accepted |
-| [0011](0011-fragments-carry-only-identity.md) | Discovered fragments carry only repos/remotes (no auto-exec config) | Accepted |
+| [0011](0011-fragments-carry-only-identity.md) | Discovered fragments carry only repos/remotes (no auto-exec config) | Superseded by [0012](0012-discovery-trusts-explicit-harness-allowlist.md) |
+| [0012](0012-discovery-trusts-explicit-harness-allowlist.md) | Discovery trusts an explicit harness allowlist, not ambient roots | Accepted |

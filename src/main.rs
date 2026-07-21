@@ -874,13 +874,37 @@ fn cmd_config() -> Result<()> {
 /// power loss mid-write can never leave a truncated fragment. The rename also
 /// replaces a symlink target with a real file rather than writing THROUGH the
 /// symlink to an arbitrary destination.
-fn write_atomic(path: &std::path::Path, content: &str) -> Result<()> {
+pub(crate) fn write_atomic(path: &std::path::Path, content: &str) -> Result<()> {
+    use std::io::Write;
+    // Unique temp name (pid + nanos): not a predictable, pre-creatable path, so a
+    // hostile repo cannot pre-seed `<file>.tmp` as a symlink to redirect the write
+    // (`config migrate` runs inside a repo dir an attacker may control).
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
     let mut tmp = path.as_os_str().to_os_string();
-    tmp.push(".tmp");
+    tmp.push(format!(".tmp.{}.{stamp}", std::process::id()));
     let tmp = std::path::PathBuf::from(tmp);
-    std::fs::write(&tmp, content).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("replacing {}", path.display()))?;
+    // create_new = O_CREAT|O_EXCL: refuses an existing path, so a pre-planted
+    // symlink at the temp name is rejected rather than written through.
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .with_context(|| format!("creating temp file {}", tmp.display()))?;
+    if let Err(e) = f
+        .write_all(content.as_bytes())
+        .and_then(|()| f.sync_all())
+    {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(anyhow::Error::new(e).context(format!("writing {}", tmp.display())));
+    }
+    drop(f);
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(anyhow::Error::new(e).context(format!("replacing {}", path.display())));
+    }
     Ok(())
 }
 

@@ -4,11 +4,16 @@
 //! All process management is local only (remote sessions do not participate).
 
 use anyhow::{Context, Result};
-use std::process::{Command, Stdio};
 
 use crate::config::{Config, Tool};
 use crate::state;
 use crate::tmux::Tmux;
+
+/// How long `upgrade` waits for a session's tool to exit (its pane returns to a
+/// shell) after `/exit` before giving up. On timeout the session is SKIPPED and
+/// left running -- never SIGKILLed (ADR 0008: no destructive fallback on an
+/// unconfirmed exit). Re-run `upgrade` when the session is idle.
+const UPGRADE_EXIT_TIMEOUT_SECS: u64 = 30;
 
 /// Upgrade flags grouped to stay under the 7-arg clippy limit.
 pub struct UpgradeOpts<'a> {
@@ -181,16 +186,30 @@ pub fn upgrade(
                 tool_def.bin
             );
         }
-        // Graceful-exit command (runtime-specific: Pi = /quit).
+        // Graceful-exit command (runtime-specific: Pi = /quit). Use send_text
+        // (settle + separate Enter), NOT send_keys: a same-burst Enter can fold
+        // into the agent composer and never submit -- the recycle #8 hang bug.
         let exit_cmd = tool_def.exit_command.as_deref().unwrap_or("/exit");
-        let target = Tmux::target(name);
-        tmux.send_keys(&target, exit_cmd);
-        // Wait for exit (up to 10s, then SIGKILL), then the shell prompt.
-        if let Some(pid) = harness_pid {
-            wait_for_exit(pid, 10);
+        if let Err(e) = tmux.send_text(name, exit_cmd) {
+            eprintln!("  {name}: could not send {exit_cmd}: {e}; skipped (left running)");
+            skipped += 1;
+            continue;
+        }
+        // Wait for the pane to return to its shell -- the tool exited (ADR 0008
+        // pane signal), NOT a pid + SIGKILL. If it does NOT return in time the
+        // tool is busy/unresponsive: SKIP loudly and leave it running rather than
+        // SIGKILL it mid-turn (data loss + a torn conversation on resume). The
+        // quiet-age column is a hint, not a guarantee the session is idle.
+        if !wait_for_return_to_shell(tmux, name, UPGRADE_EXIT_TIMEOUT_SECS) {
+            eprintln!(
+                "  {name}: still busy after {UPGRADE_EXIT_TIMEOUT_SECS}s; skipped (left running \
+                 -- re-run `muxr upgrade` when it is idle)"
+            );
+            skipped += 1;
+            continue;
         }
         wait_for_prompt(tmux, name, 5);
-        tmux.send_keys(&target, &p.cmd);
+        tmux.send_keys(&Tmux::target(name), &p.cmd);
         upgraded += 1;
     }
 
@@ -266,7 +285,9 @@ pub fn model_switch(
 }
 
 /// Interactive shells a pane returns to once its foreground tool exits.
-const SHELLS: &[&str] = &["zsh", "bash", "sh", "fish", "dash", "ksh"];
+const SHELLS: &[&str] = &[
+    "zsh", "bash", "sh", "fish", "dash", "ksh", "tcsh", "csh", "nu", "xonsh",
+];
 
 /// Poll the tool pane's foreground command until it is a known shell (the tool
 /// exited and control returned to the launch shell) or `timeout_secs` elapses.
@@ -278,6 +299,14 @@ const SHELLS: &[&str] = &["zsh", "bash", "sh", "fish", "dash", "ksh"];
 /// tool PID by process-tree pattern (the pre-4.0 approach, fragile across
 /// platforms + the pi `nono` wrapper): we watch for the shell coming BACK, not
 /// for a specific tool name going away.
+/// True if the session's pane is sitting at a shell prompt (no tool running).
+/// Recycle uses this to refuse flushing into a bare shell (an exited/crashed
+/// agent), where the flush prompt would execute as shell commands.
+pub(crate) fn session_at_shell(tmux: &Tmux, session: &str) -> bool {
+    tmux.pane_current_command(session)
+        .is_some_and(|cmd| SHELLS.contains(&cmd.as_str()))
+}
+
 pub(crate) fn wait_for_return_to_shell(tmux: &Tmux, session: &str, timeout_secs: u64) -> bool {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     loop {
@@ -312,30 +341,6 @@ pub(crate) fn wait_for_sentinel(path: &std::path::Path, timeout_secs: u64) -> bo
         }
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
-}
-
-/// Wait for a process to exit, escalating to SIGKILL after timeout.
-pub(crate) fn wait_for_exit(pid: u32, timeout_secs: u32) {
-    for _ in 0..timeout_secs.saturating_mul(10) {
-        // Check if still alive. Suppress stderr -- when pid is gone,
-        // `kill -0` prints "No such process" which is not an error condition
-        // for this polling check.
-        let alive = Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-
-        if !alive {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-
-    // Still alive after timeout -- SIGKILL
-    eprintln!("    process {pid} did not exit, sending SIGKILL");
-    let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
 }
 
 /// Wait for a shell prompt to appear in the pane.

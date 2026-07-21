@@ -1,6 +1,6 @@
 # ADR 0011: Discovered fragments carry only repos/remotes (no auto-exec config)
 
-- Status: Accepted
+- Status: Superseded by [ADR 0012](0012-discovery-trusts-explicit-harness-allowlist.md)
 - Date: 2026-07-20
 - Deciders: operator + P3-10 pre-tag security review
 - Supersedes: decision **[f]** in the v4 design brief (§9, 2026-07-17) -- "move

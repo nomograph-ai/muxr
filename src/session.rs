@@ -82,23 +82,25 @@ pub(crate) fn cmd_open(
 
     let session_name = format!("{repo_name}/{campaign}");
 
-    // A leftover recycle sentinel means the previous recycle of this session was
-    // interrupted before it could reopen (crash, sleep, a killed detached
-    // watcher). Log it once and clear it -- muxr never auto-resurrects from a
-    // sentinel (ADR 0008: an explicit recycle is required; a stale flag is a
-    // breadcrumb, not a trigger). Best-effort: a state-dir error here must not
-    // block opening the session.
+    if tmux.session_exists(&session_name) {
+        ui::action(&format!("attaching to {session_name}"));
+        tmux.attach(&session_name)?;
+        return Ok(());
+    }
+
+    // Only reached when CREATING (not attaching). A leftover recycle sentinel
+    // means the previous recycle of this session was interrupted before it could
+    // reopen (crash, sleep, a killed detached watcher). Log it once and clear it --
+    // muxr never auto-resurrects from a sentinel (ADR 0008: an explicit recycle is
+    // required; a stale flag is a breadcrumb, not a trigger). Clearing only on the
+    // create path avoids a concurrent `muxr open` (attach) racing a live recycle's
+    // wait and eating its just-written sentinel. Best-effort: a state-dir error
+    // here must not block opening the session.
     if Config::clear_recycle_sentinel(&session_name).unwrap_or(false) {
         ui::note(&format!(
             "cleared a leftover recycle sentinel for {session_name} \
              (a previous recycle was interrupted before it reopened)"
         ));
-    }
-
-    if tmux.session_exists(&session_name) {
-        ui::action(&format!("attaching to {session_name}"));
-        tmux.attach(&session_name)?;
-        return Ok(());
     }
 
     let tool = config.resolve_tool(repo_name, None);
@@ -305,6 +307,30 @@ pub(crate) fn cmd_recycle(tmux: &Tmux, name: Option<&str>) -> Result<()> {
     if !tmux.session_exists(&session) {
         anyhow::bail!("No live session named {session}.");
     }
+    // No live tool to flush? If the pane is at a shell the agent has exited/
+    // crashed -- refuse rather than type the multi-line flush prompt into a shell
+    // (it would run as commands, and a stray redirect could even forge the
+    // sentinel, driving a kill+recreate of a session the operator thought intact).
+    if tool::session_at_shell(tmux, &session) {
+        anyhow::bail!(
+            "refusing to recycle {session}: its pane is at a shell, not a running tool \
+             (the agent may have exited) -- reopen with `muxr {repo_name} {campaign}` instead."
+        );
+    }
+    // Self-recycle guard: running `muxr recycle` NON-detached inside the very
+    // session it targets deadlocks (muxr blocks the pane while waiting for a flush
+    // the now-blocked agent cannot produce). Trip narrowly -- same session AND muxr
+    // is the pane's foreground process; a DETACHED self-recycle leaves the agent
+    // foreground, so this does not fire on the normal `setsid muxr recycle` path.
+    if tmux.current_session().as_deref() == Some(session.as_str())
+        && tmux.pane_current_command(&session).as_deref() == Some("muxr")
+    {
+        anyhow::bail!(
+            "refusing to recycle {session}: this is the session running `muxr recycle` \
+             non-detached -- it would deadlock. Run it detached \
+             (`setsid muxr recycle {session}`) or from another pane."
+        );
+    }
     let repo_dir = config.resolve_dir(&repo_name)?;
     let log_md = config.layout.log_md_path(&repo_dir, &campaign);
     let campaign_md = config.layout.campaign_md_path(&repo_dir, &campaign);
@@ -346,9 +372,16 @@ pub(crate) fn cmd_recycle(tmux: &Tmux, name: Option<&str>) -> Result<()> {
     // runtime-agnostic -- no external skill required.
     let sentinel = Config::recycle_sentinel_path(&session)?;
     // Clear any stale sentinel from a prior interrupted recycle so we wait for a
-    // FRESH signal, and make the state dir so the agent's `echo done > {sentinel}`
-    // succeeds.
-    let _ = Config::clear_recycle_sentinel(&session);
+    // FRESH signal. If the clear FAILS and a leftover remains, abort: a stale
+    // sentinel would make wait_for_sentinel return instantly and drive /exit
+    // before any flush ran.
+    if let Err(e) = Config::clear_recycle_sentinel(&session) {
+        anyhow::bail!(
+            "recycle {session}: could not clear a stale sentinel ({}): {e} -- aborting to \
+             avoid a false flush-done signal",
+            sentinel.display()
+        );
+    }
     Config::ensure_state_dir()?;
     let flush_prompt =
         config.recycle_flush_prompt(&session, &repo_name, &campaign, &log_md, &sentinel);
